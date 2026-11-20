@@ -30,6 +30,8 @@
 
 - 2026-11-20T19:50Z [USER] Clarified that Kitty matters only as look-and-feel, not the emulator. The embedded terminal moves into the MVP (F6) and supersedes the 19:35Z post-MVP placement. Only SSH session tabs, no local shell. "Open in Kitty" stays as a secondary action. A theme module is added to the MVP (F7): light, dark and system modes, editable colors and a frosted glass effect. Polish moves to F8, Linux to F9.
 
+- 2026-11-20T20:00Z [USER] No bottom terminal panel. Each SSH session has two full-window views, Files (SFTP) and Terminal, with a toggle; supersedes the 19:50Z bottom panel. Proposed details [ASSUMPTION]: segmented control plus Cmd+1/Cmd+2, per-session remembered view, terminal started lazily in the current remote folder and kept alive when hidden, one terminal per session in the MVP.
+
 [DISCOVERIES]
 - 2026-11-20T17:01Z [TOOL] OpenSSH accepts a public-key IdentityFile for an agent-held private key. IdentitiesOnly limits offers. Check identities inherited from SSH config, desktop-session agent discovery and Windows' different Bitwarden integration. External clipboard/drop needs platform testing. AppKit file promises cover drag/drop and Windows documents virtual files. Neither establishes remote clipboard support across all file managers. Sources: man.openbsd.org/ssh_config, bitwarden.com/help/ssh-agent, Apple outline views and NSFilePromiseProvider, Microsoft Shell clipboard docs.
 - 2026-11-20T17:06Z [TOOL] System file associations vary by file type. VS Code CLI and Tauri opener were consulted. Upload-on-save requires observing local file updates, including atomic replacement and successive saves.

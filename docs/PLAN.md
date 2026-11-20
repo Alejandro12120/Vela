@@ -36,7 +36,11 @@ Prueba de arrastre: el usuario indicó el 2026-11-20 que se considera superada. 
 - Todas las conexiones pasan por el binario `ssh` del sistema. Así se respetan `~/.ssh/config`, `known_hosts`, ProxyJump y el agente sin reimplementarlos.
 - Hay una conexión maestra por servidor: `ssh -M -N` con `ControlPath` propio y `ControlPersist`. La contraseña o la aprobación del agente se piden una sola vez por sesión.
 - SFTP: `ssh -o ControlPath=… -s <destino> sftp` como proceso hijo. Su stdin y stdout se pasan a `openssh_sftp_client::Sftp::new(stdin, stdout, opciones)`, con el crate `openssh-sftp-client` 0.15.x en la última versión que tenga al menos dos semanas. No se usa el crate `openssh` porque hace falta controlar directamente las variables de askpass y las opciones.
-- Terminal integrada (MVP, F6): un panel inferior con una pestaña por sesión SSH, dentro de la ventana. No hay terminal local: solo sesiones con servidores. Ejecuta el mismo `ssh` en un PTY y lo dibuja con GPUI sobre `alacritty_terminal` 0.26 (Apache-2.0). Se adapta el código de las crates `terminal` y `terminal_view` de Zed (GPL-3.0-or-later). Esas crates dependen de partes internas de Zed, así que se copia y adapta el código en vez de usarlas como dependencia.
+- Terminal integrada (MVP, F6): cada sesión SSH tiene dos vistas a pantalla completa, **Archivos** (SFTP) y **Terminal**. Se alterna entre ellas con un control segmentado en la cabecera y con ⌘1 / ⌘2. No hay panel inferior ni terminal local: solo sesiones con servidores.
+- Cada sesión recuerda qué vista estaba abierta al cambiar de servidor en la barra lateral.
+- La terminal se arranca la primera vez que se abre su vista, en la carpeta remota que muestra el panel de archivos. Después sigue viva aunque se vuelva a Archivos, conservando el proceso y el historial.
+- Se dibuja solo mientras su vista está visible.
+- En el MVP hay una terminal por sesión. Ejecuta el mismo `ssh` en un PTY y lo dibuja con GPUI sobre `alacritty_terminal` 0.26 (Apache-2.0). Se adapta el código de las crates `terminal` y `terminal_view` de Zed (GPL-3.0-or-later). Esas crates dependen de partes internas de Zed, así que se copia y adapta el código en vez de usarlas como dependencia.
 - Lo que importa no es el emulador, sino que se parezca a la terminal del usuario:
   - fuente, tamaño, colores y cursor importados de `kitty.conf`, siguiendo sus `include`, como los archivos de tema de HyDE;
   - glifos de Nerd Font si la fuente está instalada;
@@ -119,7 +123,7 @@ crates/
    - antes de subir, compara la fecha y el tamaño remotos con los descargados. Si cambiaron, ofrece sobrescribir, guardar como copia o cancelar;
    - sube sobrescribiendo el archivo original, para conservar el inodo, los permisos y el propietario;
    - la barra de estado muestra el resultado de cada subida.
-8. Terminal SSH integrada sobre la sesión activa, en un panel inferior con pestañas. Incluye la acción secundaria «Abrir en Kitty».
+8. Vista Terminal de cada sesión, a pantalla completa, alternable con la vista Archivos (⌘1 / ⌘2). Incluye la acción secundaria «Abrir en Kitty».
 9. Reconexión manual si la sesión maestra cae. Las ediciones pendientes no se pierden.
 10. Temas: modo claro, oscuro o del sistema; colores editables; vidrio esmerilado configurable.
 
@@ -132,7 +136,7 @@ crates/
 - Terminal local con la shell del Mac.
 - Linux (F9).
 - Windows.
-- Varias pestañas de archivos por servidor. Las pestañas de terminal sí entran.
+- Varias vistas de archivos o varias terminales por sesión.
 - Sincronizar carpetas.
 - Los enlaces simbólicos se muestran con su destino. Las carpetas enlazadas se abren y no se editan como enlace.
 
@@ -148,7 +152,7 @@ Cada fase termina con compilación de release en el Mac, `cargo fmt --check`, `c
 | F3 Transferencias y operaciones | Cola, arrastre entre paneles, conflictos, crear carpeta, renombrar y borrar. | Subida y bajada recursivas de un árbol de prueba con nombres con espacios, `#` y acentos. El contenido coincide byte a byte. Cancelar deja el estado coherente. |
 | F4 Finder | Arrastre de entrada y de salida, ⌘C y ⌘V. Módulo `objc2` de pasteboard. | Prueba manual con trackpad en Finder: el nombre y los bytes coinciden en los cuatro gestos. |
 | F5 Edición remota | Copias de edición, `open` o editor, vigilancia, comprobación de conflicto y subida. | Con VS Code: guardar dos veces seguidas sube dos veces. Un cambio remoto hecho entretanto muestra el conflicto. Desconectar conserva la copia. |
-| F6 Terminal integrada | Panel inferior con pestañas por sesión. PTY con `ssh` sobre la sesión maestra. Dibujado, teclado, selección, copiar y pegar, IME, ratón y cambio de tamaño. Importación de `kitty.conf`. Historial limitado, unas 5.000 líneas como punto de partida. Acción «Abrir en Kitty». | `vim`, `htop` y `tmux` funcionan. Se pueden escribir acentos con IME. El cambio de tamaño se propaga al remoto. Fuente y colores iguales a Kitty en una captura lado a lado. |
+| F6 Terminal integrada | Vista Terminal a pantalla completa por sesión, alternable con Archivos. Arranca en la carpeta remota actual. PTY con `ssh` sobre la sesión maestra. Dibujado, teclado, selección, copiar y pegar, IME, ratón y cambio de tamaño. Importación de `kitty.conf`. Historial limitado, unas 5.000 líneas como punto de partida. Acción «Abrir en Kitty». | `vim`, `htop` y `tmux` funcionan. Se pueden escribir acentos con IME. El cambio de tamaño se propaga al remoto. Al alternar de vista, la terminal conserva el proceso y el historial, y sin actividad no consume CPU. Fuente y colores iguales a Kitty en una captura lado a lado. |
 | F7 Temas y vidrio | Modelo de temas, modos, editor, vidrio esmerilado y «Reducir transparencia». | Cambiar de tema o modo se aplica en vivo, sin reiniciar. Los temas de serie pasan el contraste de 4.5:1. Se mide la RAM con el desenfoque activado y desactivado. |
 | F8 Pulido y recorrido final | Reconexión, mensajes de error y revisión de accesibilidad con la skill `apple-design`. | Recorrido completo con Bitwarden real y una clave elegida, sin agotar intentos de autenticación. Mediciones finales frente a los presupuestos, con la terminal abierta. |
 | F9 Linux (post-MVP) | Backend Wayland y Dolphin: arrastre de salida soportado, pero portapapeles de archivos pendiente. | Lo mismo que F4, F6 y F7 en HyDE. |
@@ -176,5 +180,6 @@ Cada fase termina con compilación de release en el Mac, `cargo fmt --check`, `c
 5. La terminal integrada entra en el MVP (F6), en lugar de abrir Kitty. Solo hay sesiones SSH a servidores, sin terminal local. Sustituye a la decisión anterior de dejarla para después del MVP.
 6. Se acepta GPL-3.0 para vSCP. En F0 se fija `license = "GPL-3.0-or-later"` y se añade `LICENSE`. Esto permite adaptar la terminal de Zed. GPUI y `alacritty_terminal` son Apache-2.0, compatibles con GPLv3.
 7. Hay un módulo de temas en el MVP (F7): modo claro y oscuro, colores personalizables y efecto de vidrio esmerilado.
+8. La terminal no va en un panel inferior. Cada sesión SSH alterna entre dos vistas a pantalla completa, Archivos y Terminal. Sustituye al panel inferior con pestañas de la decisión 5.
 
 Las respuestas también están registradas en `.agent/CONTINUITY.md`.

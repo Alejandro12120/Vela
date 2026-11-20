@@ -28,7 +28,7 @@ Prueba de arrastre: el usuario indicó el 2026-11-20 que se considera superada. 
   - Recibir archivos arrastrados desde Finder o Dolphin (`FileDropEvent`, `ExternalPaths`).
   - Leer archivos del portapapeles (`ClipboardEntry::ExternalPaths`).
 - Lo que GPUI **no** resuelve: escribir archivos en el portapapeles. En macOS, `write` ignora `ExternalPaths`. Se añadirá un módulo pequeño con `objc2-app-kit` que escriba `NSURL` en `NSPasteboard`, igual que hace `probes/file-handoff/macos.swift`, que ya funcionó en Finder. En Linux quedará pendiente para la fase de Linux.
-- Si el MacBook no tiene Xcode completo, se activará la feature `runtime_shaders` para no depender del compilador Metal. Está por confirmar.
+- El usuario cree que el MacBook solo tiene las Command Line Tools de Xcode. En F0 se comprueba con `xcode-select -p` y `xcrun -f metal`. Sin Xcode completo, se activa la feature `runtime_shaders`, que compila los shaders Metal al arrancar en lugar de durante la compilación. El coste de arranque se medirá en F0 frente al objetivo de 1 s.
 - Sin `gpui-component` en el MVP. La 0.9.0 depende de `gpui-pre =0.3.11` y trae árbol y tabla, pero arrastra gráficas, resaltado, `lsp-types`, `ropey` y otras dependencias. Se implementarán solo los controles necesarios: fila de árbol, barra de ruta, botón, campo de texto, diálogo y barra de progreso. Se reconsiderará si el campo de texto resulta costoso, midiendo antes el binario y la RAM.
 
 ### Conexión: OpenSSH del sistema
@@ -119,7 +119,7 @@ Cada fase termina con compilación de release en el Mac, `cargo fmt --check`, `c
 
 | Fase | Contenido | Criterio de aceptación |
 | --- | --- | --- |
-| F0 Andamiaje | Workspace con dos crates. `rust-toolchain.toml` fijado después de comprobar la versión mínima de `gpui-pre`. Ventana GPUI vacía con el tema. | La ventana abre en macOS. Se registran la RAM de reposo, el tiempo hasta la ventana y el tamaño del binario. Sirve de referencia frente a los presupuestos (sección 6). |
+| F0 Andamiaje | Comprobar `cargo`, `rustc`, `xcode-select -p` y `xcrun -f metal` en el Mac. Workspace con dos crates. `rust-toolchain.toml` fijado después de comprobar la versión mínima de `gpui-pre`. Ventana GPUI vacía con el tema. | La ventana abre en macOS. Se registran la RAM de reposo, el tiempo hasta la ventana y el tamaño del binario. Sirve de referencia frente a los presupuestos (sección 6). |
 | F1 Núcleo SSH/SFTP | `vscp-core` con la conexión maestra, askpass, SFTP sobre `ssh -s`, listado, `stat`, lectura y escritura en streaming. Comprobación `ssh -G` de identidades. | Pruebas de integración contra un `sshd` de usuario: puerto alto, claves de host y de cliente generadas, `StrictHostKeyChecking`. En macOS se usa `/usr/sbin/sshd` sin root. En Linux se usa un contenedor `--rm`. Además, un caso con contraseña. |
 | F2 Paneles | Panel local y remoto con árbol virtualizado, navegación, columnas y selección. Barra lateral de servidores y `servers.toml`. | 10.000 filas con desplazamiento fluido. Expandir no bloquea la interfaz con latencia de red simulada. |
 | F3 Transferencias y operaciones | Cola, arrastre entre paneles, conflictos, crear carpeta, renombrar y borrar. | Subida y bajada recursivas de un árbol de prueba con nombres con espacios, `#` y acentos. El contenido coincide byte a byte. Cancelar deja el estado coherente. |

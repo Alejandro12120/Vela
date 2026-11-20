@@ -36,8 +36,14 @@ Prueba de arrastre: el usuario indicó el 2026-11-20 que se considera superada. 
 - Todas las conexiones pasan por el binario `ssh` del sistema. Así se respetan `~/.ssh/config`, `known_hosts`, ProxyJump y el agente sin reimplementarlos.
 - Hay una conexión maestra por servidor: `ssh -M -N` con `ControlPath` propio y `ControlPersist`. La contraseña o la aprobación del agente se piden una sola vez por sesión.
 - SFTP: `ssh -o ControlPath=… -s <destino> sftp` como proceso hijo. Su stdin y stdout se pasan a `openssh_sftp_client::Sftp::new(stdin, stdout, opciones)`, con el crate `openssh-sftp-client` 0.15.x en la última versión que tenga al menos dos semanas. No se usa el crate `openssh` porque hace falta controlar directamente las variables de askpass y las opciones.
-- Terminal externa (MVP): se abre Kitty con `ssh` y el mismo `ControlPath`, sin volver a autenticarse. Esta opción se mantiene cuando exista la terminal integrada.
-- Terminal integrada (F7, después del MVP): un panel inferior con pestañas dentro de la ventana. Ejecuta el mismo `ssh` en un PTY y lo dibuja con GPUI sobre `alacritty_terminal` 0.26, con licencia Apache-2.0. Como el usuario acepta GPL-3.0, se puede adaptar el código de las crates `terminal` y `terminal_view` de Zed, que son GPL-3.0-or-later. Esas crates dependen de partes internas de Zed, así que se copiará y adaptará el código en vez de usarlas como dependencia. Tomará la fuente, el tamaño y los colores de `kitty.conf`. Las funciones propias de Kitty no estarán: protocolo de imágenes, kittens y ligaduras.
+- Terminal integrada (MVP, F6): un panel inferior con una pestaña por sesión SSH, dentro de la ventana. No hay terminal local: solo sesiones con servidores. Ejecuta el mismo `ssh` en un PTY y lo dibuja con GPUI sobre `alacritty_terminal` 0.26 (Apache-2.0). Se adapta el código de las crates `terminal` y `terminal_view` de Zed (GPL-3.0-or-later). Esas crates dependen de partes internas de Zed, así que se copia y adapta el código en vez de usarlas como dependencia.
+- Lo que importa no es el emulador, sino que se parezca a la terminal del usuario:
+  - fuente, tamaño, colores y cursor importados de `kitty.conf`, siguiendo sus `include`, como los archivos de tema de HyDE;
+  - glifos de Nerd Font si la fuente está instalada;
+  - `TERM=xterm-256color` y `COLORTERM=truecolor`, para no depender de que el servidor tenga la terminfo `xterm-kitty`;
+  - ⌘C y ⌘V.
+- El prompt, los alias y el resto de la configuración de shell en una sesión SSH son los del servidor. No dependen del emulador.
+- Terminal externa: se mantiene como acción secundaria «Abrir en Kitty», con el mismo `ControlPath`.
 - `openssh-sftp-client` necesita tokio. Se ejecutará un runtime tokio `current_thread` en un único hilo de red. La interfaz se comunica con él mediante canales (`async-channel`). GPUI recibe los eventos en una tarea `cx.spawn`. Nada de red se ejecuta en el hilo de la interfaz.
 
 ### Opciones que vSCP impone por servidor
@@ -63,13 +69,27 @@ Prueba de arrastre: el usuario indicó el 2026-11-20 que se considera superada. 
 crates/
   vscp-core/   sin GPUI: configuración, procesos ssh, sesión SFTP, cola de transferencias,
                sesiones de edición, caché. Se prueba en Linux dentro de un contenedor.
-  vscp-app/    GPUI: ventana, paneles, diálogos, tema y glue de plataforma (macOS: pasteboard).
+  vscp-app/    GPUI: ventana, paneles, terminal, diálogos, temas y glue de plataforma (macOS: pasteboard).
 ```
 
 - **Configuración**: `servers.toml`, en `~/Library/Application Support/vSCP/` o `~/.config/vscp/`. Por servidor: nombre, host, puerto, usuario, modo de autenticación (`agent` o `password`), ruta de la clave pública, ruta remota inicial y favorito. También se guardan los ajustes de terminal (externa o integrada, comando de Kitty), editor y socket del agente.
 - **Modelo de árbol**: cada panel guarda un árbol de nodos con hijos cargados de forma perezosa. La interfaz recibe un `Vec` aplanado de filas visibles, con profundidad y estado expandido, y lo pinta con `uniform_list`. Las carpetas expandidas se recuerdan por servidor.
 - **Caché**: hay un directorio de sesión para descargas temporales de arrastre y portapapeles, y otro para copias de edición. Se acota por tamaño y se limpia al cerrar, salvo las copias con cambios sin subir.
-- **Tema**: los tokens de `.agent/skills/heyrico-ui/assets/tokens.css` se pasan a constantes Rust. Habrá modo claro y oscuro, fuente del sistema, base de 13 px y radios de 6 y 8 px.
+- **Temas** (F7):
+  - **Archivos**: `themes/*.toml` en el directorio de configuración. Incluye dos temas de serie, «Claro» y «Oscuro», derivados de `.agent/skills/heyrico-ui/assets/tokens.css`. Fuente del sistema, base de 13 px y radios de 6 y 8 px.
+  - **Modo**: Sistema, Claro u Oscuro. En modo Sistema sigue el aspecto de macOS con `observe_window_appearance`. Cada modo tiene asignado un tema.
+  - **Colores editables**: fondo, panel, barra lateral, texto principal y secundario, borde, selección, acento, estados (correcto, aviso, error) y paleta de la terminal (fondo, texto, cursor y 16 colores). La paleta de la terminal se puede importar de `kitty.conf`.
+  - **Editor** en Ajustes › Apariencia:
+    - muestra de cada color, campo hexadecimal y selector HSV sencillo;
+    - vista previa en vivo;
+    - duplicar, restablecer y exportar temas;
+    - aviso si un texto queda por debajo de 4.5:1 de contraste.
+  - **Vidrio esmerilado**:
+    - `WindowBackgroundAppearance::Blurred` de GPUI. En macOS coloca un `NSVisualEffectView` detrás de la ventana, con material `UnderWindowBackground` y modo `BehindWindow`.
+    - Ajustes: activar o desactivar, y opacidad por zona. La barra lateral y la cabecera son más translúcidas. Las listas de archivos y la terminal son más opacas para que el texto se lea bien.
+    - GPUI no expone el material ni la intensidad del desenfoque. Cambiarlos necesitaría código `objc2` propio, que queda fuera del MVP.
+    - Si macOS tiene activado «Reducir transparencia», la ventana se vuelve opaca.
+    - En Linux, GPUI usa el protocolo de desenfoque de KDE. En Hyprland (HyDE), el desenfoque lo hace el compositor según sus propias reglas. Se revisará en F9.
 
 ## 4. Alcance del MVP
 
@@ -99,8 +119,9 @@ crates/
    - antes de subir, compara la fecha y el tamaño remotos con los descargados. Si cambiaron, ofrece sobrescribir, guardar como copia o cancelar;
    - sube sobrescribiendo el archivo original, para conservar el inodo, los permisos y el propietario;
    - la barra de estado muestra el resultado de cada subida.
-8. Abrir una terminal SSH sobre la sesión activa en Kitty, con un comando configurable.
+8. Terminal SSH integrada sobre la sesión activa, en un panel inferior con pestañas. Incluye la acción secundaria «Abrir en Kitty».
 9. Reconexión manual si la sesión maestra cae. Las ediciones pendientes no se pierden.
+10. Temas: modo claro, oscuro o del sistema; colores editables; vidrio esmerilado configurable.
 
 ### No entra en el MVP
 
@@ -108,10 +129,10 @@ crates/
 - Reanudar transferencias interrumpidas.
 - Proveer el archivo arrastrado mediante promesas, sin descargarlo antes.
 - Guardar contraseñas en el llavero.
-- Terminal integrada en la ventana (F7).
-- Linux (F8).
+- Terminal local con la shell del Mac.
+- Linux (F9).
 - Windows.
-- Varias pestañas por servidor.
+- Varias pestañas de archivos por servidor. Las pestañas de terminal sí entran.
 - Sincronizar carpetas.
 - Los enlaces simbólicos se muestran con su destino. Las carpetas enlazadas se abren y no se editan como enlace.
 
@@ -127,9 +148,10 @@ Cada fase termina con compilación de release en el Mac, `cargo fmt --check`, `c
 | F3 Transferencias y operaciones | Cola, arrastre entre paneles, conflictos, crear carpeta, renombrar y borrar. | Subida y bajada recursivas de un árbol de prueba con nombres con espacios, `#` y acentos. El contenido coincide byte a byte. Cancelar deja el estado coherente. |
 | F4 Finder | Arrastre de entrada y de salida, ⌘C y ⌘V. Módulo `objc2` de pasteboard. | Prueba manual con trackpad en Finder: el nombre y los bytes coinciden en los cuatro gestos. |
 | F5 Edición remota | Copias de edición, `open` o editor, vigilancia, comprobación de conflicto y subida. | Con VS Code: guardar dos veces seguidas sube dos veces. Un cambio remoto hecho entretanto muestra el conflicto. Desconectar conserva la copia. |
-| F6 Terminal y pulido | Terminal externa, reconexión, mensajes de error, modo oscuro y revisión de accesibilidad con la skill `apple-design`. | Recorrido completo con Bitwarden real y una clave elegida, sin agotar intentos de autenticación. Mediciones finales. |
-| F7 Terminal integrada (post-MVP) | Panel inferior con pestañas por sesión. PTY con `ssh` sobre la sesión maestra. Dibujado, teclado, selección, copiar y pegar, IME, ratón y cambio de tamaño. Apariencia leída de `kitty.conf`. Historial limitado, unas 5.000 líneas como punto de partida. | `vim`, `htop` y `tmux` funcionan. Se pueden escribir acentos con IME. El cambio de tamaño se propaga al remoto. La RAM con una conexión y la terminal abierta queda por debajo de 180 MB. Se compara con Kitty. |
-| F8 Linux (post-MVP) | Backend Wayland y Dolphin: arrastre de salida soportado, pero portapapeles de archivos pendiente. | Lo mismo que F4 y F7 en HyDE. |
+| F6 Terminal integrada | Panel inferior con pestañas por sesión. PTY con `ssh` sobre la sesión maestra. Dibujado, teclado, selección, copiar y pegar, IME, ratón y cambio de tamaño. Importación de `kitty.conf`. Historial limitado, unas 5.000 líneas como punto de partida. Acción «Abrir en Kitty». | `vim`, `htop` y `tmux` funcionan. Se pueden escribir acentos con IME. El cambio de tamaño se propaga al remoto. Fuente y colores iguales a Kitty en una captura lado a lado. |
+| F7 Temas y vidrio | Modelo de temas, modos, editor, vidrio esmerilado y «Reducir transparencia». | Cambiar de tema o modo se aplica en vivo, sin reiniciar. Los temas de serie pasan el contraste de 4.5:1. Se mide la RAM con el desenfoque activado y desactivado. |
+| F8 Pulido y recorrido final | Reconexión, mensajes de error y revisión de accesibilidad con la skill `apple-design`. | Recorrido completo con Bitwarden real y una clave elegida, sin agotar intentos de autenticación. Mediciones finales frente a los presupuestos, con la terminal abierta. |
+| F9 Linux (post-MVP) | Backend Wayland y Dolphin: arrastre de salida soportado, pero portapapeles de archivos pendiente. | Lo mismo que F4, F6 y F7 en HyDE. |
 
 ## 6. Presupuestos y medición
 
@@ -147,11 +169,12 @@ Cada fase termina con compilación de release en el Mac, `cargo fmt --check`, `c
 
 ## 8. Decisiones del usuario (2026-11-20)
 
-1. Terminal en macOS: Kitty. Comando por defecto: `kitty ssh <opciones de vSCP> <destino>`, lanzado con `open -na kitty --args …`. Se puede configurar.
+1. Terminal en macOS: Kitty. Lo que se busca es que la terminal integrada se parezca a Kitty, no usar ese emulador. «Abrir en Kitty» se conserva como acción secundaria y se lanza con `open -na kitty --args ssh …`.
 2. Los servidores se guardan solo en `servers.toml` de vSCP. No se importan los `Host` de `~/.ssh/config`. Ese archivo se sigue leyendo porque `ssh` lo carga, y la comprobación con `ssh -G` sigue siendo necesaria.
 3. Se acepta en el MVP que el arrastre de un archivo remoto grande a Finder requiera haberlo descargado antes.
-4. Linux queda para después del MVP en macOS (F8).
-5. Para el MVP basta con abrir la terminal en Kitty. La terminal integrada va en la fase siguiente (F7) y la opción de Kitty se conserva.
+4. Linux queda para después del MVP en macOS (F9).
+5. La terminal integrada entra en el MVP (F6), en lugar de abrir Kitty. Solo hay sesiones SSH a servidores, sin terminal local. Sustituye a la decisión anterior de dejarla para después del MVP.
 6. Se acepta GPL-3.0 para vSCP. En F0 se fija `license = "GPL-3.0-or-later"` y se añade `LICENSE`. Esto permite adaptar la terminal de Zed. GPUI y `alacritty_terminal` son Apache-2.0, compatibles con GPLv3.
+7. Hay un módulo de temas en el MVP (F7): modo claro y oscuro, colores personalizables y efecto de vidrio esmerilado.
 
 Las respuestas también están registradas en `.agent/CONTINUITY.md`.

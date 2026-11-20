@@ -26,6 +26,8 @@
 
 - 2026-11-20T19:20Z [USER] User recalls having only the Xcode Command Line Tools on the MacBook Air (to be verified in F0). Plan: enable gpui runtime_shaders unless xcrun -f metal succeeds, and measure the added startup cost.
 
+- 2026-11-20T19:35Z [USER] Wants an in-app terminal instead of a new Kitty window. Kitty for the MVP, embedded terminal as post-MVP phase F7 (Linux moves to F8), Kitty option kept. GPL-3.0 is acceptable, so Zed's GPL-3.0-or-later terminal/terminal_view code may be adapted over alacritty_terminal 0.26 (Apache-2.0). Reading "si" to Q1 as "Kitty is enough for the MVP" is an [ASSUMPTION].
+
 [DISCOVERIES]
 - 2026-11-20T17:01Z [TOOL] OpenSSH accepts a public-key IdentityFile for an agent-held private key. IdentitiesOnly limits offers. Check identities inherited from SSH config, desktop-session agent discovery and Windows' different Bitwarden integration. External clipboard/drop needs platform testing. AppKit file promises cover drag/drop and Windows documents virtual files. Neither establishes remote clipboard support across all file managers. Sources: man.openbsd.org/ssh_config, bitwarden.com/help/ssh-agent, Apple outline views and NSFilePromiseProvider, Microsoft Shell clipboard docs.
 - 2026-11-20T17:06Z [TOOL] System file associations vary by file type. VS Code CLI and Tauri opener were consulted. Upload-on-save requires observing local file updates, including atomic replacement and successive saves.

@@ -36,7 +36,8 @@ Prueba de arrastre: el usuario indicó el 2026-11-20 que se considera superada. 
 - Todas las conexiones pasan por el binario `ssh` del sistema. Así se respetan `~/.ssh/config`, `known_hosts`, ProxyJump y el agente sin reimplementarlos.
 - Hay una conexión maestra por servidor: `ssh -M -N` con `ControlPath` propio y `ControlPersist`. La contraseña o la aprobación del agente se piden una sola vez por sesión.
 - SFTP: `ssh -o ControlPath=… -s <destino> sftp` como proceso hijo. Su stdin y stdout se pasan a `openssh_sftp_client::Sftp::new(stdin, stdout, opciones)`, con el crate `openssh-sftp-client` 0.15.x en la última versión que tenga al menos dos semanas. No se usa el crate `openssh` porque hace falta controlar directamente las variables de askpass y las opciones.
-- Terminal: se abre la terminal configurada con `ssh` y el mismo `ControlPath`, sin volver a autenticarse.
+- Terminal externa (MVP): se abre Kitty con `ssh` y el mismo `ControlPath`, sin volver a autenticarse. Esta opción se mantiene cuando exista la terminal integrada.
+- Terminal integrada (F7, después del MVP): un panel inferior con pestañas dentro de la ventana. Ejecuta el mismo `ssh` en un PTY y lo dibuja con GPUI sobre `alacritty_terminal` 0.26, con licencia Apache-2.0. Como el usuario acepta GPL-3.0, se puede adaptar el código de las crates `terminal` y `terminal_view` de Zed, que son GPL-3.0-or-later. Esas crates dependen de partes internas de Zed, así que se copiará y adaptará el código en vez de usarlas como dependencia. Tomará la fuente, el tamaño y los colores de `kitty.conf`. Las funciones propias de Kitty no estarán: protocolo de imágenes, kittens y ligaduras.
 - `openssh-sftp-client` necesita tokio. Se ejecutará un runtime tokio `current_thread` en un único hilo de red. La interfaz se comunica con él mediante canales (`async-channel`). GPUI recibe los eventos en una tarea `cx.spawn`. Nada de red se ejecuta en el hilo de la interfaz.
 
 ### Opciones que vSCP impone por servidor
@@ -65,7 +66,7 @@ crates/
   vscp-app/    GPUI: ventana, paneles, diálogos, tema y glue de plataforma (macOS: pasteboard).
 ```
 
-- **Configuración**: `servers.toml`, en `~/Library/Application Support/vSCP/` o `~/.config/vscp/`. Por servidor: nombre, host, puerto, usuario, modo de autenticación (`agent` o `password`), ruta de la clave pública, ruta remota inicial y favorito. También se guardan los ajustes de terminal, editor y socket del agente.
+- **Configuración**: `servers.toml`, en `~/Library/Application Support/vSCP/` o `~/.config/vscp/`. Por servidor: nombre, host, puerto, usuario, modo de autenticación (`agent` o `password`), ruta de la clave pública, ruta remota inicial y favorito. También se guardan los ajustes de terminal (externa o integrada, comando de Kitty), editor y socket del agente.
 - **Modelo de árbol**: cada panel guarda un árbol de nodos con hijos cargados de forma perezosa. La interfaz recibe un `Vec` aplanado de filas visibles, con profundidad y estado expandido, y lo pinta con `uniform_list`. Las carpetas expandidas se recuerdan por servidor.
 - **Caché**: hay un directorio de sesión para descargas temporales de arrastre y portapapeles, y otro para copias de edición. Se acota por tamaño y se limpia al cerrar, salvo las copias con cambios sin subir.
 - **Tema**: los tokens de `.agent/skills/heyrico-ui/assets/tokens.css` se pasan a constantes Rust. Habrá modo claro y oscuro, fuente del sistema, base de 13 px y radios de 6 y 8 px.
@@ -98,7 +99,7 @@ crates/
    - antes de subir, compara la fecha y el tamaño remotos con los descargados. Si cambiaron, ofrece sobrescribir, guardar como copia o cancelar;
    - sube sobrescribiendo el archivo original, para conservar el inodo, los permisos y el propietario;
    - la barra de estado muestra el resultado de cada subida.
-8. Abrir una terminal SSH sobre la sesión activa, con un comando configurable.
+8. Abrir una terminal SSH sobre la sesión activa en Kitty, con un comando configurable.
 9. Reconexión manual si la sesión maestra cae. Las ediciones pendientes no se pierden.
 
 ### No entra en el MVP
@@ -107,7 +108,8 @@ crates/
 - Reanudar transferencias interrumpidas.
 - Proveer el archivo arrastrado mediante promesas, sin descargarlo antes.
 - Guardar contraseñas en el llavero.
-- Linux.
+- Terminal integrada en la ventana (F7).
+- Linux (F8).
 - Windows.
 - Varias pestañas por servidor.
 - Sincronizar carpetas.
@@ -126,7 +128,8 @@ Cada fase termina con compilación de release en el Mac, `cargo fmt --check`, `c
 | F4 Finder | Arrastre de entrada y de salida, ⌘C y ⌘V. Módulo `objc2` de pasteboard. | Prueba manual con trackpad en Finder: el nombre y los bytes coinciden en los cuatro gestos. |
 | F5 Edición remota | Copias de edición, `open` o editor, vigilancia, comprobación de conflicto y subida. | Con VS Code: guardar dos veces seguidas sube dos veces. Un cambio remoto hecho entretanto muestra el conflicto. Desconectar conserva la copia. |
 | F6 Terminal y pulido | Terminal externa, reconexión, mensajes de error, modo oscuro y revisión de accesibilidad con la skill `apple-design`. | Recorrido completo con Bitwarden real y una clave elegida, sin agotar intentos de autenticación. Mediciones finales. |
-| F7 Linux (post-MVP) | Backend Wayland y Dolphin: arrastre de salida soportado, pero portapapeles de archivos pendiente. | Lo mismo que F4 en HyDE. |
+| F7 Terminal integrada (post-MVP) | Panel inferior con pestañas por sesión. PTY con `ssh` sobre la sesión maestra. Dibujado, teclado, selección, copiar y pegar, IME, ratón y cambio de tamaño. Apariencia leída de `kitty.conf`. Historial limitado, unas 5.000 líneas como punto de partida. | `vim`, `htop` y `tmux` funcionan. Se pueden escribir acentos con IME. El cambio de tamaño se propaga al remoto. La RAM con una conexión y la terminal abierta queda por debajo de 180 MB. Se compara con Kitty. |
+| F8 Linux (post-MVP) | Backend Wayland y Dolphin: arrastre de salida soportado, pero portapapeles de archivos pendiente. | Lo mismo que F4 y F7 en HyDE. |
 
 ## 6. Presupuestos y medición
 
@@ -147,6 +150,8 @@ Cada fase termina con compilación de release en el Mac, `cargo fmt --check`, `c
 1. Terminal en macOS: Kitty. Comando por defecto: `kitty ssh <opciones de vSCP> <destino>`, lanzado con `open -na kitty --args …`. Se puede configurar.
 2. Los servidores se guardan solo en `servers.toml` de vSCP. No se importan los `Host` de `~/.ssh/config`. Ese archivo se sigue leyendo porque `ssh` lo carga, y la comprobación con `ssh -G` sigue siendo necesaria.
 3. Se acepta en el MVP que el arrastre de un archivo remoto grande a Finder requiera haberlo descargado antes.
-4. Linux queda para después del MVP en macOS (F7).
+4. Linux queda para después del MVP en macOS (F8).
+5. Para el MVP basta con abrir la terminal en Kitty. La terminal integrada va en la fase siguiente (F7) y la opción de Kitty se conserva.
+6. Se acepta GPL-3.0 para vSCP. En F0 se fija `license = "GPL-3.0-or-later"` y se añade `LICENSE`. Esto permite adaptar la terminal de Zed. GPUI y `alacritty_terminal` son Apache-2.0, compatibles con GPLv3.
 
 Las respuestas también están registradas en `.agent/CONTINUITY.md`.

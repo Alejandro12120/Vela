@@ -1,0 +1,14 @@
+interface:
+  display_name: Heyrico UI
+  short_description: Interfaces compactas inspiradas en @_heyrico
+  default_prompt: Usa $heyrico-ui para construir esta interfaz con tipografía compacta,
+    superficies neutras y detalles cuidados.
+  icon_small: assets/icon.svg
+  icon_large: assets/icon.svg
+policy:
+  products:
+  - chatgpt
+  - codex
+  - api
+  - atlas
+  allow_implicit_invocation: true

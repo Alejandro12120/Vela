@@ -49,6 +49,7 @@ fn main() {
             if let Some(appearance) = dev::appearance() {
                 cx.set_window_appearance(Some(appearance));
             }
+            dev::trace_keystrokes(cx);
             pane::finder::initialize(cx);
             workspace::bind_keys(cx);
             pane::bind_keys(cx);

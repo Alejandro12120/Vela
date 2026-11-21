@@ -118,6 +118,35 @@ impl ConnectionSpec {
     }
 }
 
+impl ConnectionSpec {
+    /// Arguments for an interactive `ssh` that rides on the session's master
+    /// connection through the same `ControlPath` as the SFTP channel, so it
+    /// needs no new authentication. `remote_command` runs in a terminal.
+    pub fn terminal_command(&self, control_dir: &Path, remote_command: &str) -> Vec<OsString> {
+        self.argv(
+            control_dir,
+            &["-o", "ControlMaster=no", "-t"],
+            &[remote_command],
+        )
+    }
+}
+
+/// Wrap `value` in single quotes for a POSIX shell, writing each `'` as `'\''`.
+pub fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Remote command that runs `name` from `directory`, then leaves a login shell
+/// open. A file without an execute bit goes through `sh`.
+pub fn run_script_command(directory: &str, name: &str, executable: bool) -> String {
+    let runner = if executable { "" } else { "sh " };
+    format!(
+        "cd {} && {runner}{}; exec \"$SHELL\" -l",
+        shell_quote(directory),
+        shell_quote(&format!("./{name}")),
+    )
+}
+
 fn option_path(key: &str, path: &Path) -> OsString {
     let mut option = OsString::from(format!("{key}="));
     // ssh parses the value as an ssh_config field, even though argv is already split.
@@ -461,6 +490,50 @@ mod tests {
                 "--",
                 "tester@test.example",
             ]
+        );
+    }
+
+    #[test]
+    fn terminal_argv_reuses_the_master_connection() {
+        let spec = ConnectionSpec::new("host".into(), 2200, "user".into(), Auth::Password);
+        assert_eq!(
+            spec.terminal_command(Path::new("/tmp/vscp-1"), "cd '/srv' && './a.sh'"),
+            [
+                "-o",
+                "ControlMaster=no",
+                "-t",
+                "-o",
+                "PreferredAuthentications=password,keyboard-interactive",
+                "-o",
+                "PubkeyAuthentication=no",
+                "-o",
+                "ControlPath=/tmp/vscp-1/%C",
+                "-o",
+                "StrictHostKeyChecking=ask",
+                "-o",
+                "ServerAliveInterval=15",
+                "-o",
+                "ServerAliveCountMax=3",
+                "-p",
+                "2200",
+                "--",
+                "user@host",
+                "cd '/srv' && './a.sh'",
+            ]
+        );
+    }
+
+    #[test]
+    fn quotes_names_with_spaces_quotes_and_accents() {
+        assert_eq!(shell_quote("a b"), "'a b'");
+        assert_eq!(shell_quote("it's ñ"), "'it'\\''s ñ'");
+        assert_eq!(
+            run_script_command("/srv/mi carpeta", "it's ñ.sh", false),
+            "cd '/srv/mi carpeta' && sh './it'\\''s ñ.sh'; exec \"$SHELL\" -l"
+        );
+        assert_eq!(
+            run_script_command("/srv", "run", true),
+            "cd '/srv' && './run'; exec \"$SHELL\" -l"
         );
     }
 

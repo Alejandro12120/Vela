@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use gpui::{
-    AnyElement, Context, FocusHandle, FontWeight, Pixels, Point, Role, Window, anchored, deferred,
-    div, point, prelude::*, px,
+    AnyElement, Context, FocusHandle, FontWeight, MouseButton, Pixels, Point, Role, Window,
+    anchored, deferred, div, point, prelude::*, px,
 };
 
 use crate::{components::modal, pane::Pane, theme::Theme};
@@ -11,9 +11,18 @@ use crate::{components::modal, pane::Pane, theme::Theme};
 pub enum Action {
     NewFolder,
     Rename,
+    Run,
     Delete,
     Copy,
     Refresh,
+}
+
+/// Whether "Ejecutar" is offered for the selection.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum RunState {
+    Hidden,
+    Disabled,
+    Enabled,
 }
 
 pub struct Menu {
@@ -26,8 +35,12 @@ pub struct Menu {
 }
 
 impl Menu {
-    fn actions(&self, selected: usize) -> [(Action, &'static str, &'static str, bool); 5] {
-        [
+    fn actions(
+        &self,
+        selected: usize,
+        run: RunState,
+    ) -> Vec<(Action, &'static str, &'static str, bool)> {
+        let mut actions = vec![
             (Action::NewFolder, "Nueva carpeta", "⌘⇧N", true),
             (
                 Action::Rename,
@@ -35,6 +48,11 @@ impl Menu {
                 "↵",
                 self.on_row && selected == 1,
             ),
+        ];
+        if run != RunState::Hidden {
+            actions.push((Action::Run, "Ejecutar", "", run == RunState::Enabled));
+        }
+        actions.extend([
             (
                 Action::Delete,
                 "Eliminar…",
@@ -48,10 +66,19 @@ impl Menu {
                 self.on_row && selected > 0,
             ),
             (Action::Refresh, "Refrescar", "⌘R", true),
-        ]
+        ]);
+        actions
     }
 
-    pub fn render(&self, selected: usize, theme: Theme, cx: &Context<Pane>) -> AnyElement {
+    pub fn render(
+        &self,
+        selected: usize,
+        run: RunState,
+        theme: Theme,
+        cx: &Context<Pane>,
+    ) -> AnyElement {
+        let actions = self.actions(selected, run);
+        let last = actions.len() - 1;
         let panel = div()
             .id("file-menu")
             .role(Role::Menu)
@@ -94,7 +121,7 @@ impl Menu {
                 spread_radius: px(0.),
             }])
             .on_mouse_down_out(cx.listener(|pane, _, _, cx| pane.dismiss_menu(cx)))
-            .children(self.actions(selected).into_iter().enumerate().map(
+            .children(actions.into_iter().enumerate().map(
                 |(index, (action, label, key, enabled))| {
                     div()
                         .id(("file-menu-action", index))
@@ -102,7 +129,7 @@ impl Menu {
                         .tab_index(0)
                         .tab_stop(enabled)
                         .when(index == 0, |row| row.track_focus(&self.first))
-                        .when(index == 4, |row| row.track_focus(&self.last))
+                        .when(index == last, |row| row.track_focus(&self.last))
                         .h(px(28.))
                         .px_2()
                         .rounded(px(6.))
@@ -126,7 +153,9 @@ impl Menu {
                             row.cursor_pointer()
                                 .hover(move |s| s.bg(theme.hover))
                                 .focus(move |s| s.bg(theme.selection))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .on_click(cx.listener(move |pane, _, window, cx| {
+                                    cx.stop_propagation();
                                     pane.menu_action(action, window, cx)
                                 }))
                         })

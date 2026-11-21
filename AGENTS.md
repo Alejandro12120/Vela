@@ -41,7 +41,7 @@ Use an isolated configuration directory for development runs. The `dev` Cargo fe
 
 - `VSCP_CONFIG_DIR` sets the directory for `servers.toml` and the OpenSSH `known_hosts` file.
 - `VSCP_DEV_AUTOCONNECT` connects to the server with the given display name after loading the list.
-- `VSCP_DEV_LOG=1` prints connection results, listing durations, visible row counts, transfer events, native file-drag payload decisions and remote-edit watcher, debounce and upload decisions to stderr.
+- `VSCP_DEV_LOG=1` prints connection results, listing durations, visible row counts, transfer events, native file-drag payload decisions and remote-edit watcher, debounce and upload decisions to stderr. It also prints a `[keys]` line for each keystroke with its resolved action (or `none`) and the key context stack, to diagnose key routing.
 - `VSCP_DEV_THEME=light|dark` overrides the application theme without changing system appearance.
 - `VSCP_DEV_LOCAL_ROOT=<absolute path>` overrides the local pane's starting folder.
 - `VSCP_DEV_REMOTE_DELAY_MS=<milliseconds>` delays each remote listing asynchronously.

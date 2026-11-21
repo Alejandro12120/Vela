@@ -51,7 +51,7 @@ pub fn bind_keys(cx: &mut gpui::App) {
         KeyBinding::new("tab", Next, Some("Workspace")),
         KeyBinding::new("shift-tab", Previous, Some("Workspace")),
         KeyBinding::new("escape", DismissMenu, Some("Workspace")),
-        KeyBinding::new("ctrl-cmd-s", ToggleSidebar, Some("Workspace")),
+        KeyBinding::new("cmd-s", ToggleSidebar, Some("Workspace")),
         KeyBinding::new("tab", modal::Next, Some("Dialog")),
         KeyBinding::new("shift-tab", modal::Previous, Some("Dialog")),
         KeyBinding::new("enter", modal::Confirm, Some("Dialog")),
@@ -380,6 +380,26 @@ impl Workspace {
             window,
             move |this, _, event: &crate::pane::EditFile, window, cx| {
                 this.open_edit(Target::new(&edit_server, event.0.clone()), window, cx);
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            panes.local(),
+            window,
+            move |this, pane, event: &crate::pane::OpenLocalFile, window, cx| {
+                let path = event.0.clone();
+                let editor = this.settings.editor.clone();
+                let pane = pane.downgrade();
+                let open = cx
+                    .background_executor()
+                    .spawn(async move { dev::open_file(&path, editor.as_deref()) });
+                cx.spawn_in(window, async move |_, cx| {
+                    if let Err(error) = open.await {
+                        let _ =
+                            pane.update(cx, |pane, cx| pane.report_error(error.to_string(), cx));
+                    }
+                })
+                .detach();
             },
         )
         .detach();

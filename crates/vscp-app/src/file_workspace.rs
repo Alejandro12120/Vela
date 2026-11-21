@@ -137,6 +137,10 @@ impl Panes {
         }
     }
 
+    pub fn local(&self) -> &Entity<Pane> {
+        &self.local
+    }
+
     pub fn remote(&self) -> &Entity<Pane> {
         &self.remote
     }

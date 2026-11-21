@@ -187,10 +187,17 @@ impl TextInput {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.is_selecting = true;
+        // Double and triple clicks select a word or everything. They must not
+        // start a drag selection, which would collapse that range on move.
+        self.is_selecting = event.click_count < 2;
         window.request_virtual_keyboard();
 
-        if event.modifiers.shift {
+        if event.click_count >= 3 || (event.click_count == 2 && self.secure) {
+            self.set_selection(0..self.content.len(), window, cx);
+        } else if event.click_count == 2 {
+            let offset = self.index_for_mouse_position(event.position);
+            self.set_selection(word_range(&self.content, offset), window, cx);
+        } else if event.modifiers.shift {
             self.select_to(self.index_for_mouse_position(event.position), window, cx);
         } else {
             self.move_to(self.index_for_mouse_position(event.position), window, cx)
@@ -245,6 +252,13 @@ impl TextInput {
 
     fn move_to(&mut self, offset: usize, window: &Window, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
+        self.selection_reversed = false;
+        window.notify_text_selection_changed(&self.focus_handle);
+        cx.notify()
+    }
+
+    fn set_selection(&mut self, range: Range<usize>, window: &Window, cx: &mut Context<Self>) {
+        self.selected_range = range;
         self.selection_reversed = false;
         window.notify_text_selection_changed(&self.focus_handle);
         cx.notify()
@@ -771,6 +785,48 @@ impl Focusable for TextInput {
     }
 }
 
+#[derive(PartialEq)]
+enum CharClass {
+    Slash,
+    Space,
+    Word,
+}
+
+fn char_class(grapheme: &str) -> CharClass {
+    if grapheme == "/" {
+        CharClass::Slash
+    } else if grapheme.chars().all(char::is_whitespace) {
+        CharClass::Space
+    } else {
+        CharClass::Word
+    }
+}
+
+/// Byte range selected by a double click at `offset`. A word is a maximal run
+/// of graphemes that are neither `/` nor whitespace. A `/` is selected alone
+/// and a run of whitespace is selected whole. At the end of the text the last
+/// grapheme counts as the one under the cursor.
+fn word_range(text: &str, offset: usize) -> Range<usize> {
+    let graphemes: Vec<(usize, &str)> = text.grapheme_indices(true).collect();
+    let offset = offset.min(text.len());
+    let Some(at) = graphemes.iter().rposition(|(start, _)| *start <= offset) else {
+        return 0..0;
+    };
+    let class = char_class(graphemes[at].1);
+    if class == CharClass::Slash {
+        return graphemes[at].0..graphemes[at].0 + 1;
+    }
+    let mut first = at;
+    while first > 0 && char_class(graphemes[first - 1].1) == class {
+        first -= 1;
+    }
+    let mut last = at;
+    while last + 1 < graphemes.len() && char_class(graphemes[last + 1].1) == class {
+        last += 1;
+    }
+    graphemes[first].0..graphemes[last].0 + graphemes[last].1.len()
+}
+
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("backspace", Backspace, Some("TextInput")),
@@ -787,4 +843,52 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("end", End, Some("TextInput")),
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some("TextInput")),
     ]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::word_range;
+
+    #[test]
+    fn selects_the_path_segment_under_the_cursor() {
+        let path = "/home/user/a b";
+        assert_eq!(&path[word_range(path, 3)], "home");
+        assert_eq!(&path[word_range(path, 1)], "home");
+        assert_eq!(&path[word_range(path, 9)], "user");
+        assert_eq!(&path[word_range(path, 11)], "a");
+        assert_eq!(&path[word_range(path, 13)], "b");
+    }
+
+    #[test]
+    fn selects_a_single_slash() {
+        let path = "/home/user/a b";
+        assert_eq!(word_range(path, 0), 0..1);
+        assert_eq!(word_range(path, 5), 5..6);
+        assert_eq!(word_range(path, 10), 10..11);
+    }
+
+    #[test]
+    fn selects_a_whitespace_run_whole() {
+        assert_eq!(word_range("a  b", 1), 1..3);
+    }
+
+    #[test]
+    fn never_splits_a_grapheme() {
+        let path = "/srv/ñandú/x";
+        // Inside the two bytes of "ñ".
+        assert_eq!(&path[word_range(path, 6)], "ñandú");
+        assert_eq!(&path[word_range(path, 13)], "x");
+        let decomposed = "/n\u{303}a/x";
+        assert_eq!(&decomposed[word_range(decomposed, 2)], "n\u{303}a");
+    }
+
+    #[test]
+    fn handles_empty_text_and_end_offsets() {
+        assert_eq!(word_range("", 0), 0..0);
+        assert_eq!(word_range("", 5), 0..0);
+        let path = "/home/user/a b";
+        assert_eq!(&path[word_range(path, path.len())], "b");
+        assert_eq!(&path[word_range(path, path.len() + 10)], "b");
+        assert_eq!(word_range("/", 1), 0..1);
+    }
 }

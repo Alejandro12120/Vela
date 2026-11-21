@@ -199,6 +199,7 @@ Funciona: arrastrar entre paneles, de Finder a los paneles y de los paneles a Fi
     - Imágenes, PDF y demás binarios se abren con la aplicación predeterminada.
     - El menú contextual añade «Ejecutar». En un archivo remoto lo ejecuta en el servidor, en la vista Terminal de la F6, y en Kitty hasta que exista esa vista. En un archivo local lo abre con la aplicación predeterminada.
     - Motivo: con la aplicación predeterminada, un `.sh` se abría en Kitty en vez de editarse.
+    - «Ejecutar» remoto usa la conexión maestra de la sesión mediante `ControlPath`, así que Kitty no pide autenticarse de nuevo.
 12. **Iconos Lucide** (licencia ISC) en toda la interfaz: menús contextuales, menú ⋯ de servidor, modales de confirmación y barra de herramientas. Sustituyen a los iconos dibujados a mano de `pane_icons.rs`. Solo se incluyen los SVG que se usan.
 13. **⌘S alterna la barra lateral**, en lugar de ⌃⌘S. vSCP no tiene «Guardar» propio, porque los archivos se editan en una aplicación externa.
 14. **Barra de ruta**: doble clic selecciona el segmento entre barras y triple clic, la ruta entera, como en los campos de texto de macOS.

@@ -49,6 +49,22 @@ pub fn log(message: impl std::fmt::Display) {
     }
 }
 
+/// Prints each keystroke with its resolved action and key context stack when
+/// `VSCP_DEV_LOG=1`. The subscription lives as long as the application.
+pub fn trace_keystrokes(cx: &mut gpui::App) {
+    if !cfg!(feature = "dev") || !logging() {
+        return;
+    }
+    cx.observe_keystrokes(|event, _, _| {
+        let action = event.action.as_ref().map_or("none", |action| action.name());
+        eprintln!(
+            "[keys] {:?} action={action} contexts={:?}",
+            event.keystroke, event.context_stack
+        );
+    })
+    .detach();
+}
+
 pub fn remote_delay() -> std::time::Duration {
     value("VSCP_DEV_REMOTE_DELAY_MS")
         .and_then(|value| value.parse().ok())
@@ -153,19 +169,59 @@ pub fn edit_view() -> Option<String> {
     value("VSCP_DEV_EDIT_VIEW")
 }
 
+/// Opens `path` the way a double click should. Text goes to the editor chosen
+/// in Ajustes or, without one, to the default text editor (`open -t`). Anything
+/// else opens with its default application. The real path, with symbolic links
+/// resolved, decides whether the file is text.
 pub fn open_file(path: &std::path::Path, editor: Option<&std::path::Path>) -> io::Result<()> {
-    if value("VSCP_DEV_EDITOR").as_deref() == Some("none") {
+    if launches_suppressed() {
         return Ok(());
     }
+    let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
     let mut command = std::process::Command::new("/usr/bin/open");
-    if let Some(editor) = editor {
-        command.arg("-a").arg(editor);
+    if vscp_core::local::is_text(&real)? {
+        match editor {
+            Some(editor) => command.arg("-a").arg(editor),
+            None => command.arg("-t"),
+        };
     }
-    // Reap the child and check Launch Services' exit status on the caller's
-    // background executor.
-    if command.arg(path).status()?.success() {
+    run(command.arg(path), "No se pudo abrir el archivo")
+}
+
+/// Opens `path` with its default application, whatever its type.
+pub fn open_default(path: &std::path::Path) -> io::Result<()> {
+    if launches_suppressed() {
+        return Ok(());
+    }
+    run(
+        std::process::Command::new("/usr/bin/open").arg(path),
+        "No se pudo abrir el archivo",
+    )
+}
+
+/// Starts a new Kitty running `ssh` with `args`.
+pub fn open_kitty_ssh(args: &[std::ffi::OsString]) -> io::Result<()> {
+    if launches_suppressed() {
+        return Ok(());
+    }
+    run(
+        std::process::Command::new("/usr/bin/open")
+            .args(["-na", "kitty", "--args", "/usr/bin/ssh"])
+            .args(args),
+        "No se pudo abrir Kitty",
+    )
+}
+
+fn launches_suppressed() -> bool {
+    value("VSCP_DEV_EDITOR").as_deref() == Some("none")
+}
+
+// Reap the child and check Launch Services' exit status on the caller's
+// background executor.
+fn run(command: &mut std::process::Command, failure: &str) -> io::Result<()> {
+    if command.status()?.success() {
         Ok(())
     } else {
-        Err(io::Error::other("No se pudo abrir el archivo"))
+        Err(io::Error::other(failure.to_owned()))
     }
 }

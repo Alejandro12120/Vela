@@ -2,7 +2,7 @@
 
 use std::{
     fs::{self, FileType},
-    io,
+    io::{self, Read},
     os::unix::fs::MetadataExt,
     path::Path,
 };
@@ -34,6 +34,48 @@ pub fn stat(path: &Path) -> io::Result<Entry> {
     })
 }
 
+const TEXT_EXTENSIONS: &[&str] = &[
+    "sh", "bash", "zsh", "fish", "txt", "md", "markdown", "rst", "log", "csv", "tsv", "json",
+    "jsonc", "yaml", "yml", "toml", "ini", "cfg", "conf", "env", "xml", "html", "htm", "css",
+    "scss", "js", "mjs", "cjs", "ts", "tsx", "jsx", "py", "rb", "pl", "php", "go", "rs", "c", "h",
+    "cc", "cpp", "hpp", "java", "kt", "swift", "sql", "lua", "vim", "service", "socket", "timer",
+];
+
+const SNIFF_BYTES: usize = 8 * 1024;
+
+/// Whether a file is text that an editor should open. Known extensions answer
+/// without reading. Other files are text when their first 8 KiB hold no NUL
+/// byte and are valid UTF-8.
+pub fn is_text(path: &Path) -> io::Result<bool> {
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            TEXT_EXTENSIONS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(extension))
+        })
+    {
+        return Ok(true);
+    }
+    let mut buffer = Vec::with_capacity(SNIFF_BYTES);
+    fs::File::open(path)?
+        .take(SNIFF_BYTES as u64)
+        .read_to_end(&mut buffer)?;
+    Ok(looks_like_text(&buffer))
+}
+
+fn looks_like_text(bytes: &[u8]) -> bool {
+    if bytes.contains(&0) {
+        return false;
+    }
+    match std::str::from_utf8(bytes) {
+        Ok(_) => true,
+        // The sample may end inside a multi-byte sequence: up to 3 bytes.
+        Err(error) => error.error_len().is_none() && bytes.len() - error.valid_up_to() <= 3,
+    }
+}
+
 fn entry_kind(kind: FileType) -> EntryKind {
     if kind.is_dir() {
         EntryKind::Directory
@@ -50,6 +92,45 @@ fn entry_kind(kind: FileType) -> EntryKind {
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn known_extensions_are_text_without_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        // Not even created: a known extension is not read.
+        assert!(is_text(&dir.path().join("run.SH")).unwrap());
+        assert!(is_text(&dir.path().join("a.service")).unwrap());
+        assert!(is_text(&dir.path().join("notas.md")).unwrap());
+    }
+
+    #[test]
+    fn other_files_are_classified_by_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, bytes: &[u8]| {
+            let path = dir.path().join(name);
+            fs::write(&path, bytes).unwrap();
+            path
+        };
+        assert!(is_text(&write("Makefile", "all:\n\techo ñ\n".as_bytes())).unwrap());
+        assert!(is_text(&write("vacío", b"")).unwrap());
+        assert!(!is_text(&write("imagen.png", b"\x89PNG\r\n\x1a\n\0\0")).unwrap());
+        assert!(!is_text(&write("binario", b"abc\0def")).unwrap());
+        assert!(!is_text(&write("latin1", b"caf\xe9 au lait")).unwrap());
+        assert!(is_text(&write("sin-extension", "hola ñandú".as_bytes())).unwrap());
+        assert!(is_text(&dir.path().join("fantasma.txt")).unwrap());
+        assert!(is_text(&dir.path().join("inexistente")).is_err());
+    }
+
+    #[test]
+    fn a_cut_multibyte_sequence_at_the_sample_end_is_text() {
+        let mut bytes = vec![b'a'; SNIFF_BYTES - 1];
+        bytes.extend("ñ".as_bytes());
+        // Only the first byte of "ñ" fits in the sample.
+        assert!(looks_like_text(&bytes[..SNIFF_BYTES]));
+        // Four stray continuation-leading bytes are not a cut sequence.
+        assert!(!looks_like_text(&[b'a', 0xc3, 0xc3, 0xc3, 0xc3]));
+        let emoji = "😀".as_bytes();
+        assert!(looks_like_text(&emoji[..3]));
+    }
 
     #[test]
     fn lists_metadata_and_symbolic_links() {

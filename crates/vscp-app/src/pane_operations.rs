@@ -361,11 +361,87 @@ impl Pane {
         match action {
             Action::NewFolder => self.new_folder(folder, window, cx),
             Action::Rename => self.start_selected_rename(window, cx),
+            Action::Run => self.run_selected(window, cx),
             Action::Delete => self.delete_selected(cx),
             Action::Copy => self.copy_to_other(window, cx),
             Action::Refresh => self.refresh(window, cx),
         }
         cx.notify();
+    }
+
+    /// Shows `message` in the banner under the toolbar.
+    pub fn report_error(&mut self, message: String, cx: &mut Context<Self>) {
+        self.path_error = Some(message);
+        cx.notify();
+    }
+
+    /// The only selected row when it is a regular file.
+    fn selected_file(&self) -> Option<&tree::Row> {
+        let mut rows = self
+            .tree
+            .rows
+            .iter()
+            .filter(|row| self.tree.selected.contains(&row.path));
+        let row = rows.next()?;
+        if rows.next().is_some() {
+            return None;
+        }
+        row.entry()
+            .is_some_and(|entry| entry.kind == EntryKind::File)
+            .then_some(row)
+    }
+
+    /// A remote file runs when it has an execute bit or ends with `.sh`.
+    pub(super) fn run_state(&self) -> RunState {
+        let Some(row) = self.selected_file() else {
+            return RunState::Hidden;
+        };
+        match self.source {
+            Source::Local => RunState::Enabled,
+            Source::Remote(_) if remote_runnable(row) => RunState::Enabled,
+            Source::Remote(_) => RunState::Disabled,
+        }
+    }
+
+    fn run_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.run_state() != RunState::Enabled {
+            return;
+        }
+        let Some(row) = self.selected_file() else {
+            return;
+        };
+        let path = row.path.to_path_buf();
+        let executable = row
+            .entry()
+            .and_then(|entry| entry.mode)
+            .is_some_and(|mode| mode & 0o111 != 0);
+        let (failure, launch): (Option<&str>, Box<dyn FnOnce() -> io::Result<()> + Send>) =
+            match &self.source {
+                Source::Local => (None, Box::new(move || dev::open_default(&path))),
+                Source::Remote(session) => {
+                    let (Some(directory), Some(name)) = (
+                        path.parent().and_then(Path::to_str),
+                        path.file_name().and_then(std::ffi::OsStr::to_str),
+                    ) else {
+                        self.report_error("El nombre no se puede ejecutar como texto.".into(), cx);
+                        return;
+                    };
+                    let command = vscp_core::run_script_command(directory, name, executable);
+                    let args = session.terminal_command(&command);
+                    (
+                        Some("No se pudo abrir Kitty"),
+                        Box::new(move || dev::open_kitty_ssh(&args)),
+                    )
+                }
+            };
+        let task = cx.background_executor().spawn(async move { launch() });
+        cx.spawn_in(window, async move |pane, cx| {
+            if let Err(error) = task.await {
+                let message = failure.map_or_else(|| error.to_string(), str::to_owned);
+                let _ = pane.update_in(cx, |pane, _, cx| pane.report_error(message, cx));
+            }
+        })
+        .detach();
     }
 
     pub(super) fn start_selected_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -595,9 +671,29 @@ impl Pane {
     }
 }
 
+fn remote_runnable(row: &tree::Row) -> bool {
+    row.entry()
+        .is_some_and(|entry| runnable(entry.mode, entry.name.to_str().unwrap_or_default()))
+}
+
+/// A file runs on the server when it has any execute bit or ends with `.sh`.
+fn runnable(mode: Option<u32>, name: &str) -> bool {
+    mode.is_some_and(|mode| mode & 0o111 != 0) || name.ends_with(".sh")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runs_files_with_an_execute_bit_or_a_sh_name() {
+        assert!(runnable(Some(0o100755), "herramienta"));
+        assert!(runnable(Some(0o100010), "x"));
+        assert!(runnable(Some(0o100644), "deploy.sh"));
+        assert!(runnable(None, "deploy.sh"));
+        assert!(!runnable(Some(0o100644), "notas.txt"));
+        assert!(!runnable(None, "notas"));
+    }
 
     #[test]
     fn only_opposite_pane_on_same_server_is_a_drop_target() {

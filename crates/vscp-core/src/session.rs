@@ -118,8 +118,11 @@ impl Client {
             match connect(spec, app, requests, readiness_timeout, &stopping).await {
                 Ok((master, channel, process)) => {
                     let (send_command, commands) = async_channel::bounded(16);
+                    let terminal =
+                        Arc::new((master.spec.clone(), master.askpass.directory().to_owned()));
                     let _ = send.send(Ok(Session {
                         commands: send_command,
+                        terminal,
                     }));
                     serve(master, channel, process, commands, stopping).await;
                 }
@@ -278,11 +281,21 @@ async fn serve(
 #[derive(Clone)]
 pub struct Session {
     commands: async_channel::Sender<Command>,
+    /// Connection spec and the directory that holds the master's control socket.
+    terminal: Arc<(ConnectionSpec, PathBuf)>,
 }
 
 impl Session {
     pub async fn closed(&self) {
         self.commands.closed().await;
+    }
+
+    /// Arguments for `ssh` that open a terminal on this session's master
+    /// connection, without authenticating again.
+    pub fn terminal_command(&self, remote_command: &str) -> Vec<std::ffi::OsString> {
+        self.terminal
+            .0
+            .terminal_command(&self.terminal.1, remote_command)
     }
 
     pub fn same_connection(&self, other: &Self) -> bool {

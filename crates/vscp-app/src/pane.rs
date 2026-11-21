@@ -30,7 +30,7 @@ mod operations;
 pub mod finder;
 
 use crate::{
-    context_menu::{Menu, Tooltip},
+    context_menu::{Menu, RunState, Tooltip},
     rename::InlineRename,
 };
 use operations::Operations;
@@ -100,7 +100,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-a", SelectAll, Some("FileList")),
         KeyBinding::new("tab", SwitchPane, Some("FilePane")),
         KeyBinding::new("shift-tab", SwitchPane, Some("FilePane")),
-        KeyBinding::new("enter", SubmitPath, Some("FilePane > TextInput")),
+        KeyBinding::new("enter", SubmitPath, Some("PathBar > TextInput")),
     ]);
 }
 
@@ -209,6 +209,11 @@ struct LocationRequest {
 }
 
 pub struct EditFile(pub PathBuf);
+
+/// A double click on a file in the local pane.
+pub struct OpenLocalFile(pub PathBuf);
+
+impl gpui::EventEmitter<OpenLocalFile> for Pane {}
 
 impl gpui::EventEmitter<EditFile> for Pane {}
 
@@ -630,7 +635,13 @@ impl Pane {
                     this.navigate(Navigation::Up, window, cx);
                 })),
             )
-            .child(div().flex_1().min_w_0().child(self.input.clone()))
+            .child(
+                div()
+                    .key_context("PathBar")
+                    .flex_1()
+                    .min_w_0()
+                    .child(self.input.clone()),
+            )
             .child(
                 icon_button(
                     "copy-other",
@@ -829,20 +840,7 @@ impl Pane {
                         {
                             let path = row.path.to_path_buf();
                             match this.source {
-                                Source::Local => {
-                                    let open = cx
-                                        .background_executor()
-                                        .spawn(async move { dev::open_file(&path, None) });
-                                    cx.spawn_in(window, async move |pane, cx| {
-                                        if let Err(error) = open.await {
-                                            let _ = pane.update_in(cx, |pane, _, cx| {
-                                                pane.path_error = Some(error.to_string());
-                                                cx.notify();
-                                            });
-                                        }
-                                    })
-                                    .detach();
-                                }
+                                Source::Local => cx.emit(OpenLocalFile(path)),
                                 Source::Remote(_) => cx.emit(EditFile(path)),
                             }
                         } else {
@@ -998,6 +996,10 @@ impl Render for Pane {
                             this.new_folder(this.tree.root.clone(), window, cx)
                         }))
                         .on_action(cx.listener(|this, _: &StartRename, window, cx| {
+                            if this.rename.is_some() {
+                                this.commit_rename(window, cx);
+                                return;
+                            }
                             this.start_selected_rename(window, cx)
                         }))
                         .on_action(
@@ -1052,7 +1054,7 @@ impl Render for Pane {
             .children(
                 self.menu
                     .as_ref()
-                    .map(|menu| menu.render(selected, theme, cx)),
+                    .map(|menu| menu.render(selected, self.run_state(), theme, cx)),
             )
             .child(
                 div()
@@ -1215,3 +1217,7 @@ impl Columns {
         div().w(px(79.)).flex_none().truncate().child(text.into())
     }
 }
+
+#[cfg(test)]
+#[path = "pane_keyboard_tests.rs"]
+mod keyboard_tests;

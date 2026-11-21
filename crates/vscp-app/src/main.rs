@@ -1,12 +1,15 @@
 mod components;
+mod context_menu;
 mod dev;
 mod file_metadata;
 mod file_workspace;
 mod form;
 mod pane;
 mod pane_icons;
+mod rename;
 mod sidebar;
 mod theme;
+mod transfers_view;
 mod tree;
 mod workspace;
 

@@ -34,6 +34,7 @@ pub struct TextInput {
     focus_handle: FocusHandle,
     content: String,
     secure: bool,
+    compact: bool,
     label: &'static str,
     placeholder: SharedString,
     selected_range: Range<usize>,
@@ -57,6 +58,7 @@ impl TextInput {
             content: content.to_owned(),
             placeholder: placeholder.into(),
             secure,
+            compact: false,
             label,
             focus_handle: cx.focus_handle().tab_stop(true),
             selected_range: content.len()..content.len(),
@@ -67,6 +69,15 @@ impl TextInput {
             is_selecting: false,
             scroll: px(0.),
         }
+    }
+
+    pub fn compact(mut self) -> Self {
+        self.compact = true;
+        self
+    }
+
+    pub fn select_bytes(&mut self, range: Range<usize>) {
+        self.selected_range = range;
     }
 
     pub fn value(&self) -> &str {
@@ -734,7 +745,7 @@ impl Render for TextInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .h(px(30.))
+            .h(px(if self.compact { 23. } else { 30. }))
             .w_full()
             .items_center()
             .px_2()

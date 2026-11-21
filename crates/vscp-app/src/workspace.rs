@@ -247,7 +247,7 @@ impl Workspace {
             let result = async {
                 let session = client.connect(spec).await?;
                 dev::log(format_args!("connected {}", server.name));
-                let path = match server.initial_remote_path {
+                let path = match server.initial_remote_path.clone() {
                     Some(path) if path.is_absolute() => Ok(path),
                     Some(path) => session.home_dir().await.map(|home| home.join(path)),
                     None => session.home_dir().await,
@@ -265,7 +265,7 @@ impl Workspace {
                     this.finish_dialog(window, cx);
                 }
                 let state = match result {
-                    Ok((session, path)) => this.connected(&server.id, session, path, window, cx),
+                    Ok((session, path)) => this.connected(&server, session, path, window, cx),
                     Err(error) => {
                         dev::log(format_args!("connection failed for {}", server.name));
                         Connection::Error(error)
@@ -279,15 +279,17 @@ impl Workspace {
 
     fn connected(
         &mut self,
-        id: &str,
+        server: &Server,
         session: Session,
         path: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Connection {
+        let id = &server.id;
         let memory = self.pane_memory.entry(id.to_owned()).or_default().clone();
         let panes = Panes::new(
             session.clone(),
+            server,
             path,
             memory,
             self.sidebar_visible.clone(),
@@ -930,6 +932,18 @@ impl Render for Workspace {
             });
         }
         let theme = Theme::for_window(window);
+        let transfer_overlay = if self.dialog.is_none() {
+            match self
+                .selected
+                .as_ref()
+                .and_then(|id| self.connections.get(id))
+            {
+                Some(Connection::Connected { panes, .. }) => Some(panes.overlay()),
+                _ => None,
+            }
+        } else {
+            None
+        };
         div()
             .relative()
             .flex()
@@ -966,6 +980,7 @@ impl Render for Workspace {
                     root.child(crate::sidebar::render(self, theme, cx))
                 })
                 .child(self.content(theme, cx))
+                .children(transfer_overlay)
                 .children(self.render_dialog(theme, cx))
             })
     }

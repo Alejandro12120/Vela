@@ -102,6 +102,14 @@ impl Tree {
 
     pub fn refresh(&mut self, listings: Vec<Listing>) {
         self.directories.clear();
+        self.refresh_branches(listings);
+    }
+
+    pub fn has_branch(&self, path: &Path) -> bool {
+        self.directories.contains_key(path)
+    }
+
+    pub fn refresh_branches(&mut self, listings: Vec<Listing>) {
         for (path, result) in listings {
             self.install(path, result);
         }
@@ -109,7 +117,7 @@ impl Tree {
         // when a fresh listing proves that one of the components is gone.
         let directories = &self.directories;
         let root = &self.root;
-        self.expanded.retain(|path| {
+        let exists = |path: &Path| {
             path.ancestors()
                 .take_while(|path| *path != root)
                 .all(
@@ -120,7 +128,16 @@ impl Tree {
                         _ => true,
                     },
                 )
-        });
+        };
+        self.expanded.retain(|path| exists(path));
+        let stale: Vec<_> = directories
+            .keys()
+            .filter(|path| !exists(path))
+            .cloned()
+            .collect();
+        for path in stale {
+            self.directories.remove(&path);
+        }
         self.rebuild();
     }
 

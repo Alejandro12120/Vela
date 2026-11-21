@@ -12,6 +12,8 @@ pub enum Icon {
     Folder,
     File,
     Link,
+    Transfer,
+    TransferBack,
 }
 
 impl Icon {
@@ -73,6 +75,8 @@ impl Icon {
                 ],
                 &[(9., 2.), (9., 5.5), (12.5, 5.5)],
             ],
+            Self::TransferBack => &[&[(14., 8.), (2., 8.)], &[(6., 4.), (2., 8.), (6., 12.)]],
+            Self::Transfer => &[&[(2., 8.), (14., 8.)], &[(10., 4.), (14., 8.), (10., 12.)]],
             Self::Link => &[
                 &[
                     (7., 11.),

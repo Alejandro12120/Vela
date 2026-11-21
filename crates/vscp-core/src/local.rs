@@ -79,3 +79,89 @@ mod tests {
         assert!(list_dir(&path.join("broken")).is_err());
     }
 }
+
+/// Rename without replacing an existing item.
+#[cfg(target_os = "macos")]
+pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
+    let from = CString::new(from.as_os_str().as_bytes())?;
+    let to = CString::new(to.as_os_str().as_bytes())?;
+    // Both pointers remain valid and NUL-terminated for the call.
+    if unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(to) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => fs::rename(from, to),
+        Err(error) => Err(error),
+        Ok(_) => Err(io::ErrorKind::AlreadyExists.into()),
+    }
+}
+
+/// Move the item to the system Trash and return its new path, when supplied by macOS.
+#[cfg(target_os = "macos")]
+pub fn trash(path: &Path) -> io::Result<Option<std::path::PathBuf>> {
+    use objc2_foundation::{NSFileManager, NSURL};
+    use std::{
+        ffi::{CStr, CString, OsStr},
+        os::unix::ffi::OsStrExt,
+    };
+
+    if !path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Se necesita una ruta absoluta",
+        ));
+    }
+    let is_directory = fs::symlink_metadata(path)?.is_dir();
+    let path = CString::new(path.as_os_str().as_bytes())?;
+    objc2::rc::autoreleasepool(|_| {
+        // NSURL copies the NUL-terminated filesystem representation.
+        let url = unsafe {
+            NSURL::fileURLWithFileSystemRepresentation_isDirectory_relativeToURL(
+                std::ptr::NonNull::from(path.as_c_str()).cast(),
+                is_directory,
+                None,
+            )
+        };
+        let mut result = None;
+        NSFileManager::defaultManager()
+            .trashItemAtURL_resultingItemURL_error(&url, Some(&mut result))
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        Ok(result.map(|url| {
+            // The string is owned by the URL and is copied before it goes out of scope.
+            let bytes = unsafe { CStr::from_ptr(url.fileSystemRepresentation().as_ptr()) };
+            Path::new(OsStr::from_bytes(bytes.to_bytes())).to_path_buf()
+        }))
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn trash(_: &Path) -> io::Result<Option<std::path::PathBuf>> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Papelera no disponible en este sistema",
+    ))
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn sends_a_test_file_to_trash() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory
+        .path()
+        .join(format!("vSCP Trash test {}", std::process::id()));
+    fs::write(&file, b"vSCP test").unwrap();
+    let trashed = trash(&file).unwrap().expect("macOS Trash path");
+    eprintln!("Trashed test item: {}", trashed.display());
+    let result = fs::read(&trashed);
+    fs::remove_file(&trashed).unwrap();
+    assert!(!file.exists());
+    assert_eq!(result.unwrap(), b"vSCP test");
+}

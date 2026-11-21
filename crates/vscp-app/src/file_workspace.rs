@@ -1,7 +1,8 @@
-use std::{cell::Cell, path::PathBuf, rc::Rc};
+use std::{cell::Cell, path::PathBuf, rc::Rc, sync::Arc, time::Duration};
 
 use gpui::{
-    App, ClickEvent, Div, Entity, FocusHandle, FontWeight, Stateful, Window, div, prelude::*, px,
+    App, AppContext, ClickEvent, Div, Entity, FocusHandle, FontWeight, Stateful, Window, div,
+    prelude::*, px,
 };
 use vscp_core::{Session, config::Server};
 
@@ -10,23 +11,29 @@ use crate::{
     dev,
     pane::{Pane, PaneMemory, Source},
     theme::Theme,
+    transfers_view::{TransferOverlay, Transfers},
 };
 
 pub struct Panes {
     local: Entity<Pane>,
     remote: Entity<Pane>,
     local_focus: FocusHandle,
+    transfers: Entity<Transfers>,
+    overlay: Entity<TransferOverlay>,
 }
 
 impl Panes {
     pub fn new(
         session: Session,
+        server: &Server,
         remote_path: PathBuf,
         memory: PaneMemory,
         sidebar: Rc<Cell<bool>>,
         window: &mut Window,
         cx: &mut App,
     ) -> Self {
+        let transfers = cx.new(|cx| Transfers::new(session.clone(), server.name.clone(), cx));
+        let overlay = cx.new(|cx| TransferOverlay::new(transfers.clone(), cx));
         let local_focus = cx.focus_handle().tab_stop(true);
         let remote_focus = cx.focus_handle().tab_stop(true);
         let local_path = dev::local_root()
@@ -54,13 +61,62 @@ impl Panes {
                 cx,
             )
         });
-        local.update(cx, |pane, cx| pane.start(window, cx));
-        remote.update(cx, |pane, cx| pane.start(window, cx));
+        let server = Arc::<str>::from(server.id.as_str());
+        local.update(cx, |pane, cx| {
+            pane.wire(server.clone(), remote.downgrade(), transfers.clone());
+            pane.start(window, cx);
+        });
+        remote.update(cx, |pane, cx| {
+            pane.wire(server, local.downgrade(), transfers.clone());
+            pane.start(window, cx);
+        });
+        if let Some(spec) = dev::transfer() {
+            let pane = match spec.direction {
+                vscp_core::transfer::Direction::Upload => remote.downgrade(),
+                vscp_core::transfer::Direction::Download => local.downgrade(),
+            };
+            transfers.update(cx, |queue, cx| {
+                let delay = dev::transfer_delay();
+                if delay.is_zero() {
+                    queue.enqueue(spec, pane, window, cx);
+                } else {
+                    let timer = cx.background_executor().timer(delay);
+                    cx.spawn_in(window, async move |queue, cx| {
+                        timer.await;
+                        let _ = queue.update_in(cx, |queue, window, cx| {
+                            queue.enqueue(spec, pane, window, cx);
+                        });
+                    })
+                    .detach();
+                }
+            });
+        }
+        if let Some(state) = dev::file_state()
+            && let Some((side, action)) = state.split_once(':')
+        {
+            let pane = if side == "remote" { &remote } else { &local };
+            let action = action.to_owned();
+            pane.update(cx, |_, cx| {
+                let timer = cx.background_executor().timer(Duration::from_millis(500));
+                cx.spawn_in(window, async move |pane, cx| {
+                    timer.await;
+                    let _ =
+                        pane.update_in(cx, |pane, window, cx| pane.dev_state(&action, window, cx));
+                })
+                .detach();
+            });
+        }
         Self {
             local,
             remote,
             local_focus,
+            transfers,
+            overlay,
         }
+    }
+
+    pub fn overlay(&self) -> Entity<TransferOverlay> {
+        self.overlay.clone()
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
@@ -76,6 +132,7 @@ impl Panes {
     ) -> Stateful<Div> {
         div()
             .id("main")
+            .relative()
             .min_w_0()
             .min_h_0()
             .flex_1()
@@ -129,5 +186,6 @@ impl Panes {
                     .child(div().w(px(1.)).flex_none().bg(theme.border))
                     .child(self.remote.clone()),
             )
+            .child(self.transfers.clone())
     }
 }

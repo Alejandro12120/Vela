@@ -1,6 +1,7 @@
 use std::{
     ffi::OsString,
     io,
+    path::Component,
     path::Path,
     process::Stdio,
     sync::atomic::{AtomicBool, Ordering},
@@ -50,7 +51,7 @@ fn kind(meta: &MetaData) -> EntryKind {
     }
 }
 
-fn entry(name: OsString, meta: MetaData) -> Entry {
+pub(crate) fn entry(name: OsString, meta: MetaData) -> Entry {
     Entry {
         name,
         kind: kind(&meta),
@@ -82,7 +83,13 @@ pub(crate) async fn open(master: &Master) -> Result<(Sftp, Process), Error> {
     let stdout = process.child.stdout.take().expect("piped stdout");
     let err = match timeout(
         ssh::CONNECT_TIMEOUT,
-        Sftp::new(stdin, stdout, SftpOptions::default()),
+        // File reads and writes are issued serially. Flush each promptly so the
+        // client can receive its reply and issue the next request.
+        Sftp::new(
+            stdin,
+            stdout,
+            SftpOptions::default().flush_interval(Duration::ZERO),
+        ),
     )
     .await
     {
@@ -112,7 +119,7 @@ fn listing_error(error: openssh_sftp_client::Error) -> Error {
     }
 }
 
-pub(crate) async fn list_dir(sftp: &Sftp, path: &Path) -> Result<Vec<Entry>, Error> {
+pub(crate) async fn read_dir(sftp: &Sftp, path: &Path) -> Result<Vec<Entry>, Error> {
     let dir = sftp.fs().open_dir(path).await.map_err(listing_error)?;
     let mut reader = std::pin::pin!(dir.read_dir());
     let mut entries = Vec::new();
@@ -120,9 +127,21 @@ pub(crate) async fn list_dir(sftp: &Sftp, path: &Path) -> Result<Vec<Entry>, Err
         let item = item.map_err(listing_error)?;
         let name = item.filename();
         if name != Path::new(".") && name != Path::new("..") {
+            if !matches!(name.components().next(), Some(Component::Normal(_)))
+                || name.file_name() != Some(name.as_os_str())
+            {
+                return Err(Error::Sftp(
+                    "Nombre de archivo inválido en el listado remoto".into(),
+                ));
+            }
             entries.push(entry(name.as_os_str().to_owned(), item.metadata()));
         }
     }
+    Ok(entries)
+}
+
+pub(crate) async fn list_dir(sftp: &Sftp, path: &Path) -> Result<Vec<Entry>, Error> {
+    let mut entries = read_dir(sftp, path).await?;
     // READDIR supplies link metadata. Follow just the links to determine whether
     // they can be expanded, keeping broken or inaccessible links in the result.
     let mut fs = sftp.fs();
@@ -151,7 +170,7 @@ pub(crate) async fn stat(sftp: &Sftp, path: &Path) -> Result<Entry, Error> {
     Ok(entry)
 }
 
-fn check_cancel(cancel: &AtomicBool) -> Result<(), Error> {
+pub(crate) fn check_cancel(cancel: &AtomicBool) -> Result<(), Error> {
     if cancel.load(Ordering::Relaxed) {
         Err(Error::Cancelled)
     } else {
@@ -167,28 +186,10 @@ pub(crate) async fn download(
     cancel: &AtomicBool,
 ) -> Result<(), Error> {
     check_cancel(cancel)?;
-    let mut source = sftp.open(remote).await?;
+    let source = sftp.open(remote).await?;
     check_cancel(cancel)?;
     let mut destination = fs::File::create(local).await?;
-    let result: Result<(), Error> = async {
-        let mut done = 0;
-        let mut buffer = Default::default();
-        loop {
-            check_cancel(cancel)?;
-            let Some(chunk) = source.read(CHUNK_SIZE as u32, buffer).await? else {
-                break;
-            };
-            destination.write_all(&chunk).await?;
-            done += chunk.len() as u64;
-            progress(done);
-            buffer = chunk;
-            buffer.clear();
-        }
-        destination.flush().await?;
-        source.close().await?;
-        check_cancel(cancel)
-    }
-    .await;
+    let result = read_file(source, &mut destination, progress, cancel).await;
     drop(destination);
     if result.is_err() {
         fs::remove_file(local).await?;
@@ -213,22 +214,52 @@ pub(crate) async fn upload(
         .truncate(true)
         .open(remote)
         .await?;
-    let result: Result<(), Error> = async {
-        let mut buffer = vec![0; CHUNK_SIZE];
-        let mut done = 0;
-        loop {
-            check_cancel(cancel)?;
-            let len = source.read(&mut buffer).await?;
-            if len == 0 {
-                return Ok(());
-            }
-            destination.write_all(&buffer[..len]).await?;
-            done += len as u64;
-            progress(done);
-        }
-    }
-    .await;
+    let result = write_file(&mut source, &mut destination, progress, cancel).await;
     let closed = destination.close().await;
     result?;
     Ok(closed?)
+}
+
+pub(crate) async fn read_file(
+    mut source: openssh_sftp_client::file::File,
+    destination: &mut fs::File,
+    progress: &(dyn Fn(u64) + Send + Sync),
+    cancel: &AtomicBool,
+) -> Result<(), Error> {
+    let mut done = 0;
+    let mut buffer = Default::default();
+    loop {
+        check_cancel(cancel)?;
+        let Some(chunk) = source.read(CHUNK_SIZE as u32, buffer).await? else {
+            break;
+        };
+        destination.write_all(&chunk).await?;
+        done += chunk.len() as u64;
+        progress(done);
+        buffer = chunk;
+        buffer.clear();
+    }
+    destination.flush().await?;
+    source.close().await?;
+    check_cancel(cancel)
+}
+
+pub(crate) async fn write_file(
+    source: &mut fs::File,
+    destination: &mut openssh_sftp_client::file::File,
+    progress: &(dyn Fn(u64) + Send + Sync),
+    cancel: &AtomicBool,
+) -> Result<(), Error> {
+    let mut buffer = vec![0; CHUNK_SIZE];
+    let mut done = 0;
+    loop {
+        check_cancel(cancel)?;
+        let len = source.read(&mut buffer).await?;
+        if len == 0 {
+            return Ok(());
+        }
+        destination.write_all(&buffer[..len]).await?;
+        done += len as u64;
+        progress(done);
+    }
 }

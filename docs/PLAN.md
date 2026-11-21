@@ -1,6 +1,6 @@
 # Plan del MVP de vSCP
 
-Estado: paneles F2b en la rama `mvp`. Las prioridades siguen siendo, por orden, RAM, arranque instantáneo y fluidez, y tamaño instalado.
+Estado: transferencias y operaciones F3 en la rama `mvp`. Las prioridades siguen siendo, por orden, RAM, arranque instantáneo y fluidez, y tamaño instalado.
 
 ## 1. Qué se descarta del hilo anterior
 
@@ -109,8 +109,11 @@ crates/
    - selección múltiple con ⌘ y ⇧. ↑/↓ mueven la selección, ⇧↑/⇧↓ extienden el rango y ⌘A selecciona todas las filas visibles;
    - → expande y ← contrae o selecciona la carpeta contenedora. ⌘↓ abre la carpeta seleccionada, ⌘↑ sube, ⌘[ retrocede y ⌘] avanza. Tab cambia de panel;
    - ⌘⇧. alterna los archivos ocultos y ⌘R actualiza la raíz y las carpetas expandidas.
-4. Transferencias en los dos sentidos, recursivas. Se pueden iniciar arrastrando entre paneles o con un botón. La cola muestra progreso y permite cancelar. Ante un conflicto se puede sobrescribir, omitir o renombrar.
-5. Operaciones de archivo en los dos lados: crear carpeta, renombrar y borrar con confirmación.
+4. Transferencias recursivas en ambos sentidos. Se inician arrastrando entre paneles, con el botón de copia o con F5. Cada sesión procesa un trabajo y un archivo a la vez, en orden de llegada. Se crean las carpetas vacías. Los enlaces a archivos se copian como contenido. Los enlaces a carpetas y los enlaces rotos se omiten y aparecen en el historial.
+   - Ante un conflicto se puede sobrescribir, omitir, renombrar con el primer sufijo libre «(N)» o cancelar el trabajo. Se puede aplicar una elección a los demás conflictos del trabajo. Los errores se muestran por elemento y la cola continúa.
+   - Las descargas se escriben en `<nombre>.vscp-part` y las subidas de archivos nuevos en `.<nombre>.vscp-part`. El archivo temporal se renombra al completar la copia y se elimina al cancelar o fallar. Sobrescribir un archivo remoto modifica el mismo inodo y conserva propietario y permisos. Una subida interrumpida tras abrir ese destino se indica como «Incompleto en destino».
+   - Se conserva la fecha de modificación de los archivos. Los nuevos reciben los permisos de origen enmascarados con `0o777`. Los sobrescritos conservan los permisos del destino.
+5. Crear carpeta, renombrar en línea y eliminar con confirmación en ambos paneles. En macOS, la eliminación local mueve a la Papelera. La eliminación remota es recursiva y permanente, y elimina los enlaces sin recorrer sus destinos.
 6. Integración con Finder:
    - arrastrar desde Finder al panel remoto sube los archivos;
    - ⌘V en el panel remoto sube los archivos del portapapeles;

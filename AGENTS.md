@@ -40,12 +40,17 @@ Use an isolated configuration directory for development runs. The `dev` Cargo fe
 
 - `VSCP_CONFIG_DIR` sets the directory for `servers.toml` and the OpenSSH `known_hosts` file.
 - `VSCP_DEV_AUTOCONNECT` connects to the server with the given display name after loading the list.
-- `VSCP_DEV_LOG=1` prints connection results, listing durations and visible row counts to stderr.
+- `VSCP_DEV_LOG=1` prints connection results, listing durations, visible row counts and transfer events to stderr.
 - `VSCP_DEV_THEME=light|dark` overrides the application theme without changing system appearance.
 - `VSCP_DEV_LOCAL_ROOT=<absolute path>` overrides the local pane's starting folder.
 - `VSCP_DEV_REMOTE_DELAY_MS=<milliseconds>` delays each remote listing asynchronously.
 - `VSCP_DEV_EXPAND=<relative path>[,...]` opens the named folders and their ancestors in the initial remote tree.
 - `VSCP_DEV_WINDOW_WIDTH=<pixels>` requests an initial width of at least 640 logical pixels for layout checks. The window manager may override it.
+
+- `VSCP_DEV_TRANSFER=<upload|download>:<absolute source>:<absolute destination>` enqueues one transfer after autoconnect. Conflicts use the usual dialog.
+- `VSCP_DEV_TRANSFER_DELAY_MS=<milliseconds>` waits after autoconnect before enqueueing that transfer.
+- `VSCP_DEV_TRANSFER_EXPANDED=1` opens the transfer history at launch.
+- `VSCP_DEV_FILE_STATE=<local|remote>:<delete|rename|menu>` selects the first entry and opens the given state for visual checks. The delete trigger only opens the confirmation.
 
 For example, from the repository root in a macOS graphical session:
 

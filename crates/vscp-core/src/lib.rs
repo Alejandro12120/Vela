@@ -12,3 +12,5 @@ pub use error::Error;
 pub use session::{Client, Session};
 pub use sftp::{Entry, EntryKind};
 pub use ssh::{Auth, ConnectionSpec, bitwarden_agent_sockets};
+
+pub mod transfer;

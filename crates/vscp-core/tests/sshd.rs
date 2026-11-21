@@ -760,3 +760,451 @@ async fn client_shutdown_reaps_ssh_while_waiting_for_askpass() {
     })
     .await;
 }
+
+use vscp_core::transfer::{
+    Answer, Choice, Direction, Event, ItemResult, Job, Spec, Status, Summary,
+};
+
+async fn enqueue(
+    session: &Session,
+    direction: Direction,
+    sources: Vec<PathBuf>,
+    destination: PathBuf,
+) -> Job {
+    within(session.enqueue_transfer(Spec {
+        direction,
+        sources,
+        destination,
+    }))
+    .await
+}
+
+async fn event(job: &Job) -> Event {
+    timeout(CONNECT_WAIT, job.events.recv())
+        .await
+        .expect("job stalled")
+        .expect("job closed")
+}
+
+async fn collect(job: &Job, answers: &[Answer]) -> (Summary, Vec<ItemResult>) {
+    let mut answers = answers.iter();
+    let mut items = Vec::new();
+    loop {
+        match event(job).await {
+            Event::Conflict(request) => {
+                request.answer(*answers.next().expect("unexpected conflict"))
+            }
+            Event::Item { result, .. } => items.push(result),
+            Event::Finished(summary) => {
+                assert!(answers.next().is_none(), "expected another conflict");
+                return (summary, items);
+            }
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn recursive_queue_round_trip_preserves_content_modes_and_mtimes() {
+    let fixture = Fixture::start();
+    let client = client();
+    let session = trust_first(&client, fixture.spec("b.pub")).await;
+    let source = fixture.path("origen");
+    let remote = fixture.path("remoto");
+    let download = fixture.path("descarga");
+    fs::create_dir_all(source.join("anidada/vacía")).unwrap();
+
+    const FILES: [&str; 3] = ["anidada/espacio # ñ", "0 bytes", "mañána.txt"];
+    let mtime = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_123);
+    for (index, name) in FILES.iter().enumerate() {
+        let path = source.join(name);
+        fs::write(&path, vec![index as u8; if index == 1 { 0 } else { 73 }]).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640 + index as u32)).unwrap();
+        File::open(&path).unwrap().set_modified(mtime).unwrap();
+    }
+    symlink(FILES[0], source.join("archivo enlace")).unwrap();
+    symlink("anidada", source.join("carpeta enlace")).unwrap();
+    symlink("no existe", source.join("roto")).unwrap();
+
+    let job = enqueue(
+        &session,
+        Direction::Upload,
+        vec![source.clone()],
+        remote.clone(),
+    )
+    .await;
+    let (summary, results) = collect(&job, &[]).await;
+    assert_eq!(summary.status, Status::Completed, "{results:?}");
+    assert_eq!(summary.totals.files, 4);
+    assert_eq!(summary.totals.bytes, 219);
+    assert_eq!(summary.copied, 4);
+    assert_eq!(summary.skipped, 2);
+    assert!(results.contains(&ItemResult::Skipped("Omitido: enlace a carpeta".into())));
+    assert!(results.contains(&ItemResult::Skipped("Omitido: enlace roto".into())));
+    let remote = remote.join("origen");
+    symlink(FILES[0], remote.join("enlace remoto")).unwrap();
+    symlink("anidada", remote.join("carpeta enlace")).unwrap();
+    symlink("no existe", remote.join("roto")).unwrap();
+
+    let job = enqueue(
+        &session,
+        Direction::Download,
+        vec![remote.clone()],
+        download.clone(),
+    )
+    .await;
+    let (summary, results) = collect(&job, &[]).await;
+    assert_eq!(summary.status, Status::Completed, "{results:?}");
+    assert_eq!((summary.copied, summary.skipped), (5, 2));
+    let download = download.join("origen");
+    for path in [&remote, &download] {
+        assert!(path.join("anidada/vacía").is_dir());
+        for (index, name) in FILES.iter().enumerate() {
+            let file = path.join(name);
+            assert_eq!(sha256(&file), sha256(&source.join(name)));
+            let meta = fs::metadata(&file).unwrap();
+            assert_eq!(meta.modified().unwrap(), mtime);
+            assert_eq!(meta.mode() & 0o777, 0o640 + index as u32);
+        }
+        let copy = path.join("archivo enlace");
+        assert!(fs::symlink_metadata(&copy).unwrap().is_file());
+        assert_eq!(sha256(&copy), sha256(&source.join(FILES[0])));
+        assert_eq!(fs::metadata(copy).unwrap().modified().unwrap(), mtime);
+    }
+    assert!(!download.join("carpeta enlace").exists());
+    assert!(!download.join("roto").is_symlink());
+    assert!(
+        fs::symlink_metadata(download.join("enlace remoto"))
+            .unwrap()
+            .is_file()
+    );
+    assert_eq!(
+        sha256(&download.join("enlace remoto")),
+        sha256(&source.join(FILES[0]))
+    );
+    disconnect(&session).await;
+}
+
+#[tokio::test]
+async fn queued_conflicts_overwrite_skip_rename_apply_to_all_and_cancel() {
+    let fixture = Fixture::start();
+    let client = client();
+    let session = trust_first(&client, fixture.spec("b.pub")).await;
+    let source = fixture.path("local");
+    let remote = fixture.path("remote");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(&remote).unwrap();
+    let sources: Vec<_> = ["a.txt", "b.txt"]
+        .into_iter()
+        .map(|name| {
+            fs::write(source.join(name), b"new").unwrap();
+            fs::write(remote.join(name), b"old contents").unwrap();
+            source.join(name)
+        })
+        .collect();
+    fs::write(remote.join("a (1).txt"), b"occupied").unwrap();
+    let a = remote.join("a.txt");
+    fs::set_permissions(&a, fs::Permissions::from_mode(0o704)).unwrap();
+    let before = fs::metadata(&a).unwrap();
+
+    for (choice, status, copied) in [
+        (Choice::Skip, Status::Completed, 0),
+        (Choice::Rename, Status::Completed, 2),
+        (Choice::Cancel, Status::Cancelled, 0),
+        (Choice::Overwrite, Status::Completed, 2),
+    ] {
+        let job = enqueue(&session, Direction::Upload, sources.clone(), remote.clone()).await;
+        let (summary, items) = collect(
+            &job,
+            &[Answer {
+                choice,
+                apply_to_all: true,
+            }],
+        )
+        .await;
+        assert_eq!(
+            (summary.status, summary.copied),
+            (status, copied),
+            "{items:?}"
+        );
+        let expected: &[u8] = if choice == Choice::Overwrite {
+            b"new"
+        } else {
+            b"old contents"
+        };
+        assert_eq!(fs::read(&a).unwrap(), expected);
+    }
+    assert_eq!(fs::read(remote.join("a (2).txt")).unwrap(), b"new");
+    assert_eq!(fs::read(remote.join("b (1).txt")).unwrap(), b"new");
+    let after = fs::metadata(&a).unwrap();
+    assert_eq!(
+        (before.ino(), before.mode(), before.uid()),
+        (after.ino(), after.mode(), after.uid())
+    );
+
+    fs::write(&sources[0], b"old local file").unwrap();
+    fs::set_permissions(&sources[0], fs::Permissions::from_mode(0o604)).unwrap();
+    let job = enqueue(&session, Direction::Download, vec![a], source).await;
+    loop {
+        if let Event::Conflict(request) = event(&job).await {
+            assert_eq!(
+                (request.source.size, request.existing.size),
+                (Some(3), Some(14))
+            );
+            assert!(request.source.mtime.is_some() && request.existing.mtime.is_some());
+            request.answer(Answer {
+                choice: Choice::Overwrite,
+                apply_to_all: false,
+            });
+            break;
+        }
+    }
+    let (summary, results) = collect(&job, &[]).await;
+    assert_eq!(summary.status, Status::Completed, "{results:?}");
+    assert_eq!(fs::read(&sources[0]).unwrap(), b"new");
+    assert_eq!(fs::metadata(&sources[0]).unwrap().mode() & 0o777, 0o604);
+    disconnect(&session).await;
+}
+
+#[tokio::test]
+async fn queued_cancellation_cleans_parts_and_keeps_completed_files() {
+    let fixture = Fixture::start();
+    let client = client();
+    let session = trust_first(&client, fixture.spec("b.pub")).await;
+    let source = fixture.path("source");
+    let dest = fixture.path("dest");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(&dest).unwrap();
+    let small = source.join("a-small");
+    let large = source.join("b-large");
+    fs::write(&small, b"complete").unwrap();
+    File::create(&large)
+        .unwrap()
+        .set_len(100 * 1024 * 1024)
+        .unwrap();
+
+    for (direction, overwrite) in [
+        (Direction::Upload, false),
+        (Direction::Download, false),
+        (Direction::Upload, true),
+        (Direction::Download, true),
+    ] {
+        if overwrite {
+            fs::write(dest.join("b-large"), b"original").unwrap();
+        }
+        let job = enqueue(
+            &session,
+            direction,
+            vec![small.clone(), large.clone()],
+            dest.clone(),
+        )
+        .await;
+        loop {
+            match event(&job).await {
+                Event::Conflict(request) => request.answer(Answer {
+                    choice: Choice::Overwrite,
+                    apply_to_all: false,
+                }),
+                Event::Progress { bytes } if bytes > 8 => {
+                    assert!(bytes < 100 * 1024 * 1024, "finished before cancellation");
+                    job.cancel.cancel();
+                    break;
+                }
+                Event::Finished(summary) => panic!("job ended early: {summary:?}"),
+                _ => {}
+            }
+        }
+        let (summary, results) = collect(&job, &[]).await;
+        assert_eq!(
+            (summary.status, summary.copied),
+            (Status::Cancelled, 1),
+            "{results:?}"
+        );
+        if overwrite {
+            let overwritten = dest.join("b-large");
+            if direction == Direction::Upload {
+                assert!(
+                    results
+                        .iter()
+                        .any(|result| matches!(result, ItemResult::Incomplete(_))),
+                    "{results:?}"
+                );
+                assert!(overwritten.exists());
+            } else {
+                assert_eq!(fs::read(&overwritten).unwrap(), b"original");
+            }
+            fs::remove_file(overwritten).unwrap();
+        }
+        assert!(!dest.join(".b-large.vscp-part").exists());
+        assert!(!dest.join("b-large.vscp-part").exists());
+        assert!(!dest.join("b-large").exists());
+        assert_eq!(fs::read(dest.join("a-small")).unwrap(), b"complete");
+        fs::remove_file(dest.join("a-small")).unwrap();
+        assert!(within(session.list_dir(dest.clone())).await.is_empty());
+    }
+    disconnect(&session).await;
+}
+
+#[tokio::test]
+async fn queue_continues_after_a_source_cannot_be_read() {
+    let fixture = Fixture::start();
+    let client = client();
+    let session = trust_first(&client, fixture.spec("b.pub")).await;
+    let blocked = fixture.path("a-blocked");
+    let readable = fixture.path("b-readable");
+    let folder = fixture.path("target");
+    fs::write(&blocked, b"blocked").unwrap();
+    fs::write(&readable, b"readable").unwrap();
+    fs::create_dir(&folder).unwrap();
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+    let job = enqueue(
+        &session,
+        Direction::Upload,
+        vec![blocked.clone(), readable],
+        folder.clone(),
+    )
+    .await;
+    let (summary, results) = collect(&job, &[]).await;
+    fs::set_permissions(blocked, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        (summary.status, summary.copied, summary.errors),
+        (Status::CompletedWithErrors, 1, 1),
+        "{results:?}"
+    );
+    assert!(!folder.join("a-blocked").exists());
+    assert_eq!(fs::read(folder.join("b-readable")).unwrap(), b"readable");
+    disconnect(&session).await;
+}
+
+#[tokio::test]
+async fn remote_file_operations_refuse_rename_collision_and_retain_link_target() {
+    let fixture = Fixture::start();
+    let client = client();
+    let session = trust_first(&client, fixture.spec("b.pub")).await;
+    let outside = fixture.path("outside");
+    let folder = fixture.path("folder");
+    let nested = folder.join("nested");
+    let renamed = folder.join("renamed");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("keep"), b"safe").unwrap();
+    within(session.mkdir(folder.clone())).await;
+    within(session.mkdir(nested.clone())).await;
+    fs::write(nested.join("file"), b"tree").unwrap();
+    symlink(&outside, nested.join("link")).unwrap();
+    within(session.rename(nested, renamed.clone())).await;
+    let collision = folder.join("collision");
+    within(session.mkdir(collision.clone())).await;
+    let error = session
+        .rename(renamed.clone(), collision)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Io(error) if error.kind() == io::ErrorKind::AlreadyExists));
+    assert!(renamed.join("file").exists());
+    symlink(&outside, folder.join("standalone")).unwrap();
+    let trailing = PathBuf::from(format!("{}/", folder.join("standalone").display()));
+    within(session.remove_tree(trailing)).await;
+    within(session.remove_tree(folder.clone())).await;
+    assert!(!folder.exists());
+    assert_eq!(fs::read(outside.join("keep")).unwrap(), b"safe");
+    disconnect(&session).await;
+}
+
+#[tokio::test]
+async fn transfer_queue_is_fifo_while_the_session_remains_responsive() {
+    let fixture = Fixture::start();
+    let client = client();
+    let session = trust_first(&client, fixture.spec("b.pub")).await;
+    let first = fixture.path("first");
+    let second = fixture.path("second");
+    let dest = fixture.path("dest");
+    fs::create_dir(&dest).unwrap();
+    File::create(&first)
+        .unwrap()
+        .set_len(100 * 1024 * 1024)
+        .unwrap();
+    fs::write(&second, b"second").unwrap();
+    fs::write(dest.join("first"), b"conflict").unwrap();
+    let one = enqueue(&session, Direction::Upload, vec![first], dest.clone()).await;
+    let two = enqueue(&session, Direction::Upload, vec![second], dest.clone()).await;
+    assert!(one.id < two.id);
+    assert!(matches!(event(&one).await, Event::Status(Status::Queued)));
+    assert!(matches!(
+        event(&one).await,
+        Event::Status(Status::Preparing)
+    ));
+    assert!(matches!(event(&one).await, Event::Planned(_)));
+    assert!(matches!(event(&one).await, Event::Status(Status::Running)));
+    assert!(matches!(event(&one).await, Event::File { .. }));
+    let Event::Conflict(conflict) = event(&one).await else {
+        panic!("expected conflict");
+    };
+    assert!(matches!(event(&two).await, Event::Status(Status::Queued)));
+    assert!(two.events.try_recv().is_err());
+    assert_eq!(within(session.list_dir(dest.clone())).await.len(), 1);
+    conflict.answer(Answer {
+        choice: Choice::Overwrite,
+        apply_to_all: false,
+    });
+    assert!(matches!(event(&one).await, Event::Progress { .. }));
+    assert_eq!(within(session.list_dir(dest.clone())).await.len(), 1);
+    assert!(two.events.try_recv().is_err());
+    assert_eq!(collect(&one, &[]).await.0.status, Status::Completed);
+    assert!(matches!(
+        event(&two).await,
+        Event::Status(Status::Preparing)
+    ));
+    assert_eq!(collect(&two, &[]).await.0.status, Status::Completed);
+    assert_eq!(fs::read(dest.join("second")).unwrap(), b"second");
+    disconnect(&session).await;
+}
+
+#[tokio::test]
+#[ignore = "loopback benchmark with 100 MiB of traffic in each direction"]
+async fn benchmark_transfer_and_directory_listing() {
+    let fixture = Fixture::start();
+    let client = client();
+    let session = trust_first(&client, fixture.spec("b.pub")).await;
+    let source = fixture.path("100MiB");
+    let remote = fixture.path("remote");
+    let local = fixture.path("local");
+    let listing = fixture.path("listing");
+    for path in [&remote, &local, &listing] {
+        fs::create_dir(path).unwrap();
+    }
+    let mut block = vec![0; 1024 * 1024];
+    getrandom::fill(&mut block).unwrap();
+    let mut file = File::create(&source).unwrap();
+    for _ in 0..100 {
+        std::io::Write::write_all(&mut file, &block).unwrap();
+    }
+    drop((file, block));
+    for (direction, source, dest) in [
+        (Direction::Upload, source.clone(), remote.clone()),
+        (Direction::Download, remote.join("100MiB"), local.clone()),
+    ] {
+        let start = Instant::now();
+        let job = enqueue(&session, direction, vec![source], dest).await;
+        let (summary, results) = collect(&job, &[]).await;
+        assert_eq!(summary.status, Status::Completed, "{results:?}");
+        eprintln!(
+            "{direction:?}: {:.2} MB/s",
+            summary.totals.bytes as f64 / start.elapsed().as_secs_f64() / 1e6
+        );
+    }
+    assert_eq!(sha256(&source), sha256(&local.join("100MiB")));
+    for index in 0..10_000 {
+        File::create(listing.join(index.to_string())).unwrap();
+    }
+    for _ in 0..3 {
+        let start = Instant::now();
+        assert_eq!(
+            within(session.list_dir(listing.clone())).await.len(),
+            10_000
+        );
+        eprintln!(
+            "10,000 entries without symlinks: {:.2} ms",
+            start.elapsed().as_secs_f64() * 1000.
+        );
+    }
+    disconnect(&session).await;
+}

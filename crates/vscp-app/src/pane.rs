@@ -9,8 +9,9 @@ use std::{
 
 use gpui::{
     App, BackgroundExecutor, ClickEvent, Context, Div, ElementId, Entity, FocusHandle, Focusable,
-    FontFeatures, FontWeight, KeyBinding, MouseButton, Pixels, Role, ScrollStrategy, Stateful,
-    UniformListScrollHandle, Window, actions, div, prelude::*, px, uniform_list,
+    FontFeatures, FontWeight, KeyBinding, MouseButton, MouseDownEvent, Pixels, Render, Role,
+    ScrollStrategy, Stateful, UniformListScrollHandle, Window, actions, div, prelude::*, px,
+    uniform_list,
 };
 use vscp_core::{EntryKind, Error, Session, local};
 
@@ -21,6 +22,15 @@ use crate::{
     theme::Theme,
     tree::{self, Child, History, Listing, Navigation, PathSet, RowState, Selection, Tree},
 };
+
+#[path = "pane_operations.rs"]
+mod operations;
+
+use crate::{
+    context_menu::{Menu, Tooltip},
+    rename::InlineRename,
+};
+use operations::Operations;
 
 actions!(
     file_pane,
@@ -39,12 +49,31 @@ actions!(
         ToggleHidden,
         SelectAll,
         SwitchPane,
-        SubmitPath
+        SubmitPath,
+        CopyOther,
+        StartRename,
+        CommitRename,
+        CancelRename,
+        NewFolder,
+        DeleteFiles,
+        DismissFileMenu
     ]
 );
 
 pub fn bind_keys(cx: &mut App) {
+    use crate::components::modal::{Next, Previous};
     cx.bind_keys([
+        KeyBinding::new("tab", Next, Some("FileMenu")),
+        KeyBinding::new("down", Next, Some("FileMenu")),
+        KeyBinding::new("shift-tab", Previous, Some("FileMenu")),
+        KeyBinding::new("up", Previous, Some("FileMenu")),
+        KeyBinding::new("f5", CopyOther, Some("FileList")),
+        KeyBinding::new("enter", StartRename, Some("FileList")),
+        KeyBinding::new("enter", CommitRename, Some("FileRename > TextInput")),
+        KeyBinding::new("escape", CancelRename, Some("FileRename > TextInput")),
+        KeyBinding::new("escape", DismissFileMenu, Some("FilePane")),
+        KeyBinding::new("cmd-shift-n", NewFolder, Some("FileList")),
+        KeyBinding::new("cmd-backspace", DeleteFiles, Some("FileList")),
         KeyBinding::new("up", MoveUp, Some("FileList")),
         KeyBinding::new("down", MoveDown, Some("FileList")),
         KeyBinding::new("shift-up", ExtendUp, Some("FileList")),
@@ -183,6 +212,11 @@ pub struct Pane {
     revision: u64,
     tree_revision: u64,
     location: Option<LocationRequest>,
+    operations: Option<Operations>,
+    rename: Option<InlineRename>,
+    menu: Option<Menu>,
+    branch_generation: u64,
+    branch_revisions: HashMap<Arc<Path>, u64>,
 }
 
 impl Pane {
@@ -215,6 +249,11 @@ impl Pane {
             revision: 0,
             tree_revision: 0,
             location: None,
+            operations: None,
+            rename: None,
+            menu: None,
+            branch_generation: 0,
+            branch_revisions: HashMap::new(),
         }
     }
 
@@ -246,10 +285,13 @@ impl Pane {
         let source = self.source.clone();
         let executor = cx.background_executor().clone();
         let revision = self.tree_revision;
+        let branch = self.branch_revisions.get(&path).copied();
         cx.spawn_in(window, async move |this, cx| {
             let result = source.list(&path, &executor).await;
             let _ = this.update_in(cx, |this, window, cx| {
-                if this.tree_revision == revision {
+                if this.tree_revision == revision
+                    && this.branch_revisions.get(&path).copied() == branch
+                {
                     this.tree.finish(path, result);
                     this.load_expanded(window, cx);
                     this.report_rows(window);
@@ -328,6 +370,9 @@ impl Pane {
                         this.remember();
                         this.history.commit(previous, direction);
                         this.tree_revision += 1;
+                        this.branch_revisions.clear();
+                        this.rename = None;
+                        this.menu = None;
                         let expanded = this.memory.borrow().get(&path).cloned().unwrap_or_default();
                         this.tree = Tree::new(path, this.tree.show_hidden, expanded);
                         this.tree
@@ -427,6 +472,9 @@ impl Pane {
                         this.path_error = Some(format!("No se puede leer: {error}"));
                     } else {
                         this.tree_revision += 1;
+                        this.branch_revisions.clear();
+                        this.rename = None;
+                        this.menu = None;
                         this.tree.refresh(listings);
                         this.remember();
                         this.load_expanded(window, cx);
@@ -561,6 +609,27 @@ impl Pane {
             )
             .child(div().flex_1().min_w_0().child(self.input.clone()))
             .child(
+                icon_button(
+                    "copy-other",
+                    "Copiar al otro panel (F5)",
+                    if self.source.side() == operations::Side::Local {
+                        Icon::Transfer
+                    } else {
+                        Icon::TransferBack
+                    },
+                    !self.tree.selected.is_empty(),
+                    theme,
+                )
+                .tab_index(0)
+                .tab_stop(!self.tree.selected.is_empty())
+                .focus(move |style| style.bg(theme.selection))
+                .tooltip(|_, cx| cx.new(|_| Tooltip("Copiar al otro panel · F5")).into())
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.list_focus.focus(window, cx);
+                    this.copy_to_other(window, cx);
+                })),
+            )
+            .child(
                 icon_button("refresh", "Actualizar", Icon::Refresh, true, theme).on_click(
                     cx.listener(|this, _, window, cx| {
                         this.list_focus.focus(window, cx);
@@ -596,6 +665,7 @@ impl Pane {
             columns,
             active,
             now,
+            ref selected_paths,
         } = *style;
         let row = &self.tree.rows[index];
         let offset = px(row.depth.min(9) as f32 * 14.);
@@ -648,7 +718,17 @@ impl Pane {
         } else {
             disclosure.into_any_element()
         };
-        base.id(ElementId::Path(row.path.clone()))
+        let editing = self
+            .rename
+            .as_ref()
+            .filter(|rename| rename.path == row.path.as_ref());
+        let drag = if editing.is_none() {
+            self.drag(&row.path, selected_paths.clone(), &name, icon)
+        } else {
+            None
+        };
+        let element = base
+            .id(ElementId::Path(row.path.clone()))
             .role(Role::TreeItem)
             .aria_label(name.clone())
             .aria_level(row.depth + 1)
@@ -675,25 +755,60 @@ impl Pane {
                     .pl(offset)
                     .child(disclosure)
                     .child(icon.draw(theme.secondary_text))
-                    .child(div().ml_1().truncate().child(name)),
+                    .child(
+                        div()
+                            .ml_1()
+                            .min_w_0()
+                            .flex_1()
+                            .when_some(editing, |cell, edit| {
+                                cell.key_context("FileRename").child(edit.input.clone())
+                            })
+                            .when(editing.is_none(), |cell| cell.truncate().child(name)),
+                    ),
             )
-            .children(columns.metadata(entry, now, theme))
-            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                this.list_focus.focus(window, cx);
-                let modifiers = event.modifiers();
-                let mode = if modifiers.shift {
-                    Selection::Range
-                } else if modifiers.platform {
-                    Selection::Toggle
-                } else {
-                    Selection::Single
-                };
-                this.tree.select(index, mode);
-                if event.click_count() == 2 && !modifiers.modified() {
-                    this.open_folder(index, window, cx);
-                }
-                cx.notify();
-            }))
+            .when(editing.is_none(), |element| {
+                element.children(columns.metadata(entry, now, theme))
+            })
+            .when_some(editing.and_then(|edit| edit.error), |element, error| {
+                element.child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme.danger)
+                        .truncate()
+                        .child(error),
+                )
+            })
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.open_menu(Some(index), event.position, window, cx);
+                }),
+            )
+            .when(editing.is_none(), |element| {
+                element.on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    this.list_focus.focus(window, cx);
+                    let modifiers = event.modifiers();
+                    let mode = if modifiers.shift {
+                        Selection::Range
+                    } else if modifiers.platform {
+                        Selection::Toggle
+                    } else {
+                        Selection::Single
+                    };
+                    this.tree.select(index, mode);
+                    if event.click_count() == 2 && !modifiers.modified() {
+                        this.open_folder(index, window, cx);
+                    }
+                    cx.notify();
+                }))
+            })
+            .when_some(drag, |element, drag| element.on_drag(drag, Self::drag_chip));
+        if expandable {
+            self.drop_zone(element, Some(row.path.clone()), theme, cx)
+        } else {
+            element.on_drop(|_: &operations::Drag, _, _| {})
+        }
     }
 }
 
@@ -714,6 +829,7 @@ impl Render for Pane {
             columns,
             active,
             now: SystemTime::now(),
+            selected_paths: self.selected_paths(),
         };
         let list = uniform_list("rows", self.tree.rows.len(), move |range, _, cx| {
             entity.update(cx, |this, cx| {
@@ -759,7 +875,22 @@ impl Render for Pane {
             .on_action(
                 cx.listener(|this, _: &ToggleHidden, window, cx| this.toggle_hidden(window, cx)),
             )
-            .child(self.toolbar(theme, cx))
+            .on_action(cx.listener(|this, _: &CommitRename, window, cx| {
+                cx.stop_propagation();
+                this.commit_rename(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CancelRename, window, cx| {
+                cx.stop_propagation();
+                this.cancel_rename(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &DismissFileMenu, window, cx| {
+                if this.menu.is_some() {
+                    cx.stop_propagation();
+                    this.dismiss_menu(cx);
+                    this.list_focus.focus(window, cx);
+                }
+            }))
+            .child(self.drop_zone(self.toolbar(theme, cx).id("pane-toolbar"), None, theme, cx))
             .when_some(self.path_error.clone(), |pane, error| {
                 pane.child(
                     div()
@@ -771,66 +902,98 @@ impl Render for Pane {
                         .child(error),
                 )
             })
-            .child(columns.header(theme))
+            .child(self.drop_zone(columns.header(theme).id("column-headers"), None, theme, cx))
             .child(
-                div()
-                    .id("file-tree")
-                    .role(Role::Tree)
-                    .aria_label(self.source.label())
-                    .track_focus(&self.list_focus)
-                    .key_context("FileList")
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .flex_col()
-                    .relative()
-                    .overflow_hidden()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| this.list_focus.focus(window, cx)),
-                    )
-                    .on_action(cx.listener(|this, _: &MoveUp, _, cx| {
-                        this.step(false, Selection::Single, cx)
-                    }))
-                    .on_action(cx.listener(|this, _: &MoveDown, _, cx| {
-                        this.step(true, Selection::Single, cx)
-                    }))
-                    .on_action(cx.listener(|this, _: &ExtendUp, _, cx| {
-                        this.step(false, Selection::Range, cx)
-                    }))
-                    .on_action(cx.listener(|this, _: &ExtendDown, _, cx| {
-                        this.step(true, Selection::Range, cx)
-                    }))
-                    .on_action(
-                        cx.listener(|this, _: &Expand, window, cx| {
-                            this.horizontal(true, window, cx)
-                        }),
-                    )
-                    .on_action(cx.listener(|this, _: &Collapse, window, cx| {
-                        this.horizontal(false, window, cx)
-                    }))
-                    .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
-                        this.tree.select_all();
-                        this.scroll_to_cursor();
-                        cx.notify();
-                    }))
-                    .on_action(cx.listener(|this, _: &OpenFolder, window, cx| {
-                        if let Some(index) = this.tree.cursor_index() {
-                            this.open_folder(index, window, cx);
-                        }
-                    }))
-                    .child(list)
-                    .when(empty, |list| {
-                        list.child(
-                            div()
-                                .absolute()
-                                .top(px(8.))
-                                .left(px(8.))
-                                .text_size(px(12.))
-                                .text_color(theme.secondary_text)
-                                .child("Carpeta vacía"),
+                self.drop_zone(
+                    div()
+                        .id("file-tree")
+                        .role(Role::Tree)
+                        .aria_label(self.source.label())
+                        .track_focus(&self.list_focus)
+                        .key_context("FileList")
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .relative()
+                        .overflow_hidden()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                if !this.rename.as_ref().is_some_and(|edit| {
+                                    edit.input.focus_handle(cx).is_focused(window)
+                                }) {
+                                    this.list_focus.focus(window, cx);
+                                }
+                            }),
                         )
-                    }),
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                                this.open_menu(None, event.position, window, cx);
+                            }),
+                        )
+                        .on_action(cx.listener(|this, _: &CopyOther, window, cx| {
+                            this.copy_to_other(window, cx)
+                        }))
+                        .on_action(cx.listener(|this, _: &NewFolder, window, cx| {
+                            this.new_folder(this.tree.root.clone(), window, cx)
+                        }))
+                        .on_action(cx.listener(|this, _: &StartRename, window, cx| {
+                            this.start_selected_rename(window, cx)
+                        }))
+                        .on_action(
+                            cx.listener(|this, _: &DeleteFiles, _, cx| this.delete_selected(cx)),
+                        )
+                        .on_action(cx.listener(|this, _: &MoveUp, _, cx| {
+                            this.step(false, Selection::Single, cx)
+                        }))
+                        .on_action(cx.listener(|this, _: &MoveDown, _, cx| {
+                            this.step(true, Selection::Single, cx)
+                        }))
+                        .on_action(cx.listener(|this, _: &ExtendUp, _, cx| {
+                            this.step(false, Selection::Range, cx)
+                        }))
+                        .on_action(cx.listener(|this, _: &ExtendDown, _, cx| {
+                            this.step(true, Selection::Range, cx)
+                        }))
+                        .on_action(cx.listener(|this, _: &Expand, window, cx| {
+                            this.horizontal(true, window, cx)
+                        }))
+                        .on_action(cx.listener(|this, _: &Collapse, window, cx| {
+                            this.horizontal(false, window, cx)
+                        }))
+                        .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
+                            this.tree.select_all();
+                            this.scroll_to_cursor();
+                            cx.notify();
+                        }))
+                        .on_action(cx.listener(|this, _: &OpenFolder, window, cx| {
+                            if let Some(index) = this.tree.cursor_index() {
+                                this.open_folder(index, window, cx);
+                            }
+                        }))
+                        .child(list)
+                        .when(empty, |list| {
+                            list.child(
+                                div()
+                                    .absolute()
+                                    .top(px(8.))
+                                    .left(px(8.))
+                                    .text_size(px(12.))
+                                    .text_color(theme.secondary_text)
+                                    .child("Carpeta vacía"),
+                            )
+                        }),
+                    None,
+                    theme,
+                    cx,
+                ),
+            )
+            .children(
+                self.menu
+                    .as_ref()
+                    .map(|menu| menu.render(selected, theme, cx)),
             )
             .child(
                 div()
@@ -916,6 +1079,7 @@ struct RowStyle {
     columns: Columns,
     active: bool,
     now: SystemTime,
+    selected_paths: Arc<[PathBuf]>,
 }
 
 impl Columns {

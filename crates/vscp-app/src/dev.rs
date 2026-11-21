@@ -78,3 +78,35 @@ pub fn window_width() -> Option<f32> {
         .filter(|&width| width >= 640)
         .map(f32::from)
 }
+
+pub fn transfer() -> Option<vscp_core::transfer::Spec> {
+    use vscp_core::transfer::{Direction, Spec};
+    let value = value("VSCP_DEV_TRANSFER")?;
+    let mut parts = value.splitn(3, ':');
+    let direction = match parts.next()? {
+        "upload" => Direction::Upload,
+        "download" => Direction::Download,
+        _ => return None,
+    };
+    let source = PathBuf::from(parts.next()?);
+    let destination = PathBuf::from(parts.next()?);
+    (source.is_absolute() && destination.is_absolute()).then(|| Spec {
+        direction,
+        sources: vec![source],
+        destination,
+    })
+}
+
+pub fn transfer_expanded() -> bool {
+    value("VSCP_DEV_TRANSFER_EXPANDED").as_deref() == Some("1")
+}
+
+pub fn file_state() -> Option<String> {
+    value("VSCP_DEV_FILE_STATE")
+}
+
+pub fn transfer_delay() -> std::time::Duration {
+    value("VSCP_DEV_TRANSFER_DELAY_MS")
+        .and_then(|value| value.parse().ok())
+        .map_or(std::time::Duration::ZERO, std::time::Duration::from_millis)
+}

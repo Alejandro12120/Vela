@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     future::Future,
     io,
     path::PathBuf,
@@ -20,7 +20,7 @@ use tokio::{
     time::timeout,
 };
 
-use crate::{ConnectionSpec, Entry, Error, askpass, sftp, ssh};
+use crate::{ConnectionSpec, Entry, Error, askpass, sftp, ssh, transfer};
 
 type Job = Pin<Box<dyn Future<Output = ()> + Send>>;
 type Operation = Box<dyn FnOnce(Arc<Sftp>) -> Job + Send>;
@@ -193,6 +193,7 @@ async fn connect(
 
 enum Command {
     Operation(Operation, Option<Arc<AtomicBool>>),
+    Transfer(transfer::Work),
     Disconnect(oneshot::Sender<Result<(), Error>>),
 }
 
@@ -206,7 +207,17 @@ async fn serve(
     let sftp = Arc::new(sftp);
     let mut tasks = JoinSet::new();
     let mut active = HashMap::<_, (AbortHandle, Option<Arc<AtomicBool>>)>::new();
+    let mut transfers = VecDeque::<transfer::Work>::new();
+    let mut transfer_active = None::<(tokio::task::Id, transfer::Cancel)>;
     let disconnect = loop {
+        if transfer_active.is_none()
+            && let Some(work) = transfers.pop_front()
+        {
+            let cancel = work.cancel.clone();
+            let channel = sftp.clone();
+            let task = tasks.spawn(async move { work.run(&channel).await });
+            transfer_active = Some((task.id(), cancel));
+        }
         tokio::select! {
             _ = stopping.recv() => break None,
             result = commands.recv() => match result {
@@ -214,17 +225,31 @@ async fn serve(
                     let task = tasks.spawn(operation(sftp.clone()));
                     active.insert(task.id(), (task, cancel));
                 }
+                Ok(Command::Transfer(work)) => transfers.push_back(work),
                 Ok(Command::Disconnect(reply)) => break Some(reply),
                 Err(_) => break None,
             },
             Some(result) = tasks.join_next_with_id(), if !tasks.is_empty() => {
                 let id = result.map_or_else(|err| err.id(), |(id, ())| id);
                 active.remove(&id);
+                if transfer_active.as_ref().is_some_and(|(running, _)| *running == id) {
+                    transfer_active = None;
+                }
             }
         }
     };
     commands.close();
-    while commands.try_recv().is_ok() {}
+    while let Ok(command) = commands.try_recv() {
+        if let Command::Transfer(work) = command {
+            transfers.push_back(work);
+        }
+    }
+    for work in transfers {
+        work.cancel_queued();
+    }
+    if let Some((_, cancel)) = transfer_active {
+        cancel.cancel();
+    }
     for (task, cancel) in active.values() {
         if let Some(cancel) = cancel {
             cancel.store(true, Ordering::Relaxed);
@@ -289,13 +314,30 @@ impl Session {
     }
 
     pub async fn rename(&self, from: PathBuf, to: PathBuf) -> Result<(), Error> {
-        self.run(move |sftp| async move { Ok(sftp.fs().rename(from, to).await?) })
-            .await
+        self.run(move |sftp| async move {
+            transfer::ensure_remote_free(&sftp, &to).await?;
+            Ok(sftp.fs().rename(from, to).await?)
+        })
+        .await
     }
 
     pub async fn remove_file(&self, path: PathBuf) -> Result<(), Error> {
         self.run(move |sftp| async move { Ok(sftp.fs().remove_file(path).await?) })
             .await
+    }
+
+    pub async fn remove_tree(&self, path: PathBuf) -> Result<(), Error> {
+        self.run(move |sftp| async move { transfer::remove_remote_tree(&sftp, path).await })
+            .await
+    }
+
+    pub async fn enqueue_transfer(&self, spec: transfer::Spec) -> Result<transfer::Job, Error> {
+        let (job, work) = transfer::Work::new(spec);
+        self.commands
+            .send(Command::Transfer(work))
+            .await
+            .map_err(closed)?;
+        Ok(job)
     }
 
     /// Progress callbacks run on the worker thread and should return promptly.

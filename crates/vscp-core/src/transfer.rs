@@ -54,6 +54,7 @@ pub struct Totals {
 pub enum Event {
     Status(Status),
     Planned(Totals),
+    SizeLimit(u64),
     File {
         index: usize,
         path: PathBuf,
@@ -141,13 +142,14 @@ pub struct Job {
 
 pub(crate) struct Work {
     spec: Spec,
+    staging_limit: Option<u64>,
     events: async_channel::Sender<Event>,
     cancellation: async_channel::Receiver<()>,
     pub(crate) cancel: Cancel,
 }
 
 impl Work {
-    pub(crate) fn new(spec: Spec) -> (Job, Self) {
+    pub(crate) fn new(spec: Spec, staging_limit: Option<u64>) -> (Job, Self) {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         let (events, receiver) = async_channel::unbounded();
         let (signal, cancellation) = async_channel::bounded(1);
@@ -157,6 +159,7 @@ impl Work {
         };
         let work = Self {
             spec,
+            staging_limit,
             events,
             cancellation,
             cancel: cancel.clone(),
@@ -282,6 +285,13 @@ impl Work {
             self.finish(Status::Cancelled, totals, copied, skipped, errors);
             return;
         }
+        if let Some(limit) = self.staging_limit
+            && check_size(totals.bytes, limit).is_err()
+        {
+            self.emit(Event::SizeLimit(totals.bytes));
+            self.finish(Status::Error, totals, 0, skipped, errors + 1);
+            return;
+        }
         if !plan.is_empty()
             && let Err(error) = self.prepare_destination(sftp).await
         {
@@ -302,11 +312,13 @@ impl Work {
         let mut policy = None;
         let mut bytes = 0u64;
         let mut index = 0;
+        let mut directory_times = Vec::new();
         for (source, planned, entry) in plan {
             if self.cancel.check().is_err() {
                 break;
             }
             let directory = entry.kind == EntryKind::Directory;
+            let mtime = entry.mtime;
             if !directory {
                 index += 1;
                 self.emit(Event::File {
@@ -335,6 +347,11 @@ impl Work {
             let (destination, result) = match result {
                 Ok(item) => item,
                 Err(Error::Cancelled) => break,
+                Err(Error::SizeLimit(bytes)) => {
+                    self.emit(Event::SizeLimit(bytes));
+                    self.finish(Status::Error, totals, copied, skipped, errors + 1);
+                    return;
+                }
                 Err(error) => (None, ItemResult::Failed(error.to_string())),
             };
             match &result {
@@ -342,6 +359,12 @@ impl Work {
                 ItemResult::Directory => {}
                 ItemResult::Skipped(_) => skipped += 1,
                 ItemResult::Failed(_) | ItemResult::Incomplete(_) => errors += 1,
+            }
+            if self.staging_limit.is_some()
+                && result == ItemResult::Directory
+                && let (Some(path), Some(mtime)) = (&destination, mtime)
+            {
+                directory_times.push((path.clone(), mtime));
             }
             if directory {
                 directories.insert(
@@ -356,6 +379,24 @@ impl Work {
                 destination,
                 result,
             });
+        }
+        for (directory, mtime) in directory_times.into_iter().rev() {
+            if self.cancel.check().is_err() {
+                break;
+            }
+            let result = fs::File::open(&directory).await;
+            let result = match result {
+                Ok(file) => file.into_std().await.set_modified(mtime),
+                Err(error) => Err(error),
+            };
+            if let Err(error) = result {
+                errors += 1;
+                self.emit(Event::Item {
+                    source: directory,
+                    destination: None,
+                    result: ItemResult::Failed(error.to_string()),
+                });
+            }
         }
         let status = if self.cancel.check().is_err() {
             Status::Cancelled
@@ -507,6 +548,13 @@ impl Work {
         let mtime = entry.mtime;
         let mode = entry.mode;
         if let Some(existing) = self.existing(sftp, &target).await? {
+            if self.staging_limit.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "Dos elementos tienen el mismo nombre en la caché local",
+                )
+                .into());
+            }
             if directory && existing.kind == EntryKind::Directory {
                 return Ok((Some(target), ItemResult::Directory));
             }
@@ -568,6 +616,9 @@ impl Work {
         if directory {
             match self.spec.direction {
                 Direction::Upload => sftp.fs().create_dir(&target).await?,
+                Direction::Download if self.staging_limit.is_some() => {
+                    fs::DirBuilder::new().mode(0o700).create(&target).await?;
+                }
                 Direction::Download => fs::create_dir(&target).await?,
             }
             return Ok((Some(target), ItemResult::Directory));
@@ -599,8 +650,10 @@ impl Work {
                 .await
             }
             Direction::Download => {
-                self.download(sftp, source, &target, overwrite, mode, mtime, &report)
-                    .await
+                self.download(
+                    sftp, source, &target, overwrite, mode, mtime, &report, start,
+                )
+                .await
             }
         };
         *bytes = start.saturating_add(progress.into_inner().expect("transfer progress").0);
@@ -691,6 +744,7 @@ impl Work {
         mode: Option<u32>,
         mtime: Option<SystemTime>,
         progress: &(dyn Fn(u64) + Send + Sync),
+        start: u64,
     ) -> Result<ItemResult, Error> {
         let source = sftp.open(source).await?;
         let part = partial_path(target, false);
@@ -702,7 +756,14 @@ impl Work {
             .open(&part)
             .await?;
         let mut partial = LocalPartial(Some(part));
-        sftp::read_file(source, &mut output, progress, &self.cancel.flag).await?;
+        sftp::read_file(
+            source,
+            &mut output,
+            progress,
+            &self.cancel.flag,
+            self.staging_limit.map(|limit| (start, limit)),
+        )
+        .await?;
         let output = output.into_std().await;
         if let Some(mode) = overwrite.unwrap_or(mode.map(|mode| mode & 0o777)) {
             output.set_permissions(std::fs::Permissions::from_mode(mode))?;
@@ -720,6 +781,14 @@ impl Work {
         }
         partial.0 = None;
         Ok(ItemResult::Copied)
+    }
+}
+
+pub(crate) fn check_size(bytes: u64, limit: u64) -> Result<(), Error> {
+    if bytes > limit {
+        Err(Error::SizeLimit(bytes))
+    } else {
+        Ok(())
     }
 }
 
@@ -831,6 +900,15 @@ pub fn numbered_name(name: &OsStr, index: usize) -> OsString {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn staging_size_guard_accepts_the_limit() {
+        assert!(check_size(2_000_000_000, 2_000_000_000).is_ok());
+        assert!(matches!(
+            check_size(2_000_000_001, 2_000_000_000),
+            Err(Error::SizeLimit(2_000_000_001))
+        ));
+    }
 
     #[test]
     fn numbers_names_without_losing_the_extension() {

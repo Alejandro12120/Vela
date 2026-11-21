@@ -189,7 +189,7 @@ pub(crate) async fn download(
     let source = sftp.open(remote).await?;
     check_cancel(cancel)?;
     let mut destination = fs::File::create(local).await?;
-    let result = read_file(source, &mut destination, progress, cancel).await;
+    let result = read_file(source, &mut destination, progress, cancel, None).await;
     drop(destination);
     if result.is_err() {
         fs::remove_file(local).await?;
@@ -225,16 +225,20 @@ pub(crate) async fn read_file(
     destination: &mut fs::File,
     progress: &(dyn Fn(u64) + Send + Sync),
     cancel: &AtomicBool,
+    budget: Option<(u64, u64)>,
 ) -> Result<(), Error> {
-    let mut done = 0;
+    let mut done = 0u64;
     let mut buffer = Default::default();
     loop {
         check_cancel(cancel)?;
         let Some(chunk) = source.read(CHUNK_SIZE as u32, buffer).await? else {
             break;
         };
+        done = done.saturating_add(chunk.len() as u64);
+        if let Some((start, limit)) = budget {
+            crate::transfer::check_size(start.saturating_add(done), limit)?;
+        }
         destination.write_all(&chunk).await?;
-        done += chunk.len() as u64;
         progress(done);
         buffer = chunk;
         buffer.clear();

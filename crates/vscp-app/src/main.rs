@@ -6,8 +6,11 @@ mod file_workspace;
 mod form;
 mod pane;
 mod pane_icons;
+#[cfg(target_os = "macos")]
+mod pasteboard_macos;
 mod rename;
 mod sidebar;
+mod staging;
 mod theme;
 mod transfers_view;
 mod tree;
@@ -46,6 +49,7 @@ fn main() {
             if let Some(appearance) = dev::appearance() {
                 cx.set_window_appearance(Some(appearance));
             }
+            pane::finder::initialize(cx);
             workspace::bind_keys(cx);
             pane::bind_keys(cx);
             components::text_input::bind_keys(cx);

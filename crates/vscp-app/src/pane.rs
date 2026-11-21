@@ -26,6 +26,9 @@ use crate::{
 #[path = "pane_operations.rs"]
 mod operations;
 
+#[path = "finder.rs"]
+pub mod finder;
+
 use crate::{
     context_menu::{Menu, Tooltip},
     rename::InlineRename,
@@ -51,6 +54,8 @@ actions!(
         SwitchPane,
         SubmitPath,
         CopyOther,
+        FinderCopy,
+        FinderPaste,
         StartRename,
         CommitRename,
         CancelRename,
@@ -62,6 +67,12 @@ actions!(
 
 pub fn bind_keys(cx: &mut App) {
     use crate::components::modal::{Next, Previous};
+    if cfg!(target_os = "macos") {
+        cx.bind_keys([
+            KeyBinding::new("cmd-c", FinderCopy, Some("FileList")),
+            KeyBinding::new("cmd-v", FinderPaste, Some("FileList")),
+        ]);
+    }
     cx.bind_keys([
         KeyBinding::new("tab", Next, Some("FileMenu")),
         KeyBinding::new("down", Next, Some("FileMenu")),
@@ -213,6 +224,7 @@ pub struct Pane {
     tree_revision: u64,
     location: Option<LocationRequest>,
     operations: Option<Operations>,
+    finder: finder::PaneFinder,
     rename: Option<InlineRename>,
     menu: Option<Menu>,
     branch_generation: u64,
@@ -250,6 +262,7 @@ impl Pane {
             tree_revision: 0,
             location: None,
             operations: None,
+            finder: finder::PaneFinder::default(),
             rename: None,
             menu: None,
             branch_generation: 0,
@@ -375,6 +388,7 @@ impl Pane {
                         this.menu = None;
                         let expanded = this.memory.borrow().get(&path).cloned().unwrap_or_default();
                         this.tree = Tree::new(path, this.tree.show_hidden, expanded);
+                        this.check_copy_selection();
                         this.tree
                             .finish(this.tree.root.as_path().into(), Ok(children));
                         this.load_expanded(window, cx);
@@ -476,6 +490,7 @@ impl Pane {
                         this.rename = None;
                         this.menu = None;
                         this.tree.refresh(listings);
+                        this.invalidate_drag_cache();
                         this.remember();
                         this.load_expanded(window, cx);
                         this.scroll_to_cursor();
@@ -511,6 +526,7 @@ impl Pane {
 
     fn toggle_hidden(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.tree.toggle_hidden();
+        self.check_copy_selection();
         self.load_expanded(window, cx);
         self.scroll_to_cursor();
         self.report_rows(window);
@@ -525,6 +541,7 @@ impl Pane {
         cx: &mut Context<Self>,
     ) {
         self.tree.set_expanded(path, expanded);
+        self.check_copy_selection();
         self.remember();
         self.load_expanded(window, cx);
         self.scroll_to_cursor();
@@ -534,6 +551,7 @@ impl Pane {
 
     fn step(&mut self, down: bool, mode: Selection, cx: &mut Context<Self>) {
         self.tree.step(down, mode);
+        self.check_copy_selection();
         self.scroll_to_cursor();
         cx.notify();
     }
@@ -547,6 +565,7 @@ impl Pane {
             self.set_expanded(row.path.clone(), right, window, cx);
         } else if !right {
             self.tree.select_parent(index);
+            self.check_copy_selection();
             self.scroll_to_cursor();
             cx.notify();
         }
@@ -797,13 +816,16 @@ impl Pane {
                         Selection::Single
                     };
                     this.tree.select(index, mode);
+                    this.check_copy_selection();
                     if event.click_count() == 2 && !modifiers.modified() {
                         this.open_folder(index, window, cx);
                     }
                     cx.notify();
                 }))
             })
-            .when_some(drag, |element, drag| element.on_drag(drag, Self::drag_chip));
+            .when_some(drag, |element, drag| {
+                self.wire_finder_drag(element, drag, cx)
+            });
         if expandable {
             self.drop_zone(element, Some(row.path.clone()), theme, cx)
         } else {
@@ -814,6 +836,7 @@ impl Pane {
 
 impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.check_copy_selection();
         let theme = Theme::for_window(window);
         let active = self.focus.contains_focused(window, cx);
         let width = window.viewport_size().width
@@ -933,6 +956,12 @@ impl Render for Pane {
                                 this.open_menu(None, event.position, window, cx);
                             }),
                         )
+                        .on_action(cx.listener(|this, _: &FinderCopy, window, cx| {
+                            this.finder_copy(window, cx)
+                        }))
+                        .on_action(cx.listener(|this, _: &FinderPaste, window, cx| {
+                            this.finder_paste(window, cx)
+                        }))
                         .on_action(cx.listener(|this, _: &CopyOther, window, cx| {
                             this.copy_to_other(window, cx)
                         }))
@@ -965,6 +994,7 @@ impl Render for Pane {
                         }))
                         .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
                             this.tree.select_all();
+                            this.check_copy_selection();
                             this.scroll_to_cursor();
                             cx.notify();
                         }))

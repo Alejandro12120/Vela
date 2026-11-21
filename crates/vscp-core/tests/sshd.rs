@@ -805,6 +805,69 @@ async fn collect(job: &Job, answers: &[Answer]) -> (Summary, Vec<ItemResult>) {
 }
 
 #[tokio::test]
+async fn finder_staging_preserves_nested_files_mtimes_and_exact_names() {
+    let fixture = Fixture::start();
+    let client = client();
+    let session = trust_first(&client, fixture.spec("b.pub")).await;
+    let remote = fixture.path("carpeta # ñ");
+    let nested = remote.join("más # dentro");
+    let top_file = fixture.path("suelto # ñ.txt");
+    let staging = fixture.path("staging");
+    let mtime = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_123);
+    fs::create_dir_all(&nested).unwrap();
+    let nested_file = nested.join("archivo # ñ.txt");
+    for path in [&top_file, &nested_file] {
+        fs::write(path, path.file_name().unwrap().as_encoded_bytes()).unwrap();
+    }
+    for path in [&top_file, &nested_file, &nested, &remote] {
+        File::open(path).unwrap().set_modified(mtime).unwrap();
+    }
+    let roots = vec![top_file.clone(), remote.clone(), nested_file.clone()];
+    let job = within(session.enqueue_staging(roots.clone(), staging.clone(), 1_000)).await;
+    let (summary, _) = collect(&job, &[]).await;
+    assert_eq!(summary.status, Status::Completed);
+    assert_eq!(summary.copied, 2);
+
+    let staged_root = staging.join(remote.file_name().unwrap());
+    let staged_nested = staged_root.join(nested.file_name().unwrap());
+    for (original, staged) in [
+        (&top_file, staging.join(top_file.file_name().unwrap())),
+        (
+            &nested_file,
+            staged_nested.join(nested_file.file_name().unwrap()),
+        ),
+    ] {
+        assert_eq!(sha256(&staged), sha256(original));
+        assert_eq!(fs::metadata(staged).unwrap().modified().unwrap(), mtime);
+    }
+    for (directory, children) in [(&staging, 2), (&staged_root, 1), (&staged_nested, 1)] {
+        assert_eq!(fs::read_dir(directory).unwrap().count(), children);
+    }
+    for directory in [&staged_root, &staged_nested] {
+        let meta = fs::metadata(directory).unwrap();
+        assert_eq!(meta.mode() & 0o777, 0o700);
+        assert_eq!(meta.modified().unwrap(), mtime);
+    }
+
+    let refused = fixture.path("refused");
+    let job = within(session.enqueue_staging(roots, refused.clone(), 1)).await;
+    let mut size = None;
+    loop {
+        match event(&job).await {
+            Event::SizeLimit(bytes) => size = Some(bytes),
+            Event::Finished(summary) => {
+                assert_eq!(summary.status, Status::Error);
+                assert_eq!(size, Some(summary.totals.bytes));
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(!refused.exists());
+    disconnect(&session).await;
+}
+
+#[tokio::test]
 async fn recursive_queue_round_trip_preserves_content_modes_and_mtimes() {
     let fixture = Fixture::start();
     let client = client();

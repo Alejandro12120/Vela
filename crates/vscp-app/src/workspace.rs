@@ -155,7 +155,17 @@ impl Workspace {
         }).detach();
         cx.observe_window_appearance(window, |_, _, cx| cx.notify())
             .detach();
-        cx.on_app_quit(|this, _| this.shutdown()).detach();
+        cx.on_app_quit(|this, cx| {
+            let cleanup = (!this.quitting).then(|| crate::pane::finder::quit_cleanup(cx));
+            let shutdown = this.shutdown();
+            async move {
+                shutdown.await;
+                if let Some(cleanup) = cleanup {
+                    cleanup();
+                }
+            }
+        })
+        .detach();
 
         Self {
             servers: Vec::new(),
@@ -201,11 +211,15 @@ impl Workspace {
             return;
         }
         self.quitting = true;
+        crate::pane::finder::begin_quit(cx);
         let shutdown = self.shutdown();
         cx.notify();
         cx.spawn_in(window, async move |_, cx| {
             shutdown.await;
-            let _ = cx.update(|_, cx| cx.quit());
+            let _ = cx.update(|_, cx| {
+                crate::pane::finder::quit_cleanup(cx)();
+                cx.quit();
+            });
         })
         .detach();
     }
@@ -834,6 +848,7 @@ impl Workspace {
                     Error::ConnectFailed { stderr, .. } => {
                         ("No se pudo conectar con el servidor.", Some(stderr), false)
                     }
+                    Error::SizeLimit(_) => ("Se superó el límite de transferencia.", None, false),
                     Error::Cancelled => ("Se canceló la conexión.", None, false),
                 };
                 details

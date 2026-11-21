@@ -1,6 +1,6 @@
 # Plan del MVP de vSCP
 
-Estado: transferencias y operaciones F3 en la rama `mvp`. Las prioridades siguen siendo, por orden, RAM, arranque instantáneo y fluidez, y tamaño instalado.
+Estado: integración con Finder F4 implementada en la rama `mvp`. Queda pendiente el recorrido manual con Finder. Las prioridades siguen siendo, por orden, RAM, arranque instantáneo y fluidez, y tamaño instalado.
 
 ## 1. Qué se descarta del hilo anterior
 
@@ -27,7 +27,7 @@ Prueba de arrastre: el usuario indicó el 2026-11-20 que se considera superada. 
   - **Arrastre hacia el gestor de archivos** con `external_drag_payload(...)` → `ExternalDragPayload::Files`. En macOS llama a `beginDraggingSessionWithItems` y en Wayland también está implementado. En X11 no está implementado.
   - Recibir archivos arrastrados desde Finder o Dolphin (`FileDropEvent`, `ExternalPaths`).
   - Leer archivos del portapapeles (`ClipboardEntry::ExternalPaths`).
-- Lo que GPUI **no** resuelve: escribir archivos en el portapapeles. En macOS, `write` ignora `ExternalPaths`. Se añadirá un módulo pequeño con `objc2-app-kit` que escriba `NSURL` en `NSPasteboard`, igual que hace `probes/file-handoff/macos.swift`, que ya funcionó en Finder. En Linux quedará pendiente para la fase de Linux.
+- Lo que GPUI **no** resuelve: escribir archivos en el portapapeles. En macOS, `write` ignora `ExternalPaths`. F4 usa `objc2-app-kit =0.3.2` para escribir `NSURL` en `NSPasteboard`, igual que hace `probes/file-handoff/macos.swift`, que ya funcionó en Finder. En Linux quedará pendiente para la fase de Linux.
 - F0 fija Rust 1.98.1. El MacBook usa las Command Line Tools y `xcrun -f metal` no encuentra el compilador. Se activa `runtime_shaders` en `gpui-pre-platform`, que la propaga al backend de macOS para compilar los shaders Metal durante el arranque. La medición de F0 incluye ese coste. F2a activa también `font-kit` para rasterizar el texto en macOS.
 - Sin `gpui-component` en el MVP. La 0.9.0 depende de `gpui-pre =0.3.11` y trae árbol y tabla, pero arrastra gráficas, resaltado, `lsp-types`, `ropey` y otras dependencias. Se implementarán solo los controles necesarios: fila de árbol, barra de ruta, botón, campo de texto, diálogo y barra de progreso. Se reconsiderará si el campo de texto resulta costoso, midiendo antes el binario y la RAM.
 
@@ -115,10 +115,11 @@ crates/
    - Se conserva la fecha de modificación de los archivos. Los nuevos reciben los permisos de origen enmascarados con `0o777`. Los sobrescritos conservan los permisos del destino.
 5. Crear carpeta, renombrar en línea y eliminar con confirmación en ambos paneles. En macOS, la eliminación local mueve a la Papelera. La eliminación remota es recursiva y permanente, y elimina los enlaces sin recorrer sus destinos.
 6. Integración con Finder:
-   - arrastrar desde Finder al panel remoto sube los archivos;
-   - ⌘V en el panel remoto sube los archivos del portapapeles;
-   - ⌘C en el panel remoto descarga a caché y publica la URL;
-   - arrastrar del panel remoto a Finder empieza a descargar en cuanto empieza el arrastre. Se ofrece el archivo al salir de la ventana si ya está completo (limitación aceptada, sección 8).
+   - Arrastrar desde Finder o pulsar ⌘V en el panel remoto sube los archivos a la carpeta de destino o a la raíz del panel. ⌘C en el panel local publica las URL originales. ⌘V en ese panel descarga los originales remotos de la copia de vSCP. La copia local entre carpetas queda fuera de F4.
+   - ⌘C de archivos remotos y el inicio de un arrastre remoto preparan descargas recursivas en `~/Library/Caches/vSCP/staging/<id aleatorio>/`. Los directorios tienen permisos 0700 y se conservan los nombres y fechas de modificación. El límite es de 2 GB por preparación.
+   - Una nueva copia al portapapeles sustituye y borra la anterior al completarse. Al iniciar y salir se conservan las descargas todavía referenciadas por las URL del portapapeles. El cierre limpia las demás descargas de preparación y deja intacto el portapapeles. Pegar los originales en el panel local requiere la sesión remota de la copia.
+   - El arrastre remoto reutiliza la preparación por selección mientras siga vigente. Ofrece las URL si la descarga terminó al salir de la ventana. En caso contrario, el usuario vuelve a arrastrar cuando aparezca «Listo para arrastrar».
+   - En `gpui-pre-macos` 0.3.11, `src/window.rs:3789–3792` ofrece únicamente `Copy` a Finder (`OutsideApplication`) y `Copy | Move` dentro de la aplicación y para contextos desconocidos. Se permite arrastrar archivos locales a Finder con sus rutas reales.
 7. Edición remota con doble clic:
    - descarga a una copia local;
    - abre la app predeterminada (`open`) o el editor configurado;

@@ -8,6 +8,10 @@ pub fn size(entry: &Entry) -> String {
     let Some(bytes) = entry.size.filter(|_| !entry.is_directory()) else {
         return EMPTY.into();
     };
+    format_size(bytes)
+}
+
+pub fn format_size(bytes: u64) -> String {
     if bytes < 1000 {
         return format!("{bytes} B");
     }

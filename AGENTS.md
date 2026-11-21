@@ -40,7 +40,7 @@ Use an isolated configuration directory for development runs. The `dev` Cargo fe
 
 - `VSCP_CONFIG_DIR` sets the directory for `servers.toml` and the OpenSSH `known_hosts` file.
 - `VSCP_DEV_AUTOCONNECT` connects to the server with the given display name after loading the list.
-- `VSCP_DEV_LOG=1` prints connection results, listing durations, visible row counts and transfer events to stderr.
+- `VSCP_DEV_LOG=1` prints connection results, listing durations, visible row counts, transfer events and native file-drag payload decisions to stderr.
 - `VSCP_DEV_THEME=light|dark` overrides the application theme without changing system appearance.
 - `VSCP_DEV_LOCAL_ROOT=<absolute path>` overrides the local pane's starting folder.
 - `VSCP_DEV_REMOTE_DELAY_MS=<milliseconds>` delays each remote listing asynchronously.
@@ -50,6 +50,10 @@ Use an isolated configuration directory for development runs. The `dev` Cargo fe
 - `VSCP_DEV_TRANSFER=<upload|download>:<absolute source>:<absolute destination>` enqueues one transfer after autoconnect. Conflicts use the usual dialog.
 - `VSCP_DEV_TRANSFER_DELAY_MS=<milliseconds>` waits after autoconnect before enqueueing that transfer.
 - `VSCP_DEV_TRANSFER_EXPANDED=1` opens the transfer history at launch.
+- `VSCP_DEV_COPY=<absolute remote path>[,...]` prepares a remote clipboard copy using the regular F4 transfer after autoconnect.
+- `VSCP_DEV_PASTE=remote` runs the remote paste action after autoconnect.
+- `VSCP_DEV_STAGING_ROOT=<absolute path>` isolates the Finder staging cache for development.
+- `VSCP_DEV_DROP_HIGHLIGHT=1` previews an external drag over the remote root without submitting a drop.
 - `VSCP_DEV_FILE_STATE=<local|remote>:<delete|rename|menu>` selects the first entry and opens the given state for visual checks. The delete trigger only opens the confirmation.
 
 For example, from the repository root in a macOS graphical session:

@@ -332,7 +332,33 @@ impl Session {
     }
 
     pub async fn enqueue_transfer(&self, spec: transfer::Spec) -> Result<transfer::Job, Error> {
-        let (job, work) = transfer::Work::new(spec);
+        self.queue_transfer(spec, None).await
+    }
+
+    /// Download into a private staging directory with exact names and a byte limit.
+    pub async fn enqueue_staging(
+        &self,
+        sources: Vec<PathBuf>,
+        destination: PathBuf,
+        limit: u64,
+    ) -> Result<transfer::Job, Error> {
+        self.queue_transfer(
+            transfer::Spec {
+                direction: transfer::Direction::Download,
+                sources,
+                destination,
+            },
+            Some(limit),
+        )
+        .await
+    }
+
+    async fn queue_transfer(
+        &self,
+        spec: transfer::Spec,
+        staging_limit: Option<u64>,
+    ) -> Result<transfer::Job, Error> {
+        let (job, work) = transfer::Work::new(spec, staging_limit);
         self.commands
             .send(Command::Transfer(work))
             .await

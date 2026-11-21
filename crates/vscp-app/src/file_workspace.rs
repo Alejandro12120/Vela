@@ -70,6 +70,28 @@ impl Panes {
             pane.wire(server, local.downgrade(), transfers.clone());
             pane.start(window, cx);
         });
+        if dev::drop_highlight() {
+            crate::pane::finder::dev_drop_highlight(window, cx);
+        }
+        let copy_paths = dev::copy_paths();
+        let paste = dev::paste_remote();
+        if !copy_paths.is_empty() || paste {
+            remote.update(cx, |_, cx| {
+                let timer = cx.background_executor().timer(Duration::from_millis(500));
+                cx.spawn_in(window, async move |pane, cx| {
+                    timer.await;
+                    let _ = pane.update_in(cx, |pane, window, cx| {
+                        if !copy_paths.is_empty() {
+                            pane.dev_copy(copy_paths, window, cx);
+                        }
+                        if paste {
+                            pane.finder_paste(window, cx);
+                        }
+                    });
+                })
+                .detach();
+            });
+        }
         if let Some(spec) = dev::transfer() {
             let pane = match spec.direction {
                 vscp_core::transfer::Direction::Upload => remote.downgrade(),

@@ -19,6 +19,8 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("Operation cancelled")]
     Cancelled,
+    #[error("Transfer byte limit exceeded ({0} bytes)")]
+    SizeLimit(u64),
 }
 
 impl Error {

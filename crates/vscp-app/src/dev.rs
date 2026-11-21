@@ -110,3 +110,22 @@ pub fn transfer_delay() -> std::time::Duration {
         .and_then(|value| value.parse().ok())
         .map_or(std::time::Duration::ZERO, std::time::Duration::from_millis)
 }
+
+pub fn copy_paths() -> Vec<PathBuf> {
+    value("VSCP_DEV_COPY")
+        .into_iter()
+        .flat_map(|paths| paths.split(',').map(PathBuf::from).collect::<Vec<_>>())
+        .collect()
+}
+
+pub fn paste_remote() -> bool {
+    value("VSCP_DEV_PASTE").as_deref() == Some("remote")
+}
+
+pub fn staging_root() -> Option<PathBuf> {
+    value("VSCP_DEV_STAGING_ROOT").map(PathBuf::from)
+}
+
+pub fn drop_highlight() -> bool {
+    value("VSCP_DEV_DROP_HIGHLIGHT").as_deref() == Some("1")
+}

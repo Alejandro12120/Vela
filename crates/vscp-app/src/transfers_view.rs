@@ -1,7 +1,8 @@
 use std::{
     collections::BTreeSet,
     path::PathBuf,
-    time::{Instant, SystemTime},
+    rc::Rc,
+    time::{Duration, Instant, SystemTime},
 };
 
 use gpui::{
@@ -20,7 +21,7 @@ use crate::{
         modal,
     },
     dev, file_metadata,
-    pane::{Pane, Source},
+    pane::{Pane, Source, finder::Purpose},
     pane_icons::Icon,
     theme::Theme,
 };
@@ -28,6 +29,7 @@ use crate::{
 struct Row {
     id: JobId,
     direction: Direction,
+    staging: Option<Purpose>,
     status: Status,
     totals: Totals,
     file: Option<(usize, PathBuf)>,
@@ -118,6 +120,12 @@ struct Deletion {
     pane: WeakEntity<Pane>,
 }
 
+pub(crate) enum TransferOrigin {
+    Pane,
+    RemoteCopy(Session),
+    StagedUpload(Rc<crate::staging::Directory>),
+}
+
 pub struct Transfers {
     session: Session,
     server: String,
@@ -130,6 +138,7 @@ pub struct Transfers {
     last: FocusHandle,
     previous: Option<FocusHandle>,
     error: Option<String>,
+    finder_notice: Option<(Instant, &'static str)>,
 }
 
 impl Transfers {
@@ -146,6 +155,7 @@ impl Transfers {
             last: cx.focus_handle().tab_stop(true),
             previous: None,
             error: None,
+            finder_notice: None,
         }
     }
 
@@ -156,8 +166,24 @@ impl Transfers {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
-        let session = self.session.clone();
+        self.enqueue_using(TransferOrigin::Pane, spec, target, window, cx);
+    }
+
+    pub fn enqueue_using(
+        &mut self,
+        origin: TransferOrigin,
+        spec: transfer::Spec,
+        target: WeakEntity<Pane>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (session, staging) = match origin {
+            TransferOrigin::Pane => (self.session.clone(), None),
+            TransferOrigin::RemoteCopy(session) => (session, None),
+            TransferOrigin::StagedUpload(staging) => (self.session.clone(), Some(staging)),
+        };
         cx.spawn_in(window, async move |this, cx| {
+            let _staging = staging;
             let direction = spec.direction;
             let mut changed = BTreeSet::from([spec.destination.clone()]);
             let job = match session.enqueue_transfer(spec).await {
@@ -176,6 +202,7 @@ impl Transfers {
                     this.rows.push(Row {
                         id,
                         direction,
+                        staging: None,
                         status: Status::Queued,
                         totals: Totals::default(),
                         file: None,
@@ -246,6 +273,59 @@ impl Transfers {
                 let _ = target.update(cx, |pane, cx| {
                     pane.refresh_changed(changed, None, window, cx)
                 });
+            });
+        })
+        .detach();
+    }
+
+    pub fn track_stage(&mut self, job: &transfer::Job, purpose: Purpose, cx: &mut Context<Self>) {
+        self.error = None;
+        self.finder_notice = None;
+        self.rows.push(Row {
+            id: job.id,
+            direction: Direction::Download,
+            staging: Some(purpose),
+            status: Status::Queued,
+            totals: Totals::default(),
+            file: None,
+            bytes: 0,
+            started: None,
+            speed: 0.,
+            errors: 0,
+            details: Vec::new(),
+            cancel: job.cancel.clone(),
+        });
+        cx.notify();
+    }
+
+    pub fn stage_event(&mut self, id: JobId, event: Event, cx: &mut Context<Self>) {
+        if let Some(row) = self.rows.iter_mut().find(|row| row.id == id) {
+            row.update(event);
+            cx.notify();
+        }
+    }
+
+    pub fn finder_error(&mut self, error: String, cx: &mut Context<Self>) {
+        self.finder_notice = None;
+        self.error = Some(error);
+        cx.notify();
+    }
+
+    pub fn finder_notice(&mut self, notice: &'static str, window: &Window, cx: &mut Context<Self>) {
+        let shown = Instant::now();
+        self.finder_notice = Some((shown, notice));
+        cx.notify();
+        let timer = cx.background_executor().timer(Duration::from_secs(5));
+        cx.spawn_in(window, async move |this, cx| {
+            timer.await;
+            let _ = this.update(cx, |this, cx| {
+                if this
+                    .finder_notice
+                    .is_some_and(|(timestamp, _)| timestamp == shown)
+                {
+                    this.finder_notice = None;
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -533,41 +613,52 @@ impl Transfers {
         let progress = active.map_or(0., Row::progress);
         let caption = active.map_or_else(
             || {
+                if let Some((_, notice)) = self.finder_notice {
+                    return notice.into();
+                }
                 self.rows.last().map_or_else(
                     || "Transferencias".into(),
                     |row| status_label(row.status, row.errors),
                 )
             },
-            |row| match &row.file {
-                Some((index, file)) => {
-                    let verb = match row.direction {
-                        Direction::Upload => "Subiendo",
-                        Direction::Download => "Descargando",
-                    };
-                    let name = file
-                        .file_name()
-                        .unwrap_or(file.as_os_str())
-                        .to_string_lossy();
-                    let speed = format!("{:.1}", row.speed).replace('.', ",");
-                    format!(
-                        "{verb} {index} de {} · {name} · {speed} MB/s · {:.0} %",
-                        row.totals.files,
-                        progress * 100.
-                    )
+            |row| {
+                if let Some(purpose) = row.staging {
+                    return format!("{} · {:.0} %", purpose.caption(), progress * 100.);
                 }
-                None => status_label(row.status, row.errors),
+                match &row.file {
+                    Some((index, file)) => {
+                        let verb = match row.direction {
+                            Direction::Upload => "Subiendo",
+                            Direction::Download => "Descargando",
+                        };
+                        let name = file
+                            .file_name()
+                            .unwrap_or(file.as_os_str())
+                            .to_string_lossy();
+                        let speed = format!("{:.1}", row.speed).replace('.', ",");
+                        format!(
+                            "{verb} {index} de {} · {name} · {speed} MB/s · {:.0} %",
+                            row.totals.files,
+                            progress * 100.
+                        )
+                    }
+                    None => status_label(row.status, row.errors),
+                }
             },
         );
         div()
             .flex()
             .flex_col()
             .flex_none()
-            .when(!self.rows.is_empty() || self.error.is_some(), |strip| {
-                strip
-                    .border_t_1()
-                    .border_color(theme.border)
-                    .bg(theme.raised)
-            })
+            .when(
+                !self.rows.is_empty() || self.error.is_some() || self.finder_notice.is_some(),
+                |strip| {
+                    strip
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .bg(theme.raised)
+                },
+            )
             .when(!self.rows.is_empty(), |strip| {
                 strip.child(
                     div()
@@ -708,6 +799,20 @@ impl Transfers {
                         ),
                     )
             })
+            .when_some(
+                self.finder_notice
+                    .filter(|_| active.is_some() || self.rows.is_empty()),
+                |strip, (_, notice)| {
+                    strip.child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .text_size(px(12.))
+                            .text_color(theme.secondary_text)
+                            .child(notice),
+                    )
+                },
+            )
             .when_some(self.error.clone(), |strip, error| {
                 strip.child(
                     div()
@@ -717,17 +822,20 @@ impl Transfers {
                         .gap_2()
                         .p_2()
                         .text_color(theme.danger)
-                        .child(error)
-                        .child(button(
-                            "dismiss-error",
-                            "Cerrar",
-                            Variant::Secondary,
-                            theme,
-                            cx.listener(|this, _, _, cx| {
-                                this.error = None;
-                                cx.notify();
-                            }),
-                        )),
+                        .child(div().flex_1().min_w_0().whitespace_normal().child(error))
+                        .child(
+                            button(
+                                "dismiss-error",
+                                "Cerrar",
+                                Variant::Secondary,
+                                theme,
+                                cx.listener(|this, _, _, cx| {
+                                    this.error = None;
+                                    cx.notify();
+                                }),
+                            )
+                            .flex_none(),
+                        ),
                 )
             })
     }

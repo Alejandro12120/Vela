@@ -89,14 +89,14 @@ impl Source {
 pub(super) struct Operations {
     server: Arc<str>,
     other: WeakEntity<Pane>,
-    transfers: Entity<Transfers>,
+    pub(super) transfers: Entity<Transfers>,
 }
 
 #[derive(Clone)]
 pub(super) struct Drag {
     pub side: Side,
     server: Arc<str>,
-    paths: Arc<[PathBuf]>,
+    pub(super) paths: Arc<[PathBuf]>,
     label: String,
     icon: Icon,
 }
@@ -209,6 +209,7 @@ impl Pane {
         let server = operations.server.clone();
         let side = self.source.side();
         let is_folder = target.is_some();
+        let external_target = target.clone();
         element
             .drag_over(move |style, drag: &Drag, _, _| {
                 if drag.side != side && drag.server == server {
@@ -248,6 +249,27 @@ impl Pane {
                         .update(cx, |queue, cx| queue.enqueue(spec, target, window, cx));
                 }
             }))
+            .when(
+                cfg!(target_os = "macos") && side == Side::Remote,
+                |element| {
+                    element
+                        .drag_over(move |style, paths: &gpui::ExternalPaths, _, _| {
+                            if !super::finder::valid_external_paths(paths) {
+                                return style;
+                            }
+                            style.bg(if is_folder {
+                                theme.text_selection
+                            } else {
+                                theme.text_selection.opacity(0.35)
+                            })
+                        })
+                        .on_drop(cx.listener(
+                            move |pane, paths: &gpui::ExternalPaths, window, cx| {
+                                pane.finder_drop(paths, external_target.as_deref(), window, cx);
+                            },
+                        ))
+                },
+            )
     }
 
     pub(super) fn drag_chip(
@@ -309,6 +331,7 @@ impl Pane {
             }
             if !self.tree.selected.contains(&row.path) {
                 self.tree.select(index, Selection::Single);
+                self.check_copy_selection();
             }
         }
         let first = cx.focus_handle().tab_stop(true);
@@ -366,6 +389,7 @@ impl Pane {
             .entry()
             .is_some_and(|entry| entry.kind == EntryKind::Directory);
         self.tree.select(index, Selection::Single);
+        self.check_copy_selection();
         self.scroll_to_cursor();
         self.rename = InlineRename::new(path, directory, window, cx);
         if self.rename.is_none() {
@@ -495,6 +519,7 @@ impl Pane {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
+        self.invalidate_drag_cache();
         let paths: BTreeSet<_> = paths
             .into_iter()
             .filter(|path| self.tree.has_branch(path) || path == &self.tree.root)
@@ -538,6 +563,7 @@ impl Pane {
     pub fn dev_state(&mut self, action: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(index) = self.tree.rows.iter().position(|row| row.entry().is_some()) {
             self.tree.select(index, Selection::Single);
+            self.check_copy_selection();
             self.list_focus.focus(window, cx);
             match action {
                 "delete" => self.delete_selected(cx),

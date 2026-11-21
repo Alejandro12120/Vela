@@ -15,6 +15,12 @@ gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features =
 vscp-core = { path = "../vscp-core" }
 unicode-segmentation = "=1.13.3"
 libc = "=0.2.191"
+tempfile = "=3.27.0"
 
 [features]
 dev = []
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "=0.6.5"
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["NSPasteboard"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSArray", "NSURL"] }

@@ -265,7 +265,11 @@ impl Session {
     }
 
     pub async fn home_dir(&self) -> Result<PathBuf, Error> {
-        self.run(|sftp| async move { Ok(sftp.fs().canonicalize(".").await?) })
+        self.realpath(".".into()).await
+    }
+
+    pub async fn realpath(&self, path: PathBuf) -> Result<PathBuf, Error> {
+        self.run(move |sftp| async move { Ok(sftp.fs().canonicalize(path).await?) })
             .await
     }
 

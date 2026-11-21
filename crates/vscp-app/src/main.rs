@@ -1,8 +1,13 @@
 mod components;
 mod dev;
+mod file_metadata;
+mod file_workspace;
 mod form;
+mod pane;
+mod pane_icons;
 mod sidebar;
 mod theme;
+mod tree;
 mod workspace;
 
 use std::time::Instant;
@@ -39,6 +44,7 @@ fn main() {
                 cx.set_window_appearance(Some(appearance));
             }
             workspace::bind_keys(cx);
+            pane::bind_keys(cx);
             components::text_input::bind_keys(cx);
             cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
             cx.set_menus([Menu::new("vSCP").items([MenuItem::action("Salir de vSCP", Quit)])]);
@@ -48,7 +54,7 @@ fn main() {
                     WindowOptions {
                         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                             None,
-                            size(px(1100.0), px(700.0)),
+                            size(px(dev::window_width().unwrap_or(1100.)), px(700.)),
                             cx,
                         ))),
                         titlebar: Some(TitlebarOptions {

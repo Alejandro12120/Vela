@@ -1,6 +1,8 @@
 use std::{
+    cell::Cell,
     collections::{HashMap, VecDeque},
     path::PathBuf,
+    rc::Rc,
     time::Instant,
 };
 
@@ -20,17 +22,21 @@ use crate::{
         text_input::TextInput,
     },
     dev,
+    file_workspace::Panes,
     form::{Field, Form},
+    pane::{PaneMemory, icon_button},
+    pane_icons::Icon,
     theme::Theme,
 };
 
-actions!(workspace, [Next, Previous, DismissMenu]);
+actions!(workspace, [Next, Previous, DismissMenu, ToggleSidebar]);
 
 pub fn bind_keys(cx: &mut gpui::App) {
     cx.bind_keys([
         KeyBinding::new("tab", Next, Some("Workspace")),
         KeyBinding::new("shift-tab", Previous, Some("Workspace")),
         KeyBinding::new("escape", DismissMenu, Some("Workspace")),
+        KeyBinding::new("ctrl-cmd-s", ToggleSidebar, Some("Workspace")),
         KeyBinding::new("tab", modal::Next, Some("Dialog")),
         KeyBinding::new("shift-tab", modal::Previous, Some("Dialog")),
         KeyBinding::new("enter", modal::Confirm, Some("Dialog")),
@@ -40,11 +46,7 @@ pub fn bind_keys(cx: &mut gpui::App) {
 
 pub enum Connection {
     Connecting,
-    Connected {
-        session: Session,
-        path: PathBuf,
-        entries: usize,
-    },
+    Connected { session: Session, panes: Panes },
     Disconnecting,
     Error(Error),
 }
@@ -68,6 +70,8 @@ pub struct Workspace {
     pub dir: Option<PathBuf>,
     pub saving: bool,
     loading: bool,
+    sidebar_visible: Rc<Cell<bool>>,
+    pane_memory: HashMap<String, PaneMemory>,
     quitting: bool,
     config_error: Option<&'static str>,
     client: Option<Client>,
@@ -161,6 +165,8 @@ impl Workspace {
             dir: None,
             saving: false,
             loading: true,
+            sidebar_visible: Rc::new(Cell::new(true)),
+            pane_memory: HashMap::new(),
             quitting: false,
             config_error: None,
             client,
@@ -241,19 +247,13 @@ impl Workspace {
             let result = async {
                 let session = client.connect(spec).await?;
                 dev::log(format_args!("connected {}", server.name));
-                let listing = async {
-                    let path = match server.initial_remote_path {
-                        Some(path) => path,
-                        None => session.home_dir().await?,
-                    };
-                    let entries = session.list_dir(path.clone()).await?.len();
-                    Ok::<_, Error>((path, entries))
-                }.await;
-                match listing {
-                    Ok((path, entries)) => {
-                        dev::log(format_args!("listed {} entries at {}", entries, path.display()));
-                        Ok(Connection::Connected { session, path, entries })
-                    }
+                let path = match server.initial_remote_path {
+                    Some(path) if path.is_absolute() => Ok(path),
+                    Some(path) => session.home_dir().await.map(|home| home.join(path)),
+                    None => session.home_dir().await,
+                };
+                match path {
+                    Ok(path) => Ok((session, path)),
                     Err(error) => {
                         let _ = session.disconnect().await;
                         Err(error)
@@ -261,17 +261,43 @@ impl Workspace {
                 }
             }.await;
             let _ = this.update_in(cx, |this, window, cx| {
-                let state = result.unwrap_or_else(|error| {
-                    dev::log(format_args!("connection failed for {}", server.name));
-                    Connection::Error(error)
-                });
-                this.connections.insert(server.id, state);
                 if matches!(&this.dialog, Some(Dialog::Prompt(prompt)) if !prompt.request.is_pending()) {
                     this.finish_dialog(window, cx);
                 }
+                let state = match result {
+                    Ok((session, path)) => this.connected(&server.id, session, path, window, cx),
+                    Err(error) => {
+                        dev::log(format_args!("connection failed for {}", server.name));
+                        Connection::Error(error)
+                    }
+                };
+                this.connections.insert(server.id, state);
                 cx.notify();
             });
         }).detach();
+    }
+
+    fn connected(
+        &mut self,
+        id: &str,
+        session: Session,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Connection {
+        let memory = self.pane_memory.entry(id.to_owned()).or_default().clone();
+        let panes = Panes::new(
+            session.clone(),
+            path,
+            memory,
+            self.sidebar_visible.clone(),
+            window,
+            cx,
+        );
+        if self.selected.as_deref() == Some(id) && self.dialog.is_none() {
+            panes.focus(window, cx);
+        }
+        Connection::Connected { session, panes }
     }
 
     pub fn disconnect(&mut self, id: &str, window: &Window, cx: &mut Context<Self>) {
@@ -655,7 +681,44 @@ impl Workspace {
         )
     }
 
+    fn sidebar_button(&self, theme: Theme, cx: &Context<Self>) -> gpui::Stateful<gpui::Div> {
+        icon_button(
+            "toggle-sidebar",
+            if self.sidebar_visible.get() {
+                "Ocultar barra lateral"
+            } else {
+                "Mostrar barra lateral"
+            },
+            Icon::Sidebar,
+            true,
+            theme,
+        )
+        .aria_keyshortcuts("Control+Meta+S")
+        .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx)))
+    }
+
+    fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_visible.set(!self.sidebar_visible.get());
+        self.row_menu = None;
+        window.refresh();
+        cx.notify();
+    }
+
     fn content(&self, theme: Theme, cx: &Context<Self>) -> impl IntoElement {
+        if let Some(server) = self
+            .servers
+            .iter()
+            .find(|server| Some(&server.id) == self.selected.as_ref())
+            && let Some(Connection::Connected { panes, .. }) = self.connections.get(&server.id)
+        {
+            let id = server.id.clone();
+            return panes.render(
+                server,
+                self.sidebar_button(theme, cx),
+                theme,
+                cx.listener(move |this, _, window, cx| this.disconnect(&id, window, cx)),
+            );
+        }
         let mut panel = div()
             .id("main")
             .flex_1()
@@ -663,7 +726,10 @@ impl Workspace {
             .min_h_0()
             .overflow_y_scroll()
             .bg(theme.panel)
-            .p_6();
+            .p_6()
+            .when(!self.sidebar_visible.get(), |panel| {
+                panel.child(self.sidebar_button(theme, cx))
+            });
         if let Some(error) = self.config_error {
             panel = panel.child(
                 div()
@@ -741,28 +807,7 @@ impl Workspace {
         let details = match self.connections.get(id) {
             Some(Connection::Connecting) => details.child("Conectando…"),
             Some(Connection::Disconnecting) => details.child("Desconectando…"),
-            Some(Connection::Connected { path, entries, .. }) => details.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .w_full()
-                    .mt_2()
-                    .pt_3()
-                    .border_t_1()
-                    .border_color(theme.border)
-                    .child(div().font_weight(FontWeight::MEDIUM).child("Ruta remota"))
-                    .child(technical_text(path.to_string_lossy().into_owned(), theme))
-                    .child(
-                        div()
-                            .text_color(theme.secondary_text)
-                            .child(if *entries == 1 {
-                                "1 entrada".into()
-                            } else {
-                                format!("{entries} entradas")
-                            }),
-                    ),
-            ),
+            Some(Connection::Connected { .. }) => unreachable!("rendered above"),
             Some(Connection::Error(error)) => {
                 let (message, extra, changed) = match error {
                     Error::AuthFailed { .. } => ("Autenticación rechazada", None, false),
@@ -891,6 +936,11 @@ impl Render for Workspace {
             .size_full()
             .track_focus(&self.focus)
             .key_context("Workspace")
+            .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| {
+                if this.dialog.is_none() {
+                    this.toggle_sidebar(window, cx);
+                }
+            }))
             .on_action(cx.listener(|_, _: &Next, window, cx| window.focus_next(cx)))
             .on_action(cx.listener(|_, _: &Previous, window, cx| window.focus_prev(cx)))
             .on_action(cx.listener(|this, _: &DismissMenu, _, cx| {
@@ -912,9 +962,11 @@ impl Render for Workspace {
                 root.child(div().p_4().child("Cerrando conexiones…"))
             })
             .when(!self.quitting, |root| {
-                root.child(crate::sidebar::render(self, theme, cx))
-                    .child(self.content(theme, cx))
-                    .children(self.render_dialog(theme, cx))
+                root.when(self.sidebar_visible.get(), |root| {
+                    root.child(crate::sidebar::render(self, theme, cx))
+                })
+                .child(self.content(theme, cx))
+                .children(self.render_dialog(theme, cx))
             })
     }
 }

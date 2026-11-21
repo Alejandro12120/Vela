@@ -1,6 +1,6 @@
 # Plan del MVP de vSCP
 
-Estado: núcleo SSH/SFTP F1 en la rama `mvp`. Las prioridades siguen siendo, por orden, RAM, arranque instantáneo y fluidez, y tamaño instalado.
+Estado: paneles F2b en la rama `mvp`. Las prioridades siguen siendo, por orden, RAM, arranque instantáneo y fluidez, y tamaño instalado.
 
 ## 1. Qué se descarta del hilo anterior
 
@@ -77,7 +77,7 @@ crates/
 ```
 
 - **Configuración**: `servers.toml`, en `~/Library/Application Support/vSCP/` en macOS y en `$XDG_CONFIG_HOME/vscp/` o `~/.config/vscp/` en Linux. Por servidor se guardan un identificador estable, nombre, host, puerto, usuario, modo de autenticación (`agent` o `password`), ruta de la clave pública y socket opcional para el agente, ruta remota inicial y favorito. Los ajustes de terminal y editor se añadirán en sus fases.
-- **Modelo de árbol**: cada panel guarda un árbol de nodos con hijos cargados de forma perezosa. La interfaz recibe un `Vec` aplanado de filas visibles, con profundidad y estado expandido, y lo pinta con `uniform_list`. Las carpetas expandidas se recuerdan por servidor.
+- **Modelo de árbol**: cada panel guarda un árbol de nodos con hijos cargados de forma perezosa. La interfaz recibe un `Vec` aplanado de filas visibles, con profundidad y estado expandido, y lo pinta con `uniform_list`. Las carpetas expandidas se recuerdan en memoria por servidor, panel y ruta raíz.
 - **Caché**: hay un directorio de sesión para descargas temporales de arrastre y portapapeles, y otro para copias de edición. Se acota por tamaño y se limpia al cerrar, salvo las copias con cambios sin subir.
 - **Temas** (F7):
   - **Archivos**: `themes/*.toml` en el directorio de configuración. Incluye dos temas de serie, «Claro» y «Oscuro», derivados de `.agent/skills/heyrico-ui/assets/tokens.css`. Fuente del sistema, base de 13 px y radios de 6 y 8 px.
@@ -105,10 +105,10 @@ crates/
    - barra de ruta editable;
    - atrás, adelante y subir;
    - carpetas expandibles en el sitio, al estilo de Finder;
-   - columnas de nombre, tamaño, fecha y permisos;
-   - selección múltiple;
-   - archivos ocultos ocultables;
-   - refrescar.
+   - columnas de nombre, tamaño, fecha y permisos. Al estrechar un panel desaparecen permisos, fecha y tamaño en ese orden. ⌃⌘S alterna la barra lateral;
+   - selección múltiple con ⌘ y ⇧. ↑/↓ mueven la selección, ⇧↑/⇧↓ extienden el rango y ⌘A selecciona todas las filas visibles;
+   - → expande y ← contrae o selecciona la carpeta contenedora. ⌘↓ abre la carpeta seleccionada, ⌘↑ sube, ⌘[ retrocede y ⌘] avanza. Tab cambia de panel;
+   - ⌘⇧. alterna los archivos ocultos y ⌘R actualiza la raíz y las carpetas expandidas.
 4. Transferencias en los dos sentidos, recursivas. Se pueden iniciar arrastrando entre paneles o con un botón. La cola muestra progreso y permite cancelar. Ante un conflicto se puede sobrescribir, omitir o renombrar.
 5. Operaciones de archivo en los dos lados: crear carpeta, renombrar y borrar con confirmación.
 6. Integración con Finder:

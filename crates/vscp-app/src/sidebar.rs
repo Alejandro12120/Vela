@@ -12,6 +12,8 @@ use crate::{
     workspace::{Connection, Workspace},
 };
 
+pub const WIDTH: f32 = 232.;
+
 pub fn sort_servers(servers: &mut [Server]) {
     servers.sort_by_cached_key(|server| {
         (
@@ -48,7 +50,7 @@ pub fn render(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -> i
         .flex()
         .flex_col()
         .flex_none()
-        .w(px(232.))
+        .w(px(WIDTH))
         .min_h_0()
         .border_r_1()
         .border_color(theme.border)

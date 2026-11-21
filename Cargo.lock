@@ -5313,6 +5313,7 @@ version = "0.1.0"
 dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
+ "libc",
  "unicode-segmentation",
  "vscp-core",
 ]

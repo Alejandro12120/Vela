@@ -495,6 +495,27 @@ async fn transfers_and_edits_files_in_place() {
 }
 
 #[tokio::test]
+async fn lists_directory_and_broken_symlink_targets() {
+    let fixture = Fixture::start();
+    let client = client();
+    let session = trust_first(&client, fixture.spec("b.pub")).await;
+    let folder = fixture.path("remote");
+    fs::create_dir(&folder).unwrap();
+    fs::create_dir(folder.join("destino # ñ")).unwrap();
+    symlink("destino # ñ", folder.join("enlace")).unwrap();
+    symlink("no existe", folder.join("roto")).unwrap();
+
+    let entries = within(session.list_dir(folder)).await;
+    let link = entries.iter().find(|entry| entry.name == "enlace").unwrap();
+    assert_eq!(link.kind, EntryKind::Symlink);
+    assert_eq!(link.symlink_target_kind, Some(EntryKind::Directory));
+    let broken = entries.iter().find(|entry| entry.name == "roto").unwrap();
+    assert_eq!(broken.kind, EntryKind::Symlink);
+    assert_eq!(broken.symlink_target_kind, None);
+    disconnect(&session).await;
+}
+
+#[tokio::test]
 async fn cancelled_download_removes_partial_and_keeps_session_usable() {
     let fixture = Fixture::start();
     let client = client();

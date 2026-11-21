@@ -61,6 +61,12 @@ fn entry(name: OsString, meta: MetaData) -> Entry {
     }
 }
 
+impl Entry {
+    pub fn is_directory(&self) -> bool {
+        self.kind == EntryKind::Directory || self.symlink_target_kind == Some(EntryKind::Directory)
+    }
+}
+
 pub(crate) async fn open(master: &Master) -> Result<(Sftp, Process), Error> {
     let mut process = Process::spawn(
         ssh::command(
@@ -97,15 +103,38 @@ pub(crate) async fn close(sftp: Option<Sftp>, mut process: Process) -> io::Resul
     Ok(())
 }
 
+fn listing_error(error: openssh_sftp_client::Error) -> Error {
+    match error {
+        openssh_sftp_client::Error::SftpError(_, message) if !message.get().0.is_empty() => {
+            Error::Sftp(message.get().0.to_owned())
+        }
+        other => other.into(),
+    }
+}
+
 pub(crate) async fn list_dir(sftp: &Sftp, path: &Path) -> Result<Vec<Entry>, Error> {
-    let mut reader = std::pin::pin!(sftp.fs().open_dir(path).await?.read_dir());
+    let dir = sftp.fs().open_dir(path).await.map_err(listing_error)?;
+    let mut reader = std::pin::pin!(dir.read_dir());
     let mut entries = Vec::new();
     while let Some(item) = reader.next().await {
-        let item = item?;
+        let item = item.map_err(listing_error)?;
         let name = item.filename();
         if name != Path::new(".") && name != Path::new("..") {
             entries.push(entry(name.as_os_str().to_owned(), item.metadata()));
         }
+    }
+    // READDIR supplies link metadata. Follow just the links to determine whether
+    // they can be expanded, keeping broken or inaccessible links in the result.
+    let mut fs = sftp.fs();
+    for entry in entries
+        .iter_mut()
+        .filter(|entry| entry.kind == EntryKind::Symlink)
+    {
+        entry.symlink_target_kind = fs
+            .metadata(path.join(&entry.name))
+            .await
+            .ok()
+            .map(|meta| kind(&meta));
     }
     Ok(entries)
 }

@@ -58,45 +58,70 @@ pub fn render(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -> i
         .p_3()
         .gap_2()
         .child(heading);
+    let footer = || {
+        div()
+            .flex()
+            .flex_none()
+            .pt_2()
+            .border_t_1()
+            .border_color(theme.border)
+            .child(
+                button(
+                    "settings",
+                    "⚙  Ajustes",
+                    Variant::Secondary,
+                    theme,
+                    cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
+                )
+                .h(px(26.))
+                .aria_label("Ajustes"),
+            )
+    };
     if workspace.servers.is_empty() {
         return sidebar.when(workspace.dir.is_some(), |sidebar| {
-            sidebar.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_start()
-                    .gap_2()
-                    .py_2()
-                    .child(
-                        div()
-                            .text_color(theme.secondary_text)
-                            .child("Sin servidores"),
-                    )
-                    .child(button(
-                        "add-first",
-                        "Añadir servidor",
-                        Variant::Secondary,
-                        theme,
-                        cx.listener(|this, _, window, cx| this.open_form(None, window, cx)),
-                    )),
-            )
+            sidebar
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .gap_2()
+                        .py_2()
+                        .child(
+                            div()
+                                .text_color(theme.secondary_text)
+                                .child("Sin servidores"),
+                        )
+                        .child(button(
+                            "add-first",
+                            "Añadir servidor",
+                            Variant::Secondary,
+                            theme,
+                            cx.listener(|this, _, window, cx| this.open_form(None, window, cx)),
+                        )),
+                )
+                .child(div().flex_1())
+                .child(footer())
         });
     }
-    sidebar.child(
-        div()
-            .id("server-list")
-            .min_h_0()
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .children(
-                workspace
-                    .servers
-                    .iter()
-                    .map(|server| row(server, workspace, theme, cx)),
-            ),
-    )
+    sidebar
+        .child(
+            div()
+                .id("server-list")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .children(
+                    workspace
+                        .servers
+                        .iter()
+                        .map(|server| row(server, workspace, theme, cx)),
+                ),
+        )
+        .child(footer())
 }
 
 fn row(

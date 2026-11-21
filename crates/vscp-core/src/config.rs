@@ -90,13 +90,17 @@ pub fn save(dir: &Path, servers: Vec<Server>) -> io::Result<()> {
     // Refuse to replace settings that cannot be read, including after startup.
     load(dir)?;
     let text = toml::to_string_pretty(&Config { servers }).map_err(io::Error::other)?;
+    save_private(dir, "servers.toml", &text)
+}
+
+pub(crate) fn save_private(dir: &Path, name: &str, text: &str) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     let mut temp = tempfile::NamedTempFile::new_in(dir)?;
     temp.as_file()
         .set_permissions(fs::Permissions::from_mode(0o600))?;
     temp.write_all(text.as_bytes())?;
     temp.as_file().sync_all()?;
-    temp.persist(dir.join("servers.toml"))?;
+    temp.persist(dir.join(name))?;
     Ok(())
 }
 

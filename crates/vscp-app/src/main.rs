@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use gpui::{
     App, AppContext, Bounds, KeyBinding, Menu, MenuItem, QuitMode, TitlebarOptions,
-    WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, px, size,
+    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, actions, px, size,
 };
 
 use workspace::Workspace;
@@ -64,6 +64,11 @@ fn main() {
                             size(px(dev::window_width().unwrap_or(1100.)), px(700.)),
                             cx,
                         ))),
+                        kind: if dev::floating_window() {
+                            WindowKind::Floating
+                        } else {
+                            WindowKind::Normal
+                        },
                         titlebar: Some(TitlebarOptions {
                             title: Some("vSCP".into()),
                             ..Default::default()

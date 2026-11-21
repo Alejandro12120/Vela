@@ -79,6 +79,10 @@ pub fn window_width() -> Option<f32> {
         .map(f32::from)
 }
 
+pub fn floating_window() -> bool {
+    value("VSCP_DEV_WINDOW_FLOAT").as_deref() == Some("1")
+}
+
 pub fn transfer() -> Option<vscp_core::transfer::Spec> {
     use vscp_core::transfer::{Direction, Spec};
     let value = value("VSCP_DEV_TRANSFER")?;
@@ -128,4 +132,40 @@ pub fn staging_root() -> Option<PathBuf> {
 
 pub fn drop_highlight() -> bool {
     value("VSCP_DEV_DROP_HIGHLIGHT").as_deref() == Some("1")
+}
+
+pub fn edit_path() -> Option<PathBuf> {
+    value("VSCP_DEV_EDIT")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+}
+
+pub fn edit_root() -> io::Result<PathBuf> {
+    if let Some(dir) = config_override() {
+        return Ok(dir.join("edit-cache"));
+    }
+    std::env::home_dir()
+        .map(|home| home.join("Library/Caches/vSCP/edit"))
+        .ok_or_else(|| io::Error::other("No se encuentra la carpeta de caché"))
+}
+
+pub fn edit_view() -> Option<String> {
+    value("VSCP_DEV_EDIT_VIEW")
+}
+
+pub fn open_file(path: &std::path::Path, editor: Option<&std::path::Path>) -> io::Result<()> {
+    if value("VSCP_DEV_EDITOR").as_deref() == Some("none") {
+        return Ok(());
+    }
+    let mut command = std::process::Command::new("/usr/bin/open");
+    if let Some(editor) = editor {
+        command.arg("-a").arg(editor);
+    }
+    // Reap the child and check Launch Services' exit status on the caller's
+    // background executor.
+    if command.arg(path).status()?.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other("No se pudo abrir el archivo"))
+    }
 }

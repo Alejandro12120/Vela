@@ -2,9 +2,11 @@
 
 pub mod askpass;
 pub mod config;
+pub mod edit;
 mod error;
 pub mod local;
 mod session;
+pub mod settings;
 mod sftp;
 mod ssh;
 

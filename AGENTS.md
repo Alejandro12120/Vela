@@ -40,12 +40,13 @@ Use an isolated configuration directory for development runs. The `dev` Cargo fe
 
 - `VSCP_CONFIG_DIR` sets the directory for `servers.toml` and the OpenSSH `known_hosts` file.
 - `VSCP_DEV_AUTOCONNECT` connects to the server with the given display name after loading the list.
-- `VSCP_DEV_LOG=1` prints connection results, listing durations, visible row counts, transfer events and native file-drag payload decisions to stderr.
+- `VSCP_DEV_LOG=1` prints connection results, listing durations, visible row counts, transfer events, native file-drag payload decisions and remote-edit watcher, debounce and upload decisions to stderr.
 - `VSCP_DEV_THEME=light|dark` overrides the application theme without changing system appearance.
 - `VSCP_DEV_LOCAL_ROOT=<absolute path>` overrides the local pane's starting folder.
 - `VSCP_DEV_REMOTE_DELAY_MS=<milliseconds>` delays each remote listing asynchronously.
 - `VSCP_DEV_EXPAND=<relative path>[,...]` opens the named folders and their ancestors in the initial remote tree.
 - `VSCP_DEV_WINDOW_WIDTH=<pixels>` requests an initial width of at least 640 logical pixels for layout checks. The window manager may override it.
+- `VSCP_DEV_WINDOW_FLOAT=1` uses a floating test window to keep the requested width when checking layouts under a tiling window manager.
 
 - `VSCP_DEV_TRANSFER=<upload|download>:<absolute source>:<absolute destination>` enqueues one transfer after autoconnect. Conflicts use the usual dialog.
 - `VSCP_DEV_TRANSFER_DELAY_MS=<milliseconds>` waits after autoconnect before enqueueing that transfer.
@@ -55,6 +56,10 @@ Use an isolated configuration directory for development runs. The `dev` Cargo fe
 - `VSCP_DEV_STAGING_ROOT=<absolute path>` isolates the Finder staging cache for development.
 - `VSCP_DEV_DROP_HIGHLIGHT=1` previews an external drag over the remote root without submitting a drop.
 - `VSCP_DEV_FILE_STATE=<local|remote>:<delete|rename|menu>` selects the first entry and opens the given state for visual checks. The delete trigger only opens the confirmation.
+- `VSCP_DEV_EDIT=<absolute remote path>` opens a remote edit after autoconnect.
+- `VSCP_DEV_EDITOR=none` suppresses editor launches for unattended runs.
+- `VSCP_DEV_EDIT_VIEW=popover|settings` shows Ediciones on connection or opens Ajustes on startup for visual checks.
+- With a custom `VSCP_CONFIG_DIR`, remote edits use its `edit-cache/` directory.
 
 For example, from the repository root in a macOS graphical session:
 

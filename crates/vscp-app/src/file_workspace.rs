@@ -137,6 +137,10 @@ impl Panes {
         }
     }
 
+    pub fn remote(&self) -> &Entity<Pane> {
+        &self.remote
+    }
+
     pub fn overlay(&self) -> Entity<TransferOverlay> {
         self.overlay.clone()
     }
@@ -150,6 +154,8 @@ impl Panes {
         server: &Server,
         sidebar_button: impl IntoElement,
         theme: Theme,
+        edit_header: impl IntoElement,
+        edit_status: impl IntoElement,
         disconnect: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> Stateful<Div> {
         div()
@@ -196,7 +202,8 @@ impl Panes {
                         )
                         .h(px(26.)),
                     )
-                    .child(div().flex_1()),
+                    .child(div().flex_1())
+                    .child(edit_header),
             )
             .child(
                 div()
@@ -208,6 +215,7 @@ impl Panes {
                     .child(div().w(px(1.)).flex_none().bg(theme.border))
                     .child(self.remote.clone()),
             )
+            .child(edit_status)
             .child(self.transfers.clone())
     }
 }

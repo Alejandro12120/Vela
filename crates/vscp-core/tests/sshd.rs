@@ -1271,3 +1271,183 @@ async fn benchmark_transfer_and_directory_listing() {
     }
     disconnect(&session).await;
 }
+
+#[tokio::test]
+async fn remote_edit_watches_saves_and_preserves_the_remote_inode() {
+    use vscp_core::edit::{DirectoryWatch, Index, OpenRemote, Schedule, State, Target, Upload};
+
+    let fixture = Fixture::start();
+    let client = client();
+    let spec = fixture.spec("b.pub");
+    let session = trust_first(&client, spec.clone()).await;
+    let remote = fixture.path("archivo # ñ.txt");
+    fs::write(&remote, b"original\n").unwrap();
+    fs::set_permissions(&remote, fs::Permissions::from_mode(0o640)).unwrap();
+    let before = fs::metadata(&remote).unwrap();
+    let target = Target::new(
+        &vscp_core::config::Server {
+            id: "server".into(),
+            name: "Fixture".into(),
+            host: spec.host.clone(),
+            port: fixture.port,
+            user: fixture.user.clone(),
+            auth: spec.auth.clone(),
+            initial_remote_path: None,
+            favorite: false,
+        },
+        remote.clone(),
+    );
+    let config = fixture.path("edit-config");
+    let cache = fixture.path("edit-cache");
+    let mut index = Index::load(config.clone(), cache.clone()).unwrap();
+    let dir = index.directory(&target).unwrap();
+    let inspected = within(OpenRemote::inspect(&session, &target)).await;
+    let mut edit = within(inspected.open(&session, target.clone(), dir.path())).await;
+    index.put(edit.clone()).unwrap();
+    let _ = dir.keep();
+    assert_eq!(fs::read(&edit.local_path).unwrap(), b"original\n");
+    assert_eq!(
+        fs::metadata(&edit.local_path).unwrap().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        fs::metadata(edit.local_path.parent().unwrap())
+            .unwrap()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    let (mut watcher, events) = DirectoryWatch::new().unwrap();
+    watcher.add(&edit.local_path).unwrap();
+
+    // Same scheduler as the desktop path. Wait only until the watched file
+    // has been quiet for one debounce interval.
+    macro_rules! watched_save {
+        () => {{
+            timeout(SHORT_WAIT, async {
+                let mut schedule = Schedule::default();
+                loop {
+                    match schedule.delay(Instant::now()) {
+                        Some(delay) => {
+                            if let Ok(event) = timeout(delay, events.recv()).await {
+                                if DirectoryWatch::affects(
+                                    &event.unwrap().unwrap(),
+                                    &edit.local_path,
+                                ) {
+                                    schedule.changed(Instant::now());
+                                }
+                                continue;
+                            }
+                            assert!(schedule.begin(Instant::now(), false));
+                            if let Some(snapshot) = edit.snapshot().unwrap() {
+                                break snapshot;
+                            }
+                            schedule.finish();
+                        }
+                        None => {
+                            if DirectoryWatch::affects(
+                                &events.recv().await.unwrap().unwrap(),
+                                &edit.local_path,
+                            ) {
+                                schedule.changed(Instant::now());
+                            }
+                        }
+                    }
+                }
+            })
+            .await
+            .unwrap()
+        }};
+    }
+    macro_rules! upload_clean {
+        ($index:expr, $connection:expr, $snapshot:expr) => {{
+            let Upload::Synced(baseline) =
+                within(edit.upload($connection, $snapshot, edit.baseline.remote)).await
+            else {
+                panic!("unexpected conflict");
+            };
+            assert_eq!(baseline.sha256.as_bytes(), sha256(&remote));
+            assert_eq!(sha256(&remote), sha256(&edit.local_path));
+            edit.baseline = baseline;
+            edit.state = State::Synced;
+            $index.put(edit.clone()).unwrap();
+        }};
+    }
+
+    fs::write(&edit.local_path, b"in place\n").unwrap();
+    upload_clean!(index, &session, watched_save!());
+    assert_eq!(fs::metadata(&remote).unwrap().ino(), before.ino());
+    assert_eq!(fs::metadata(&remote).unwrap().mode(), before.mode());
+    assert_eq!(fs::metadata(&remote).unwrap().uid(), before.uid());
+
+    let replace = edit.local_path.with_file_name("editor-temporary");
+    fs::write(&replace, b"atomic rename\n").unwrap();
+    fs::rename(&replace, &edit.local_path).unwrap();
+    upload_clean!(index, &session, watched_save!());
+
+    let local = edit.local_path.clone();
+    let (snapshot, ()) = tokio::join!(async { watched_save!() }, async {
+        fs::write(&local, b"quick first\n").unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        fs::write(&local, b"quick final\n").unwrap();
+    });
+    upload_clean!(index, &session, snapshot);
+    assert_eq!(fs::read(&remote).unwrap(), b"quick final\n");
+    for bytes in [b"slow first\n".as_slice(), b"slow final\n".as_slice()] {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        fs::write(&edit.local_path, bytes).unwrap();
+        upload_clean!(index, &session, watched_save!());
+        assert_eq!(fs::read(&remote).unwrap(), bytes);
+    }
+
+    fs::write(&remote, b"someone else's remote version\n").unwrap();
+    fs::write(&edit.local_path, b"my local version\n").unwrap();
+    let Upload::Conflict(Some(remote_stamp)) =
+        within(edit.upload(&session, watched_save!(), edit.baseline.remote)).await
+    else {
+        panic!("remote edit went undetected");
+    };
+    edit.state = State::Conflict;
+    index.put(edit.clone()).unwrap();
+    assert_eq!(
+        fs::read(&remote).unwrap(),
+        b"someone else's remote version\n"
+    );
+    let copy = within(edit.save_remote_copy(&session)).await;
+    assert_eq!(copy.file_name().unwrap(), "archivo # ñ (remoto).txt");
+    assert_eq!(fs::read(&copy).unwrap(), fs::read(&remote).unwrap());
+    assert_eq!(fs::read(&edit.local_path).unwrap(), b"my local version\n");
+    assert_eq!(index.get(&target).unwrap().state, State::Conflict);
+    let Upload::Synced(baseline) =
+        within(edit.upload(&session, edit.snapshot().unwrap().unwrap(), remote_stamp)).await
+    else {
+        panic!("overwrite of the confirmed remote version failed");
+    };
+    assert_eq!(fs::read(&remote).unwrap(), b"my local version\n");
+    edit.baseline = baseline;
+
+    disconnect(&session).await;
+    fs::write(&edit.local_path, b"saved offline\n").unwrap();
+    let snapshot = watched_save!();
+    let result = timeout(
+        SHORT_WAIT,
+        edit.upload(&session, snapshot, edit.baseline.remote),
+    )
+    .await
+    .unwrap();
+    assert!(result.is_err());
+    edit.state = State::Pending;
+    index.put(edit.clone()).unwrap();
+    drop(index);
+    drop(watcher);
+
+    let mut index = Index::load(config, cache).unwrap();
+    assert_eq!(index.edits(), [edit.clone()]);
+    assert_eq!(fs::read(&edit.local_path).unwrap(), b"saved offline\n");
+    assert_eq!(fs::read(&remote).unwrap(), b"my local version\n");
+    let session = connect(&client, spec, unexpected).await.unwrap();
+    upload_clean!(index, &session, edit.snapshot().unwrap().unwrap());
+    assert_eq!(fs::read(&remote).unwrap(), b"saved offline\n");
+    assert_eq!(index.get(&target).unwrap().state, State::Synced);
+    disconnect(&session).await;
+}

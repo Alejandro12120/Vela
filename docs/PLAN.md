@@ -1,6 +1,6 @@
 # Plan del MVP de vSCP
 
-Estado: integración con Finder F4 implementada en la rama `mvp`. Queda pendiente el recorrido manual con Finder. Las prioridades siguen siendo, por orden, RAM, arranque instantáneo y fluidez, y tamaño instalado.
+Estado: edición remota F5 implementada en la rama `mvp`. Quedan pendientes los recorridos manuales con Finder y VS Code. Las prioridades siguen siendo, por orden, RAM, arranque instantáneo y fluidez, y tamaño instalado.
 
 ## 1. Qué se descarta del hilo anterior
 
@@ -76,7 +76,7 @@ crates/
   vscp-app/    GPUI: ventana, paneles, terminal, diálogos, temas y glue de plataforma (macOS: pasteboard).
 ```
 
-- **Configuración**: `servers.toml`, en `~/Library/Application Support/vSCP/` en macOS y en `$XDG_CONFIG_HOME/vscp/` o `~/.config/vscp/` en Linux. Por servidor se guardan un identificador estable, nombre, host, puerto, usuario, modo de autenticación (`agent` o `password`), ruta de la clave pública y socket opcional para el agente, ruta remota inicial y favorito. Los ajustes de terminal y editor se añadirán en sus fases.
+- **Configuración**: `servers.toml`, en `~/Library/Application Support/vSCP/` en macOS y en `$XDG_CONFIG_HOME/vscp/` o `~/.config/vscp/` en Linux. Por servidor se guardan un identificador estable, nombre, host, puerto, usuario, modo de autenticación (`agent` o `password`), ruta de la clave pública y socket opcional para el agente, ruta remota inicial y favorito. La aplicación elegida para editar archivos remotos se guarda en `settings.toml` con permisos 0600. Los ajustes de terminal se añadirán en F6.
 - **Modelo de árbol**: cada panel guarda un árbol de nodos con hijos cargados de forma perezosa. La interfaz recibe un `Vec` aplanado de filas visibles, con profundidad y estado expandido, y lo pinta con `uniform_list`. Las carpetas expandidas se recuerdan en memoria por servidor, panel y ruta raíz.
 - **Caché**: hay un directorio de sesión para descargas temporales de arrastre y portapapeles, y otro para copias de edición. Se acota por tamaño y se limpia al cerrar, salvo las copias con cambios sin subir.
 - **Temas** (F7):
@@ -120,13 +120,13 @@ crates/
    - Una nueva copia al portapapeles sustituye y borra la anterior al completarse. Al iniciar y salir se conservan las descargas todavía referenciadas por las URL del portapapeles. El cierre limpia las demás descargas de preparación y deja intacto el portapapeles. Pegar los originales en el panel local requiere la sesión remota de la copia.
    - El arrastre remoto reutiliza la preparación por selección mientras siga vigente. Ofrece las URL si la descarga terminó al salir de la ventana. En caso contrario, el usuario vuelve a arrastrar cuando aparezca «Listo para arrastrar».
    - En `gpui-pre-macos` 0.3.11, `src/window.rs:3789–3792` ofrece únicamente `Copy` a Finder (`OutsideApplication`) y `Copy | Move` dentro de la aplicación y para contextos desconocidos. Se permite arrastrar archivos locales a Finder con sus rutas reales.
-7. Edición remota con doble clic:
-   - descarga a una copia local;
-   - abre la app predeterminada (`open`) o el editor configurado;
-   - vigila los cambios con `notify` 8.2.x y espera 300 ms entre eventos. Así se cubren el guardado atómico y los guardados seguidos;
-   - antes de subir, compara la fecha y el tamaño remotos con los descargados. Si cambiaron, ofrece sobrescribir, guardar como copia o cancelar;
-   - sube sobrescribiendo el archivo original, para conservar el inodo, los permisos y el propietario;
-   - la barra de estado muestra el resultado de cada subida.
+7. Un doble clic abre los archivos locales con la aplicación predeterminada. Para archivos remotos:
+   - descarga a una copia local reutilizable y pide confirmación por encima de 100 MB. Al volver a abrir una copia sincronizada, se actualiza si el remoto ha cambiado;
+   - «Ajustes» (⌘,) permite elegir la aplicación predeterminada del sistema o un paquete `.app`. Se abre con `open` o `open -a <ruta>`;
+   - `notify` 8.2.1 vigila la carpeta para detectar guardados directos y reemplazos atómicos. Cada lote espera 300 ms de silencio y comprueba estabilidad y SHA-256 antes de subir. Los cambios durante una subida se agrupan para la siguiente;
+   - antes de subir, compara fecha y tamaño remotos. Si cambian, ofrece «Sobrescribir remoto», «Guardar remoto como copia» (junto a la copia local, con el sufijo « (remoto)») o «Más tarde». La subida modifica el archivo existente para conservar su inodo, permisos y propietario;
+   - la barra muestra el estado de la subida. «Ediciones» lista las copias del servidor y permite abrirlas, subirlas, mostrarlas en Finder o terminar la edición. Descartar cambios requiere confirmación;
+   - al reconectar, se indican los cambios sin subir y se reintentan los pendientes con la misma comprobación remota. Los conflictos esperan una decisión.
 8. Vista Terminal de cada sesión, a pantalla completa, alternable con la vista Archivos (⌘1 / ⌘2). Incluye la acción secundaria «Abrir en Kitty».
 9. Reconexión manual si la sesión maestra cae. Las ediciones pendientes no se pierden.
 10. Temas: modo claro, oscuro o del sistema; colores editables; vidrio esmerilado configurable.
@@ -156,7 +156,7 @@ Cada fase termina con compilación de release en el Mac, `cargo fmt --check`, `c
 | F2b Paneles | Panel local y remoto con árbol virtualizado, navegación, columnas y selección. Sustituye la vista provisional de F2a. | 10.000 filas con desplazamiento fluido. Expandir no bloquea la interfaz con latencia de red simulada. |
 | F3 Transferencias y operaciones | Cola, arrastre entre paneles, conflictos, crear carpeta, renombrar y borrar. | Subida y bajada recursivas de un árbol de prueba con nombres con espacios, `#` y acentos. El contenido coincide byte a byte. Cancelar deja el estado coherente. |
 | F4 Finder | Arrastre de entrada y de salida, ⌘C y ⌘V. Módulo `objc2` de pasteboard. | Prueba manual con trackpad en Finder: el nombre y los bytes coinciden en los cuatro gestos. |
-| F5 Edición remota | Copias de edición, `open` o editor, vigilancia, comprobación de conflicto y subida. | Con VS Code: guardar dos veces seguidas sube dos veces. Un cambio remoto hecho entretanto muestra el conflicto. Desconectar conserva la copia. |
+| F5 Edición remota | Copias de edición, `open` o editor, vigilancia, comprobación de conflicto y subida. | Con VS Code: dos guardados separados por más de 300 ms se suben por separado. Una ráfaga sube su contenido final. Un cambio remoto hecho entretanto muestra el conflicto. Desconectar conserva la copia. |
 | F6 Terminal integrada | Vista Terminal a pantalla completa por sesión, alternable con Archivos. Arranca en la carpeta remota actual. PTY con `ssh` sobre la sesión maestra. Dibujado, teclado, selección, copiar y pegar, IME, ratón y cambio de tamaño. Importación de `kitty.conf`. Historial limitado, unas 5.000 líneas como punto de partida. Acción «Abrir en Kitty». | `vim`, `htop` y `tmux` funcionan. Se pueden escribir acentos con IME. El cambio de tamaño se propaga al remoto. Al alternar de vista, la terminal conserva el proceso y el historial, y sin actividad no consume CPU. Fuente y colores iguales a Kitty en una captura lado a lado. |
 | F7 Temas y vidrio | Modelo de temas, modos, editor, vidrio esmerilado y «Reducir transparencia». | Cambiar de tema o modo se aplica en vivo, sin reiniciar. Los temas de serie pasan el contraste de 4.5:1. Se mide la RAM con el desenfoque activado y desactivado. |
 | F8 Pulido y recorrido final | Reconexión, mensajes de error y revisión de accesibilidad con la skill `apple-design`. | Recorrido completo con Bitwarden real y una clave elegida, sin agotar intentos de autenticación. Mediciones finales frente a los presupuestos, con la terminal abierta. |

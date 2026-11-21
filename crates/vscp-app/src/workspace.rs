@@ -1,3 +1,14 @@
+#[path = "edits_view.rs"]
+mod edits_view;
+#[path = "settings_view.rs"]
+mod settings_view;
+
+use edits_view::{EditDialog, Edits};
+use vscp_core::{
+    edit::{Index, Target},
+    settings::Settings,
+};
+
 use std::{
     cell::Cell,
     collections::{HashMap, VecDeque},
@@ -29,10 +40,14 @@ use crate::{
     theme::Theme,
 };
 
-actions!(workspace, [Next, Previous, DismissMenu, ToggleSidebar]);
+actions!(
+    workspace,
+    [Next, Previous, DismissMenu, ToggleSidebar, OpenSettings]
+);
 
 pub fn bind_keys(cx: &mut gpui::App) {
     cx.bind_keys([
+        KeyBinding::new("cmd-,", OpenSettings, Some("Workspace")),
         KeyBinding::new("tab", Next, Some("Workspace")),
         KeyBinding::new("shift-tab", Previous, Some("Workspace")),
         KeyBinding::new("escape", DismissMenu, Some("Workspace")),
@@ -60,6 +75,8 @@ enum Dialog {
     Form(Box<Form>),
     Delete(String),
     Prompt(Prompt),
+    Edit(EditDialog),
+    Settings,
 }
 
 pub struct Workspace {
@@ -69,6 +86,9 @@ pub struct Workspace {
     pub row_menu: Option<String>,
     pub dir: Option<PathBuf>,
     pub saving: bool,
+    edits: Edits,
+    settings: Settings,
+    settings_error: Option<String>,
     loading: bool,
     sidebar_visible: Rc<Cell<bool>>,
     pane_memory: HashMap<String, PaneMemory>,
@@ -120,14 +140,24 @@ impl Workspace {
             let dir = dev::config_directory()?;
             let servers = config::load(&dir)?;
             let agent = vscp_core::bitwarden_agent_sockets().into_iter().next();
-            Ok::<_, std::io::Error>((dir, servers, agent))
+            let index = dev::edit_root().and_then(|root| Index::load(dir.clone(), root));
+            let settings = Settings::load(&dir);
+            Ok::<_, std::io::Error>((dir, servers, agent, index, settings))
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = load.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.loading = false;
                 match result {
-                    Ok((dir, mut servers, agent)) => {
+                    Ok((dir, mut servers, agent, index, settings)) => {
+                        this.load_edits(index, window, cx);
+                        match settings {
+                            Ok(settings) => this.settings = settings,
+                            Err(error) => this.settings_error = Some(format!("No se pudo leer settings.toml. {error}")),
+                        }
+                        if dev::edit_view().as_deref() == Some("settings") {
+                            this.open_dialog(Dialog::Settings, window, cx);
+                        }
                         crate::sidebar::sort_servers(&mut servers);
                         this.selected = servers.first().map(|server| server.id.clone());
                         this.dir = Some(dir);
@@ -155,9 +185,10 @@ impl Workspace {
         }).detach();
         cx.observe_window_appearance(window, |_, _, cx| cx.notify())
             .detach();
-        cx.on_app_quit(|this, cx| {
+        let executor = cx.background_executor().clone();
+        cx.on_app_quit(move |this, cx| {
             let cleanup = (!this.quitting).then(|| crate::pane::finder::quit_cleanup(cx));
-            let shutdown = this.shutdown();
+            let shutdown = this.shutdown(executor.clone());
             async move {
                 shutdown.await;
                 if let Some(cleanup) = cleanup {
@@ -174,6 +205,9 @@ impl Workspace {
             row_menu: None,
             dir: None,
             saving: false,
+            edits: Edits::default(),
+            settings: Settings::default(),
+            settings_error: None,
             loading: true,
             sidebar_visible: Rc::new(Cell::new(true)),
             pane_memory: HashMap::new(),
@@ -194,14 +228,24 @@ impl Workspace {
         }
     }
 
-    fn shutdown(&mut self) -> impl Future<Output = ()> + use<> {
+    fn shutdown(&mut self, executor: gpui::BackgroundExecutor) -> impl Future<Output = ()> + use<> {
         self.dialog = None;
         self.prompt_task.take();
         self.prompts.clear();
         let client = self.client.clone();
+        let index = self.edits.shutdown();
         async move {
             if let Some(client) = client {
                 client.shutdown().await;
+            }
+            if let Some(mut index) = index {
+                executor
+                    .spawn(async move {
+                        if let Err(error) = index.cleanup_synced() {
+                            eprintln!("vSCP: No se pudo limpiar la caché de ediciones. {error}");
+                        }
+                    })
+                    .await;
             }
         }
     }
@@ -212,7 +256,7 @@ impl Workspace {
         }
         self.quitting = true;
         crate::pane::finder::begin_quit(cx);
-        let shutdown = self.shutdown();
+        let shutdown = self.shutdown(cx.background_executor().clone());
         cx.notify();
         cx.spawn_in(window, async move |_, cx| {
             shutdown.await;
@@ -227,6 +271,7 @@ impl Workspace {
     pub fn select(&mut self, id: &str) {
         if self.selected.as_deref() != Some(id) {
             self.show_stderr = false;
+            self.edits.popover = false;
         }
         self.selected = Some(id.to_owned());
         self.row_menu = None;
@@ -285,7 +330,26 @@ impl Workspace {
                         Connection::Error(error)
                     }
                 };
-                this.connections.insert(server.id, state);
+                let connected = if let Connection::Connected { session, .. } = &state {
+                    Some(session.clone())
+                } else {
+                    None
+                };
+                this.connections.insert(server.id.clone(), state);
+                if let Some(session) = connected {
+                    this.edits_connected(&server, window, cx);
+                    let id = server.id.clone();
+                    cx.spawn_in(window, async move |this, cx| {
+                        session.closed().await;
+                        let _ = this.update_in(cx, |this, _, cx| {
+                            if matches!(this.connections.get(&id), Some(Connection::Connected { session: current, .. }) if current.same_connection(&session)) {
+                                this.connections.insert(id, Connection::Error(std::io::Error::new(
+                                    std::io::ErrorKind::BrokenPipe, "SSH connection closed").into()));
+                                cx.notify();
+                            }
+                        });
+                    }).detach();
+                }
                 cx.notify();
             });
         }).detach();
@@ -310,6 +374,15 @@ impl Workspace {
             window,
             cx,
         );
+        let edit_server = server.clone();
+        cx.subscribe_in(
+            panes.remote(),
+            window,
+            move |this, _, event: &crate::pane::EditFile, window, cx| {
+                this.open_edit(Target::new(&edit_server, event.0.clone()), window, cx);
+            },
+        )
+        .detach();
         if self.selected.as_deref() == Some(id) && self.dialog.is_none() {
             panes.focus(window, cx);
         }
@@ -420,7 +493,7 @@ impl Workspace {
         let focus = match &dialog {
             Dialog::Form(form) => Some(form.input(Field::Name)),
             Dialog::Prompt(prompt) => prompt.input.as_ref(),
-            Dialog::Delete(_) => None,
+            Dialog::Delete(_) | Dialog::Edit(_) | Dialog::Settings => None,
         };
         let focus = focus
             .map(|input| input.read(cx).focus_handle(cx))
@@ -507,6 +580,13 @@ impl Workspace {
                 let id = form.id.clone();
                 self.persist(Some(server), id, window, cx);
             }
+            Some(Dialog::Edit(EditDialog::Conflict(..)))
+                if !self.confirm_focus.is_focused(window) =>
+            {
+                self.finish_dialog(window, cx);
+            }
+            Some(Dialog::Edit(_)) => self.confirm_edit(window, cx),
+            Some(Dialog::Settings) => self.cancel_dialog(window, cx),
             Some(Dialog::Delete(id)) => {
                 let id = id.clone();
                 self.persist(None, Some(id), window, cx);
@@ -523,6 +603,28 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let Some(dir) = self.dir.clone() else { return };
+        if let Some(id) = &existing
+            && self.edits.has_server(id)
+            && !self
+                .servers
+                .iter()
+                .find(|old| &old.id == id)
+                .zip(server.as_ref())
+                .is_some_and(|(old, new)| {
+                    old.host == new.host && old.port == new.port && old.user == new.user
+                })
+        {
+            let message =
+                "Cierra las ediciones del servidor antes de cambiar su destino o eliminarlo.";
+            if let Some(form) = self.editing() {
+                form.message = Some(message);
+            } else {
+                self.config_error = Some(message);
+                self.dialog = None;
+            }
+            cx.notify();
+            return;
+        }
         let mut servers = self.servers.clone();
         self.saving = true;
         cx.notify();
@@ -612,6 +714,8 @@ impl Workspace {
     fn render_dialog(&self, theme: Theme, cx: &Context<Self>) -> Option<AnyElement> {
         let dialog = self.dialog.as_ref()?;
         let (title, body, confirm): (gpui::SharedString, _, _) = match dialog {
+            Dialog::Edit(dialog) => return Some(self.edit_dialog(dialog, theme, cx)),
+            Dialog::Settings => return Some(self.settings_dialog(theme, cx)),
             Dialog::Form(form) => (
                 if form.id.is_some() {
                     "Editar servidor".into()
@@ -732,6 +836,8 @@ impl Workspace {
                 server,
                 self.sidebar_button(theme, cx),
                 theme,
+                self.edit_header(&id, theme, cx),
+                self.edit_status(&id, theme, cx),
                 cx.listener(move |this, _, window, cx| this.disconnect(&id, window, cx)),
             );
         }
@@ -891,7 +997,11 @@ impl Workspace {
                     .child("No se pudo iniciar el cliente SSH."),
             ),
         };
-        panel.child(details)
+        panel.child(
+            details
+                .child(self.edit_header(id, theme, cx))
+                .child(self.edit_status(id, theme, cx)),
+        )
     }
 }
 
@@ -947,7 +1057,7 @@ impl Render for Workspace {
             });
         }
         let theme = Theme::for_window(window);
-        let transfer_overlay = if self.dialog.is_none() {
+        let transfer_overlay = if self.dialog.is_none() && !self.edits.popover {
             match self
                 .selected
                 .as_ref()
@@ -970,10 +1080,14 @@ impl Render for Workspace {
                     this.toggle_sidebar(window, cx);
                 }
             }))
+            .on_action(
+                cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
+            )
             .on_action(cx.listener(|_, _: &Next, window, cx| window.focus_next(cx)))
             .on_action(cx.listener(|_, _: &Previous, window, cx| window.focus_prev(cx)))
             .on_action(cx.listener(|this, _: &DismissMenu, _, cx| {
                 this.row_menu = None;
+                this.edits.popover = false;
                 cx.notify();
             }))
             .on_action(
@@ -996,6 +1110,7 @@ impl Render for Workspace {
                 })
                 .child(self.content(theme, cx))
                 .children(transfer_overlay)
+                .children(self.edit_popover(theme, window, cx))
                 .children(self.render_dialog(theme, cx))
             })
     }

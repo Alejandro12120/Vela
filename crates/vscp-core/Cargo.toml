@@ -11,6 +11,8 @@ futures-lite = "=2.6.1"
 getrandom = "=0.4.3"
 libc = "=0.2.191"
 openssh-sftp-client = "=0.15.12"
+notify = "=8.2.1"
+sha2 = "=0.10.9"
 thiserror = "=2.0.21"
 tokio = { version = "=1.54.1", features = ["fs", "io-util", "macros", "net", "process", "rt", "sync", "time"] }
 

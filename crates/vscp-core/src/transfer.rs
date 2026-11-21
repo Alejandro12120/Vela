@@ -822,7 +822,7 @@ fn local_entry(path: &Path, info: &std::fs::Metadata) -> Entry {
     }
 }
 
-async fn remote_existing(sftp: &Sftp, path: &Path) -> Result<Option<Entry>, Error> {
+pub(crate) async fn remote_existing(sftp: &Sftp, path: &Path) -> Result<Option<Entry>, Error> {
     match sftp.fs().symlink_metadata(path).await {
         Ok(info) => Ok(Some(sftp::entry(
             path.file_name().unwrap_or(path.as_os_str()).into(),

@@ -208,6 +208,10 @@ struct LocationRequest {
     _task: gpui::Task<()>,
 }
 
+pub struct EditFile(pub PathBuf);
+
+impl gpui::EventEmitter<EditFile> for Pane {}
+
 pub struct Pane {
     source: Source,
     tree: Tree,
@@ -818,7 +822,32 @@ impl Pane {
                     this.tree.select(index, mode);
                     this.check_copy_selection();
                     if event.click_count() == 2 && !modifiers.modified() {
-                        this.open_folder(index, window, cx);
+                        let row = &this.tree.rows[index];
+                        if row
+                            .entry()
+                            .is_some_and(|entry| entry.kind == EntryKind::File)
+                        {
+                            let path = row.path.to_path_buf();
+                            match this.source {
+                                Source::Local => {
+                                    let open = cx
+                                        .background_executor()
+                                        .spawn(async move { dev::open_file(&path, None) });
+                                    cx.spawn_in(window, async move |pane, cx| {
+                                        if let Err(error) = open.await {
+                                            let _ = pane.update_in(cx, |pane, _, cx| {
+                                                pane.path_error = Some(error.to_string());
+                                                cx.notify();
+                                            });
+                                        }
+                                    })
+                                    .detach();
+                                }
+                                Source::Remote(_) => cx.emit(EditFile(path)),
+                            }
+                        } else {
+                            this.open_folder(index, window, cx);
+                        }
                     }
                     cx.notify();
                 }))

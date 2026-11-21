@@ -200,7 +200,7 @@ enum Command {
 async fn serve(
     mut master: ssh::Master,
     sftp: Sftp,
-    process: ssh::Process,
+    mut process: ssh::Process,
     commands: async_channel::Receiver<Command>,
     stopping: async_channel::Receiver<()>,
 ) {
@@ -220,6 +220,7 @@ async fn serve(
         }
         tokio::select! {
             _ = stopping.recv() => break None,
+            _ = process.child.wait() => break None,
             result = commands.recv() => match result {
                 Ok(Command::Operation(operation, cancel)) => {
                     let task = tasks.spawn(operation(sftp.clone()));
@@ -280,6 +281,14 @@ pub struct Session {
 }
 
 impl Session {
+    pub async fn closed(&self) {
+        self.commands.closed().await;
+    }
+
+    pub fn same_connection(&self, other: &Self) -> bool {
+        self.commands.same_channel(&other.commands)
+    }
+
     pub async fn disconnect(&self) -> Result<(), Error> {
         let (send, reply) = oneshot::channel();
         self.commands
@@ -390,6 +399,20 @@ impl Session {
     ) -> Result<(), Error> {
         self.run_cancellable(Some(cancel.clone()), move |sftp| async move {
             sftp::upload(&sftp, &local, &remote, &progress, &cancel).await
+        })
+        .await
+    }
+
+    pub(crate) async fn upload_edit(
+        &self,
+        path: PathBuf,
+        canonical: PathBuf,
+        snapshot: crate::edit::Snapshot,
+        expected: crate::edit::Stamp,
+    ) -> Result<crate::edit::Upload, Error> {
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.run_cancellable(Some(cancel.clone()), move |sftp| async move {
+            crate::edit::upload(&sftp, &path, &canonical, snapshot, expected, &cancel).await
         })
         .await
     }

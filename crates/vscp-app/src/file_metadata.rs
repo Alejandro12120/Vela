@@ -47,6 +47,13 @@ fn local_time(time: SystemTime) -> Option<libc::tm> {
     }
 }
 
+pub fn clock(time: SystemTime) -> String {
+    local_time(time).map_or_else(
+        || EMPTY.into(),
+        |time| format!("{:02}:{:02}", time.tm_hour, time.tm_min),
+    )
+}
+
 pub fn modified(time: Option<SystemTime>, now: SystemTime) -> String {
     let Some(time) = time.and_then(local_time) else {
         return EMPTY.into();

@@ -8,6 +8,7 @@ Read [continuity](.agent/CONTINUITY.md) for the current scope and pending decisi
 - For Rust, use `CARGO_BUILD_JOBS=1`, `CARGO_INCREMENTAL=0` and a disposable `CARGO_TARGET_DIR`. Once the framework is selected, pin the Rust toolchain and Linux dependencies in the build image.
 - Run desktop integration checks from a regular graphical session on the target OS. Use the macOS SDK on macOS for AppKit compilation. Linux headless checks cannot establish Dolphin or Finder compatibility.
 - See the [file handoff probe](probes/file-handoff/README.md) for current build and test commands.
+- Design and review all UI with the [Heyrico UI skill](.agent/skills/heyrico-ui/SKILL.md). Read it before changing any view, and pass it to delegated UI work.
 - See the [MVP plan](docs/PLAN.md) for the selected stack, phases and open questions.
 
 Run these commands from the repository root in a macOS graphical session. The release executable runs before the temporary build directory is removed.

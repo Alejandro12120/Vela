@@ -123,3 +123,4 @@
   - overall UI refinement.
 - 2026-11-21T10:30Z [USER] Bug: Enter does not commit an inline rename or a new folder name, while ⌘⌫ works. UNCONFIRMED cause. The FileList `enter`→StartRename and `FileRename > TextInput` `enter`→CommitRename bindings in pane.rs are the first suspect.
 - 2026-11-21T10:30Z [ASSUMPTION] UNCONFIRMED: does the Bitwarden agent answer REQUEST_IDENTITIES while locked, by prompting, returning an empty list or failing? F5b must probe this with real Bitwarden.
+- 2026-11-21T11:00Z [USER] All UI work uses the Heyrico UI skill (.agent/skills/heyrico-ui). The zip the user attached is byte-identical to the repo copy. Recorded as PLAN decision 15 and in AGENTS.md.

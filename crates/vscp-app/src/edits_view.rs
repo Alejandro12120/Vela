@@ -15,6 +15,10 @@ use vscp_core::{Session, config::Server};
 use super::{
     Connection, Context, Dialog, Theme, Variant, Window, Workspace, button, dev, div, modal, px,
 };
+use crate::{
+    components::button::icon_text_button,
+    icons::{IconName, icon},
+};
 
 #[derive(Default)]
 pub(super) struct Edits {
@@ -729,8 +733,14 @@ impl Workspace {
                     .track_focus(&self.confirm_focus),
                 )
             });
+        let lead = match dialog {
+            EditDialog::Large(..) => None,
+            EditDialog::Discard(_) => Some((IconName::Undo, theme.danger)),
+            EditDialog::Conflict(..) => Some((IconName::Warning, theme.warning)),
+        };
         modal::overlay(
             title,
+            lead,
             div().child(body).into_any_element(),
             footer.into_any_element(),
             &self.dialog_focus,
@@ -754,14 +764,16 @@ impl Workspace {
             .filter(|row| row.target.server_id == id)
             .count();
         div().relative().flex_none().child(
-            button(
+            icon_text_button(
                 "edits",
+                IconName::Edits,
                 "Ediciones",
                 if self.edits.popover {
                     Variant::Selected
                 } else {
                     Variant::Secondary
                 },
+                None,
                 theme,
                 cx.listener(|this, _, _, cx| {
                     this.edits.popover = !this.edits.popover;
@@ -769,7 +781,6 @@ impl Workspace {
                 }),
             )
             .h(px(26.))
-            .gap_2()
             .child(
                 div()
                     .px_1()
@@ -832,7 +843,7 @@ impl Workspace {
                 div()
                     .px_3()
                     .py_2()
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_weight(FontWeight::MEDIUM)
                     .child("Ediciones"),
             )
             .child(list)
@@ -863,9 +874,9 @@ impl Workspace {
     fn edit_row(&self, row: &Edit, i: usize, theme: Theme, cx: &Context<Self>) -> Div {
         let target = &row.target;
         let state = match row.state {
-            State::Synced => ("Sincronizado", theme.success),
-            State::Pending => ("Cambios sin subir", theme.warning),
-            State::Conflict => ("Conflicto", theme.danger),
+            State::Synced => ("Sincronizado", theme.success, Some(IconName::Check)),
+            State::Pending => ("Cambios sin subir", theme.warning, None),
+            State::Conflict => ("Conflicto", theme.danger, Some(IconName::Warning)),
         };
         let busy = self
             .edits
@@ -874,13 +885,17 @@ impl Workspace {
             .is_some_and(|a| a.schedule.busy());
         let action =
             |id,
+             name,
              label,
+             tone,
              action: fn(&mut Workspace, Target, &mut Window, &mut Context<Workspace>)| {
                 let target = target.clone();
-                button(
+                icon_text_button(
                     ElementId::named_usize(id, i),
+                    name,
                     label,
                     Variant::Secondary,
+                    tone,
                     theme,
                     cx.listener(move |this, _, window, cx| {
                         action(this, target.clone(), window, cx)
@@ -911,8 +926,14 @@ impl Workspace {
                     .child(
                         div()
                             .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap_1()
                             .text_size(px(12.))
                             .text_color(state.1)
+                            .when_some(state.2, |label, name| {
+                                label.child(icon(name).size(px(14.)).text_color(state.1))
+                            })
                             .child(state.0),
                     ),
             )
@@ -929,13 +950,19 @@ impl Workspace {
                     .flex_wrap()
                     .gap_1()
                     .mt_1()
-                    .child(action("edit-open", "Abrir", |this, target, window, cx| {
-                        this.open_edit(target, window, cx)
-                    }))
+                    .child(action(
+                        "edit-open",
+                        IconName::ExternalLink,
+                        "Abrir",
+                        None,
+                        |this, target, window, cx| this.open_edit(target, window, cx),
+                    ))
                     .when(!busy && self.edit_session(target).is_some(), |bar| {
                         bar.child(action(
                             "edit-upload",
+                            IconName::Upload,
                             "Subir ahora",
+                            None,
                             |this, target, window, cx| {
                                 this.request_upload(target, None, window, cx)
                             },
@@ -949,20 +976,26 @@ impl Workspace {
                     .gap_1()
                     .child(action(
                         "edit-reveal",
+                        IconName::FolderOpen,
                         "Mostrar en Finder",
+                        None,
                         Workspace::reveal_edit,
                     ))
                     .when(!busy && row.state == State::Synced, |bar| {
                         bar.child(action(
                             "edit-stop",
+                            IconName::Close,
                             "Dejar de editar",
+                            None,
                             |this, target, window, cx| this.remove_edit(target, false, window, cx),
                         ))
                     })
                     .when(!busy && row.state != State::Synced, |bar| {
                         bar.child(action(
                             "edit-discard",
+                            IconName::Undo,
                             "Descartar cambios…",
+                            Some(theme.danger),
                             |this, target, window, cx| {
                                 this.open_dialog(
                                     Dialog::Edit(EditDialog::Discard(target)),
@@ -994,10 +1027,19 @@ impl Workspace {
         if let Some(error) = &self.edits.error {
             strip = strip.child(
                 div()
+                    .flex()
+                    .items_start()
+                    .gap_2()
                     .px_2()
                     .py_1()
                     .text_color(theme.danger)
-                    .child(error.clone()),
+                    .child(
+                        icon(IconName::Error)
+                            .size(px(14.))
+                            .mt(px(2.))
+                            .text_color(theme.danger),
+                    )
+                    .child(div().min_w_0().child(error.clone())),
             );
         }
         let pending = self
@@ -1017,6 +1059,11 @@ impl Workspace {
                     .py_1()
                     .bg(theme.warning_bg)
                     .text_color(theme.warning)
+                    .child(
+                        icon(IconName::Warning)
+                            .size(px(14.))
+                            .text_color(theme.warning),
+                    )
                     .child(if pending == 1 {
                         "1 archivo con cambios sin subir".into()
                     } else {
@@ -1046,15 +1093,21 @@ impl Workspace {
             .filter_map(|(target, row)| row.notice.as_ref().map(|notice| (target, notice)))
             .max_by_key(|(_, (when, notice))| (matches!(notice, Notice::Uploading), *when))
         {
-            let (caption, color) = match notice {
-                Notice::Opening => (format!("Abriendo {}…", name(target)), theme.secondary_text),
+            let (caption, color, glyph) = match notice {
+                Notice::Opening => (
+                    format!("Abriendo {}…", name(target)),
+                    theme.secondary_text,
+                    IconName::Spinner,
+                ),
                 Notice::Uploading => (
                     format!("Subiendo cambios de {}…", name(target)),
                     theme.secondary_text,
+                    IconName::Upload,
                 ),
                 Notice::Pending => (
                     format!("{} · Cambios sin subir", name(target)),
                     theme.warning,
+                    IconName::Warning,
                 ),
                 Notice::Uploaded(time) => (
                     format!(
@@ -1063,8 +1116,13 @@ impl Workspace {
                         crate::file_metadata::clock(*time)
                     ),
                     theme.success,
+                    IconName::Check,
                 ),
-                Notice::Error(error) => (format!("{} · {error}", name(target)), theme.danger),
+                Notice::Error(error) => (
+                    format!("{} · {error}", name(target)),
+                    theme.danger,
+                    IconName::Error,
+                ),
             };
             let target = target.clone();
             strip = strip.child(
@@ -1078,6 +1136,7 @@ impl Workspace {
                     .py_1()
                     .text_size(px(12.))
                     .text_color(color)
+                    .child(icon(glyph).size(px(14.)).text_color(color))
                     .child(
                         div()
                             .id("edit-caption")

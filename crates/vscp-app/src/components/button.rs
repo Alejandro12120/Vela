@@ -1,9 +1,12 @@
 use gpui::{
-    App, ClickEvent, Div, ElementId, FontWeight, SharedString, Stateful, Window, div, prelude::*,
-    px,
+    App, ClickEvent, Div, ElementId, FontWeight, Rgba, SharedString, Stateful, Window, div,
+    prelude::*, px,
 };
 
-use crate::theme::Theme;
+use crate::{
+    icons::{IconName, icon},
+    theme::Theme,
+};
 
 #[derive(Clone, Copy)]
 pub enum Variant {
@@ -15,6 +18,54 @@ pub enum Variant {
 pub fn button(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
+    variant: Variant,
+    theme: Theme,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    shell(id, variant, theme, on_click).child(label.into())
+}
+
+/// A button holding only an icon. `aria_label` names it for assistive technology.
+pub fn icon_button(
+    id: impl Into<ElementId>,
+    aria_label: impl Into<SharedString>,
+    name: IconName,
+    variant: Variant,
+    theme: Theme,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    shell(id, variant, theme, on_click)
+        .aria_label(aria_label)
+        .child(icon(name).text_color(text_color(variant, theme)))
+}
+
+/// A button with a leading icon and a text label. `tone` overrides the colour
+/// of the icon, for example the danger colour.
+pub fn icon_text_button(
+    id: impl Into<ElementId>,
+    name: IconName,
+    label: impl Into<SharedString>,
+    variant: Variant,
+    tone: Option<Rgba>,
+    theme: Theme,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    shell(id, variant, theme, on_click)
+        .gap(px(6.))
+        .child(icon(name).text_color(tone.unwrap_or_else(|| text_color(variant, theme))))
+        .child(label.into())
+        .when_some(tone, |button, tone| button.text_color(tone))
+}
+
+fn text_color(variant: Variant, theme: Theme) -> Rgba {
+    match variant {
+        Variant::Primary => theme.primary_text,
+        Variant::Secondary | Variant::Selected => theme.text,
+    }
+}
+
+fn shell(
+    id: impl Into<ElementId>,
     variant: Variant,
     theme: Theme,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -49,6 +100,5 @@ pub fn button(
         .hover(move |style| style.bg(hover))
         .active(move |style| style.bg(theme.selection).text_color(theme.text))
         .focus(move |style| style.border_color(theme.accent))
-        .child(label.into())
         .on_click(on_click)
 }

@@ -98,7 +98,7 @@ pub(super) struct Drag {
     server: Arc<str>,
     pub(super) paths: Arc<[PathBuf]>,
     label: String,
-    icon: Icon,
+    icon: IconName,
 }
 
 pub(super) struct DragChip {
@@ -126,7 +126,7 @@ impl Render for DragChip {
                     .bg(theme.raised)
                     .text_color(theme.text)
                     .text_size(px(12.))
-                    .child(self.drag.icon.draw(theme.secondary_text))
+                    .child(icon(self.drag.icon).text_color(theme.secondary_text))
                     .child(div().truncate().child(self.drag.label.clone())),
             )
     }
@@ -174,7 +174,7 @@ impl Pane {
         path: &Arc<Path>,
         selected: Arc<[PathBuf]>,
         name: &str,
-        icon: Icon,
+        icon: IconName,
     ) -> Option<Drag> {
         let operations = self.operations.as_ref()?;
         let paths = if self.tree.selected.contains(path) {

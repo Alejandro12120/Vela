@@ -1,11 +1,16 @@
 use std::path::PathBuf;
 
 use gpui::{
-    AnyElement, Context, FocusHandle, FontWeight, MouseButton, Pixels, Point, Role, Window,
-    anchored, deferred, div, point, prelude::*, px,
+    AnyElement, Context, FocusHandle, MouseButton, Pixels, Point, Role, Window, anchored, deferred,
+    div, point, prelude::*, px,
 };
 
-use crate::{components::modal, pane::Pane, theme::Theme};
+use crate::{
+    components::{menu::menu_item, modal},
+    icons::IconName,
+    pane::Pane,
+    theme::Theme,
+};
 
 #[derive(Clone, Copy)]
 pub enum Action {
@@ -25,6 +30,39 @@ pub enum RunState {
     Enabled,
 }
 
+struct Item {
+    action: Action,
+    icon: IconName,
+    label: &'static str,
+    shortcut: &'static str,
+    enabled: bool,
+    danger: bool,
+}
+
+impl Item {
+    fn new(
+        action: Action,
+        icon: IconName,
+        label: &'static str,
+        shortcut: &'static str,
+        enabled: bool,
+    ) -> Self {
+        Self {
+            action,
+            icon,
+            label,
+            shortcut,
+            enabled,
+            danger: false,
+        }
+    }
+
+    fn danger(mut self) -> Self {
+        self.danger = true;
+        self
+    }
+}
+
 pub struct Menu {
     pub position: Point<Pixels>,
     pub folder: PathBuf,
@@ -35,37 +73,49 @@ pub struct Menu {
 }
 
 impl Menu {
-    fn actions(
-        &self,
-        selected: usize,
-        run: RunState,
-    ) -> Vec<(Action, &'static str, &'static str, bool)> {
+    fn actions(&self, selected: usize, run: RunState, copy_icon: IconName) -> Vec<Item> {
         let mut actions = vec![
-            (Action::NewFolder, "Nueva carpeta", "⌘⇧N", true),
-            (
+            Item::new(
+                Action::NewFolder,
+                IconName::FolderPlus,
+                "Nueva carpeta",
+                "⌘⇧N",
+                true,
+            ),
+            Item::new(
                 Action::Rename,
+                IconName::Pencil,
                 "Renombrar",
                 "↵",
                 self.on_row && selected == 1,
             ),
         ];
         if run != RunState::Hidden {
-            actions.push((Action::Run, "Ejecutar", "", run == RunState::Enabled));
+            actions.push(Item::new(
+                Action::Run,
+                IconName::Play,
+                "Ejecutar",
+                "",
+                run == RunState::Enabled,
+            ));
         }
         actions.extend([
-            (
+            Item::new(
                 Action::Delete,
+                IconName::Trash,
                 "Eliminar…",
                 "⌘⌫",
                 self.on_row && selected > 0,
-            ),
-            (
+            )
+            .danger(),
+            Item::new(
                 Action::Copy,
+                copy_icon,
                 "Copiar al otro panel",
                 "F5",
                 self.on_row && selected > 0,
             ),
-            (Action::Refresh, "Refrescar", "⌘R", true),
+            Item::new(Action::Refresh, IconName::Refresh, "Refrescar", "⌘R", true),
         ]);
         actions
     }
@@ -74,10 +124,11 @@ impl Menu {
         &self,
         selected: usize,
         run: RunState,
+        copy_icon: IconName,
         theme: Theme,
         cx: &Context<Pane>,
     ) -> AnyElement {
-        let actions = self.actions(selected, run);
+        let actions = self.actions(selected, run, copy_icon);
         let last = actions.len() - 1;
         let panel = div()
             .id("file-menu")
@@ -121,46 +172,30 @@ impl Menu {
                 spread_radius: px(0.),
             }])
             .on_mouse_down_out(cx.listener(|pane, _, _, cx| pane.dismiss_menu(cx)))
-            .children(actions.into_iter().enumerate().map(
-                |(index, (action, label, key, enabled))| {
-                    div()
-                        .id(("file-menu-action", index))
-                        .role(Role::MenuItem)
-                        .tab_index(0)
-                        .tab_stop(enabled)
-                        .when(index == 0, |row| row.track_focus(&self.first))
-                        .when(index == last, |row| row.track_focus(&self.last))
-                        .h(px(28.))
-                        .px_2()
-                        .rounded(px(6.))
-                        .flex()
-                        .justify_between()
-                        .items_center()
-                        .gap_2()
-                        .text_color(if enabled {
-                            theme.text
-                        } else {
-                            theme.control_border
-                        })
-                        .child(div().font_weight(FontWeight::MEDIUM).child(label))
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(theme.secondary_text)
-                                .child(key),
-                        )
-                        .when(enabled, |row| {
-                            row.cursor_pointer()
-                                .hover(move |s| s.bg(theme.hover))
-                                .focus(move |s| s.bg(theme.selection))
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .on_click(cx.listener(move |pane, _, window, cx| {
-                                    cx.stop_propagation();
-                                    pane.menu_action(action, window, cx)
-                                }))
-                        })
-                },
-            ));
+            .children(actions.into_iter().enumerate().map(|(index, item)| {
+                let Item {
+                    action,
+                    icon,
+                    label,
+                    shortcut,
+                    enabled,
+                    danger,
+                } = item;
+                menu_item(icon, label, shortcut, enabled, danger, theme)
+                    .id(("file-menu-action", index))
+                    .role(Role::MenuItem)
+                    .tab_index(0)
+                    .tab_stop(enabled)
+                    .when(index == 0, |row| row.track_focus(&self.first))
+                    .when(index == last, |row| row.track_focus(&self.last))
+                    .when(enabled, |row| {
+                        row.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(move |pane, _, window, cx| {
+                                cx.stop_propagation();
+                                pane.menu_action(action, window, cx)
+                            }))
+                    })
+            }));
         deferred(
             anchored()
                 .position(self.position)

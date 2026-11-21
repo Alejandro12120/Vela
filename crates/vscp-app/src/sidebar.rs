@@ -6,10 +6,11 @@ use vscp_core::config::Server;
 
 use crate::{
     components::{
-        button::{Variant, button},
+        button::{Variant, button, icon_button, icon_text_button},
+        menu::menu_item,
         status_dot::status_dot,
     },
-    pane_icons::Icon,
+    icons::{IconName, icon},
     theme::Theme,
     workspace::{Connection, Workspace},
 };
@@ -58,20 +59,20 @@ pub fn render(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -> i
         .items_center()
         .justify_between()
         .h(px(32.))
-        .child(div().font_weight(FontWeight::SEMIBOLD).child("Servidores"));
+        .child(div().font_weight(FontWeight::MEDIUM).child("Servidores"));
     if workspace.dir.is_some() {
         heading = heading.child(
-            button(
+            icon_button(
                 "add",
-                "+",
+                "Añadir servidor",
+                IconName::Plus,
                 Variant::Secondary,
                 theme,
                 cx.listener(|this, _, window, cx| this.open_form(None, window, cx)),
             )
             .w(px(28.))
             .h(px(28.))
-            .text_size(px(16.))
-            .aria_label("Añadir servidor"),
+            .px_0(),
         );
     }
     let sidebar = div()
@@ -94,15 +95,16 @@ pub fn render(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -> i
             .border_t_1()
             .border_color(theme.border)
             .child(
-                button(
+                icon_text_button(
                     "settings",
-                    "⚙  Ajustes",
+                    IconName::Settings,
+                    "Ajustes",
                     Variant::Secondary,
+                    None,
                     theme,
                     cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
                 )
-                .h(px(26.))
-                .aria_label("Ajustes"),
+                .h(px(26.)),
             )
     };
     if workspace.servers.is_empty() {
@@ -157,9 +159,7 @@ pub fn render(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -> i
                 .when(pinned.is_empty() && dragging, |list| {
                     list.child(empty_zone(true, "Suelta aquí para fijar", theme, cx))
                 })
-                .when(grouped, |list| {
-                    list.child(group_header("Servidores", theme))
-                })
+                .when(grouped, |list| list.child(divider(theme)))
                 .children(
                     unpinned
                         .iter()
@@ -191,6 +191,11 @@ fn group_header(label: &'static str, theme: Theme) -> Div {
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme.secondary_text)
         .child(label)
+}
+
+/// Separates the pinned group from the unpinned one, which has no header.
+fn divider(theme: Theme) -> Div {
+    div().flex_none().h(px(1.)).my(px(6.)).bg(theme.border)
 }
 
 /// Drop target below a group's last row. The insertion line shows at its top.
@@ -402,16 +407,17 @@ fn row(
                             cx.listener(move |this, _, _, cx| this.toggle_pin(&pin_id, cx)),
                         ))
                         .child(
-                            button(
+                            icon_button(
                                 "server-actions",
-                                "⋯",
+                                format!("Acciones de {}", server.name),
+                                IconName::Ellipsis,
                                 Variant::Secondary,
                                 theme,
                                 toggle_menu,
                             )
-                            .aria_label(format!("Acciones de {}", server.name))
                             .w(px(28.))
                             .h(px(28.))
+                            .px_0()
                             .when(!shown, |button| button.tab_stop(false)),
                         ),
                 ),
@@ -445,11 +451,18 @@ fn pin_button(
         .cursor_pointer()
         .hover(move |style| style.bg(theme.hover))
         .focus(move |style| style.border_color(theme.accent))
-        .child(Icon::Pin.draw(if pinned {
-            theme.text
-        } else {
-            theme.secondary_text
-        }))
+        .child(
+            icon(if pinned {
+                IconName::PinOff
+            } else {
+                IconName::Pin
+            })
+            .text_color(if pinned {
+                theme.text
+            } else {
+                theme.secondary_text
+            }),
+        )
         .when(!shown, |button| button.tab_stop(false))
         .on_click(on_click)
 }
@@ -470,13 +483,12 @@ fn menu(
     let delete_id = server.id.clone();
     let pin_id = server.id.clone();
     let menu = div()
-        .p_2()
+        .p_1()
         .ml_2()
         .mr_1()
         .mt_1()
         .flex()
         .flex_col()
-        .gap_1()
         .rounded(px(8.))
         .border_1()
         .border_color(theme.border)
@@ -489,26 +501,48 @@ fn menu(
                 .child("Conexión en curso…"),
         );
     }
-    menu.child(button(
-        "pin",
-        if server.pinned {
-            "Dejar de fijar"
-        } else {
-            "Fijar"
-        },
-        Variant::Secondary,
-        theme,
-        cx.listener(move |this, _, _, cx| {
+    menu.child(
+        menu_item(
+            if server.pinned {
+                IconName::PinOff
+            } else {
+                IconName::Pin
+            },
+            if server.pinned {
+                "Dejar de fijar"
+            } else {
+                "Fijar"
+            },
+            "",
+            true,
+            false,
+            theme,
+        )
+        .id("pin")
+        .role(gpui::Role::MenuItem)
+        .tab_index(0)
+        .on_click(cx.listener(move |this, _, _, cx| {
             this.row_menu = None;
             this.toggle_pin(&pin_id, cx);
-        }),
-    ))
-    .child(button(
-        "session",
-        if connected { "Desconectar" } else { "Conectar" },
-        Variant::Secondary,
-        theme,
-        cx.listener(move |this, _, window, cx| {
+        })),
+    )
+    .child(
+        menu_item(
+            if connected {
+                IconName::Unplug
+            } else {
+                IconName::Plug
+            },
+            if connected { "Desconectar" } else { "Conectar" },
+            "",
+            true,
+            false,
+            theme,
+        )
+        .id("session")
+        .role(gpui::Role::MenuItem)
+        .tab_index(0)
+        .on_click(cx.listener(move |this, _, window, cx| {
             this.row_menu = None;
             if connected {
                 this.disconnect(&connection_id, window, cx);
@@ -516,23 +550,24 @@ fn menu(
                 this.connect(&connection_id, window, cx);
             }
             cx.notify();
-        }),
-    ))
-    .child(button(
-        "edit",
-        "Editar…",
-        Variant::Secondary,
-        theme,
-        cx.listener(move |this, _, window, cx| this.open_form(Some(&edit_id), window, cx)),
-    ))
+        })),
+    )
     .child(
-        button(
-            "remove",
-            "Eliminar…",
-            Variant::Secondary,
-            theme,
-            cx.listener(move |this, _, window, cx| this.open_delete(delete_id.clone(), window, cx)),
-        )
-        .text_color(theme.danger),
+        menu_item(IconName::Pencil, "Editar…", "", true, false, theme)
+            .id("edit")
+            .role(gpui::Role::MenuItem)
+            .tab_index(0)
+            .on_click(
+                cx.listener(move |this, _, window, cx| this.open_form(Some(&edit_id), window, cx)),
+            ),
+    )
+    .child(
+        menu_item(IconName::Trash, "Eliminar…", "", true, true, theme)
+            .id("remove")
+            .role(gpui::Role::MenuItem)
+            .tab_index(0)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.open_delete(delete_id.clone(), window, cx)
+            })),
     )
 }

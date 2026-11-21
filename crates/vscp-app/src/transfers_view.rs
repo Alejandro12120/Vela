@@ -17,12 +17,12 @@ use vscp_core::{
 
 use crate::{
     components::{
-        button::{Variant, button},
+        button::{Variant, button, icon_button, icon_text_button},
         modal,
     },
     dev, file_metadata,
+    icons::{IconName, icon},
     pane::{Pane, Source, finder::Purpose},
-    pane_icons::Icon,
     theme::Theme,
 };
 
@@ -443,7 +443,7 @@ impl Transfers {
     }
 
     fn dialog(&self, theme: Theme, cx: &Context<Self>) -> Option<gpui::Div> {
-        let (title, body, footer) = if let Some((_, conflict)) = self.conflicts.first() {
+        let (title, lead, body, footer) = if let Some((_, conflict)) = self.conflicts.first() {
             let now = SystemTime::now();
             let metadata = |label, entry: &vscp_core::Entry| {
                 div()
@@ -495,7 +495,11 @@ impl Transfers {
                                 .rounded(px(4.))
                                 .border_1()
                                 .border_color(theme.control_border)
-                                .child(if self.apply_all { "✓" } else { "" }),
+                                .when(self.apply_all, |box_| {
+                                    box_.child(
+                                        icon(IconName::Check).size(px(12.)).text_color(theme.text),
+                                    )
+                                }),
                         )
                         .child("Aplicar a todos los conflictos de este trabajo")
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_policy(cx)))
@@ -539,6 +543,7 @@ impl Transfers {
                     "Ya existe «{}» en el destino",
                     conflict.existing.name.to_string_lossy()
                 ),
+                Some((IconName::Warning, theme.warning)),
                 body,
                 footer,
             )
@@ -585,7 +590,7 @@ impl Transfers {
                     .text_color(theme.danger)
                     .track_focus(&self.last),
                 );
-            (title, body, footer)
+            (title, Some((IconName::Trash, theme.danger)), body, footer)
         } else {
             return None;
         };
@@ -593,6 +598,7 @@ impl Transfers {
         Some(
             modal::overlay(
                 title,
+                lead,
                 body.into_any_element(),
                 footer.into_any_element(),
                 &self.focus,
@@ -682,12 +688,12 @@ impl Transfers {
                                 .rounded(px(6.))
                                 .hover(move |s| s.bg(theme.hover))
                                 .child(
-                                    if self.expanded {
-                                        Icon::Down
+                                    icon(if self.expanded {
+                                        IconName::ChevronDown
                                     } else {
-                                        Icon::Forward
-                                    }
-                                    .draw(theme.secondary_text),
+                                        IconName::ChevronRight
+                                    })
+                                    .text_color(theme.secondary_text),
                                 )
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.expanded = !this.expanded;
@@ -698,10 +704,12 @@ impl Transfers {
                         .when_some(active, |header, row| {
                             let cancel = row.cancel.clone();
                             header.child(
-                                button(
+                                icon_text_button(
                                     "stop-job",
+                                    IconName::Close,
                                     "Cancelar",
                                     Variant::Secondary,
+                                    None,
                                     theme,
                                     move |_, _, _| cancel.cancel(),
                                 )
@@ -736,9 +744,21 @@ impl Transfers {
                             .overflow_y_scroll()
                             .px_2()
                             .children(self.rows.iter().map(|row| {
-                                let direction = match row.direction {
-                                    Direction::Upload => "Subida",
-                                    Direction::Download => "Descarga",
+                                let (direction, direction_icon) = match row.direction {
+                                    Direction::Upload => ("Subida", IconName::Upload),
+                                    Direction::Download => ("Descarga", IconName::Download),
+                                };
+                                let (status_icon, status_color) = match row.status {
+                                    Status::Completed => (Some(IconName::Check), theme.success),
+                                    Status::CompletedWithErrors | Status::Error => {
+                                        (Some(IconName::Error), theme.danger)
+                                    }
+                                    Status::Preparing | Status::Running => {
+                                        (Some(IconName::Spinner), theme.secondary_text)
+                                    }
+                                    Status::Queued | Status::Cancelled => {
+                                        (None, theme.secondary_text)
+                                    }
                                 };
                                 let files = if row.totals.files == 1 {
                                     "1 archivo".into()
@@ -763,14 +783,33 @@ impl Transfers {
                                             .justify_between()
                                             .gap_2()
                                             .child(
-                                                div().min_w_0().truncate().child(format!(
-                                                    "{direction} · {files} · {bytes}"
-                                                )),
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .min_w_0()
+                                                    .child(
+                                                        icon(direction_icon)
+                                                            .text_color(theme.secondary_text),
+                                                    )
+                                                    .child(div().min_w_0().truncate().child(
+                                                        format!("{direction} · {files} · {bytes}"),
+                                                    )),
                                             )
                                             .child(
                                                 div()
                                                     .flex_none()
-                                                    .text_color(theme.secondary_text)
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1()
+                                                    .text_color(status_color)
+                                                    .when_some(status_icon, |label, name| {
+                                                        label.child(
+                                                            icon(name)
+                                                                .size(px(14.))
+                                                                .text_color(status_color),
+                                                        )
+                                                    })
                                                     .child(status_label(row.status, row.errors)),
                                             ),
                                     )
@@ -822,11 +861,18 @@ impl Transfers {
                         .gap_2()
                         .p_2()
                         .text_color(theme.danger)
+                        .child(
+                            icon(IconName::Error)
+                                .mt(px(2.))
+                                .self_start()
+                                .text_color(theme.danger),
+                        )
                         .child(div().flex_1().min_w_0().whitespace_normal().child(error))
                         .child(
-                            button(
+                            icon_button(
                                 "dismiss-error",
                                 "Cerrar",
+                                IconName::Close,
                                 Variant::Secondary,
                                 theme,
                                 cx.listener(|this, _, _, cx| {
@@ -834,7 +880,9 @@ impl Transfers {
                                     cx.notify();
                                 }),
                             )
-                            .flex_none(),
+                            .self_start()
+                            .w(px(28.))
+                            .px_0(),
                         ),
                 )
             })

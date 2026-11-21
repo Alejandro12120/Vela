@@ -141,6 +141,7 @@ impl Workspace {
         );
         modal::overlay(
             "Ajustes",
+            None,
             body.into_any_element(),
             footer.into_any_element(),
             &self.dialog_focus,

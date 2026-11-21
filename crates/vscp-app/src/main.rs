@@ -4,8 +4,8 @@ mod dev;
 mod file_metadata;
 mod file_workspace;
 mod form;
+mod icons;
 mod pane;
-mod pane_icons;
 #[cfg(target_os = "macos")]
 mod pasteboard_macos;
 mod rename;
@@ -44,6 +44,7 @@ fn main() {
         .and_then(vscp_core::Client::new)
         .ok();
     gpui_platform::application()
+        .with_assets(icons::Assets)
         .with_quit_mode(QuitMode::LastWindowClosed)
         .run(move |cx: &mut App| {
             if let Some(appearance) = dev::appearance() {

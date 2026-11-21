@@ -1,15 +1,24 @@
 use gpui::{
-    AnyElement, Context, Div, FocusHandle, FontWeight, SharedString, actions, div, point,
+    AnyElement, Context, Div, FocusHandle, FontWeight, Rgba, SharedString, actions, div, point,
     prelude::*, px,
 };
 
-use crate::theme::Theme;
+use crate::{
+    icons::{IconName, icon},
+    theme::Theme,
+};
 
 actions!(dialog, [Confirm, Cancel, Next, Previous]);
 
+/// An 18 px icon before the title. The tone matches the dialog: danger for
+/// deletions, warning for conflicts, accent or neutral for prompts.
+pub type Lead = Option<(IconName, Rgba)>;
+
 /// The backdrop intercepts pointer input. Tab wraps within the active dialog.
+#[allow(clippy::too_many_arguments)]
 pub fn overlay<T: 'static>(
     title: impl Into<SharedString>,
+    lead: Lead,
     body: AnyElement,
     footer: AnyElement,
     focus: &FocusHandle,
@@ -79,9 +88,15 @@ pub fn overlay<T: 'static>(
                 .child(
                     div()
                         .flex_none()
-                        .font_weight(FontWeight::SEMIBOLD)
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .font_weight(FontWeight::MEDIUM)
                         .text_size(px(16.))
-                        .child(title),
+                        .when_some(lead, |row, (name, color)| {
+                            row.child(icon(name).size(px(18.)).text_color(color))
+                        })
+                        .child(div().min_w_0().child(title)),
                 )
                 .child(
                     div()

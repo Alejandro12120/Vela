@@ -43,19 +43,22 @@ const TEXT_EXTENSIONS: &[&str] = &[
 
 const SNIFF_BYTES: usize = 8 * 1024;
 
-/// Whether a file is text that an editor should open. Known extensions answer
-/// without reading. Other files are text when their first 8 KiB hold no NUL
-/// byte and are valid UTF-8.
-pub fn is_text(path: &Path) -> io::Result<bool> {
-    if path
-        .extension()
+/// Whether the extension alone marks the file as text. Performs no I/O.
+pub fn has_text_extension(path: &Path) -> bool {
+    path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {
             TEXT_EXTENSIONS
                 .iter()
                 .any(|known| known.eq_ignore_ascii_case(extension))
         })
-    {
+}
+
+/// Whether a file is text that an editor should open. Known extensions answer
+/// without reading. Other files are text when their first 8 KiB hold no NUL
+/// byte and are valid UTF-8.
+pub fn is_text(path: &Path) -> io::Result<bool> {
+    if has_text_extension(path) {
         return Ok(true);
     }
     let mut buffer = Vec::with_capacity(SNIFF_BYTES);

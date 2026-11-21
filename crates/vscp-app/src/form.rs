@@ -18,7 +18,7 @@ use crate::{
         button::{Variant, button},
         text_input::TextInput,
     },
-    pane_icons::Icon,
+    icons::{IconName, icon},
     theme::Theme,
     workspace::Workspace,
 };
@@ -390,7 +390,15 @@ impl Form {
     }
 
     fn key_section(&self, theme: Theme, cx: &Context<Workspace>) -> Div {
-        let section = labeled("Clave");
+        let section = div().flex().flex_col().gap_1().child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .font_weight(FontWeight::MEDIUM)
+                .child(icon(IconName::Key).text_color(theme.secondary_text))
+                .child("Clave"),
+        );
         let section = match &self.identity {
             Identity::File { path, key, .. } => section
                 .child(file_card(path, key.as_ref(), theme))
@@ -428,9 +436,19 @@ impl Form {
                 .gap_2()
                 .child(
                     div()
+                        .flex()
+                        .w_full()
+                        .items_start()
+                        .gap_2()
                         .text_size(px(12.))
                         .text_color(theme.secondary_text)
-                        .child(text),
+                        .child(
+                            icon(IconName::Error)
+                                .size(px(14.))
+                                .mt(px(1.))
+                                .text_color(theme.danger),
+                        )
+                        .child(div().flex_1().min_w_0().child(text)),
                 )
                 .child(button(
                     "retry",
@@ -446,14 +464,27 @@ impl Form {
                 return boxed(theme).child(
                     div()
                         .flex()
-                        .flex_col()
-                        .gap_1()
+                        .items_start()
+                        .gap_2()
                         .text_size(px(12.))
                         .text_color(theme.secondary_text)
-                        .child("Consultando Bitwarden…")
-                        .when(since.elapsed() >= UNLOCK_HINT_AFTER, |text| {
-                            text.child("Si Bitwarden pide desbloquear, hazlo y espera.")
-                        }),
+                        .child(
+                            icon(IconName::Spinner)
+                                .size(px(14.))
+                                .mt(px(1.))
+                                .text_color(theme.secondary_text),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .min_w_0()
+                                .child("Consultando Bitwarden…")
+                                .when(since.elapsed() >= UNLOCK_HINT_AFTER, |text| {
+                                    text.child("Si Bitwarden pide desbloquear, hazlo y espera.")
+                                }),
+                        ),
                 );
             }
             Keys::Ready(keys) if keys.is_empty() => Some(message(
@@ -608,7 +639,9 @@ fn key_row(
                 )
                 .child(detail),
         )
-        .when(selected, |row| row.child(Icon::Check.draw(theme.text)))
+        .when(selected, |row| {
+            row.child(icon(IconName::Check).text_color(theme.text))
+        })
         .on_click(cx.listener(move |this, _, window, cx| {
             if let Some(form) = this.editing() {
                 form.select(index, window, cx);

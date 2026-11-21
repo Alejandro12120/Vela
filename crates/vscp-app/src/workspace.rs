@@ -37,8 +37,8 @@ use crate::{
     dev,
     file_workspace::Panes,
     form::{Errors, Field, Form},
+    icons::IconName,
     pane::{PaneMemory, icon_button},
-    pane_icons::Icon,
     theme::Theme,
 };
 
@@ -881,7 +881,7 @@ impl Workspace {
 
     fn render_dialog(&self, theme: Theme, cx: &Context<Self>) -> Option<AnyElement> {
         let dialog = self.dialog.as_ref()?;
-        let (title, body, confirm): (gpui::SharedString, _, _) = match dialog {
+        let (title, lead, body, confirm): (gpui::SharedString, modal::Lead, _, _) = match dialog {
             Dialog::Edit(dialog) => return Some(self.edit_dialog(dialog, theme, cx)),
             Dialog::Settings => return Some(self.settings_dialog(theme, cx)),
             Dialog::Form(form) => (
@@ -890,6 +890,7 @@ impl Workspace {
                 } else {
                     "Añadir servidor".into()
                 },
+                None,
                 form.render(theme, cx),
                 "Guardar",
             ),
@@ -897,6 +898,7 @@ impl Workspace {
                 let server = self.servers.iter().find(|server| &server.id == id)?;
                 (
                     "Eliminar servidor".into(),
+                    Some((IconName::Trash, theme.danger)),
                     div().child(format!(
                         "¿Eliminar «{}» de la lista de servidores?",
                         server.name
@@ -914,6 +916,7 @@ impl Workspace {
                 match &prompt.request.kind {
                     askpass::Kind::HostKeyConfirm { fingerprint } => (
                         "Clave del servidor desconocida".into(),
+                        Some((IconName::Key, theme.accent)),
                         body.child("Es la primera conexión con este servidor. Comprueba que la huella coincide antes de confiar en su clave.")
                             .child(technical_text(fingerprint.clone(), theme)),
                         "Confiar y conectar",
@@ -926,6 +929,7 @@ impl Workspace {
                         };
                         (
                             format!("{kind_name} · {destination}").into(),
+                            Some((IconName::Lock, theme.secondary_text)),
                             div().flex().flex_col().gap_2().child(label.to_owned()).children(prompt.input.clone()),
                             "Conectar",
                         )
@@ -958,6 +962,7 @@ impl Workspace {
         Some(
             modal::overlay(
                 title,
+                lead,
                 body.into_any_element(),
                 footer.into_any_element(),
                 &self.dialog_focus,
@@ -977,11 +982,11 @@ impl Workspace {
             } else {
                 "Mostrar barra lateral"
             },
-            Icon::Sidebar,
+            IconName::Sidebar,
             true,
             theme,
         )
-        .aria_keyshortcuts("Control+Meta+S")
+        .aria_keyshortcuts("Meta+S")
         .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx)))
     }
 
@@ -1062,7 +1067,7 @@ impl Workspace {
             .child(
                 div()
                     .text_size(px(18.))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_weight(FontWeight::MEDIUM)
                     .child(server.name.clone()),
             )
             .child(

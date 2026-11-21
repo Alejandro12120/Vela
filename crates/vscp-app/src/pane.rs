@@ -18,7 +18,7 @@ use vscp_core::{EntryKind, Error, Session, local};
 use crate::{
     components::text_input::TextInput,
     dev, file_metadata,
-    pane_icons::Icon,
+    icons::{IconName, icon},
     theme::Theme,
     tree::{self, Child, History, Listing, Navigation, PathSet, RowState, Selection, Tree},
 };
@@ -587,6 +587,15 @@ impl Pane {
         }
     }
 
+    /// Arrow pointing at the other pane: local is on the left, remote on the right.
+    fn copy_icon(&self) -> IconName {
+        if self.source.side() == operations::Side::Local {
+            IconName::ArrowRight
+        } else {
+            IconName::ArrowLeft
+        }
+    }
+
     fn toolbar(&self, theme: Theme, cx: &Context<Self>) -> Div {
         div()
             .flex()
@@ -600,7 +609,7 @@ impl Pane {
                 icon_button(
                     "back",
                     "Atrás",
-                    Icon::Back,
+                    IconName::Back,
                     self.target(Navigation::Back).is_some(),
                     theme,
                 )
@@ -613,7 +622,7 @@ impl Pane {
                 icon_button(
                     "forward",
                     "Adelante",
-                    Icon::Forward,
+                    IconName::Forward,
                     self.target(Navigation::Forward).is_some(),
                     theme,
                 )
@@ -626,7 +635,7 @@ impl Pane {
                 icon_button(
                     "up",
                     "Subir",
-                    Icon::Up,
+                    IconName::Up,
                     self.target(Navigation::Up).is_some(),
                     theme,
                 )
@@ -646,11 +655,7 @@ impl Pane {
                 icon_button(
                     "copy-other",
                     "Copiar al otro panel (F5)",
-                    if self.source.side() == operations::Side::Local {
-                        Icon::Transfer
-                    } else {
-                        Icon::TransferBack
-                    },
+                    self.copy_icon(),
                     !self.tree.selected.is_empty(),
                     theme,
                 )
@@ -664,7 +669,7 @@ impl Pane {
                 })),
             )
             .child(
-                icon_button("refresh", "Actualizar", Icon::Refresh, true, theme).on_click(
+                icon_button("refresh", "Actualizar", IconName::Refresh, true, theme).on_click(
                     cx.listener(|this, _, window, cx| {
                         this.list_focus.focus(window, cx);
                         this.refresh(window, cx);
@@ -679,7 +684,11 @@ impl Pane {
                     } else {
                         "Mostrar archivos ocultos"
                     },
-                    Icon::Hidden,
+                    if self.tree.show_hidden {
+                        IconName::Eye
+                    } else {
+                        IconName::EyeOff
+                    },
                     true,
                     theme,
                 )
@@ -727,10 +736,12 @@ impl Pane {
         let selected = self.tree.selected.contains(&row.path);
         let path = row.path.clone();
         let name = entry.name.to_string_lossy().into_owned();
-        let icon = match entry.kind {
-            EntryKind::Directory => Icon::Folder,
-            EntryKind::Symlink => Icon::Link,
-            _ => Icon::File,
+        let file_icon = match entry.kind {
+            EntryKind::Directory if expanded => IconName::FolderOpen,
+            EntryKind::Directory => IconName::Folder,
+            EntryKind::Symlink => IconName::Symlink,
+            _ if local::has_text_extension(Path::new(&entry.name)) => IconName::FileText,
+            _ => IconName::File,
         };
         let disclosure = div().w(px(18.)).h_full().flex_none().flex().items_center();
         let disclosure = if expandable {
@@ -740,7 +751,15 @@ impl Pane {
                 .aria_label(if expanded { "Contraer" } else { "Expandir" })
                 .aria_expanded(expanded)
                 .cursor_pointer()
-                .child(if expanded { Icon::Down } else { Icon::Forward }.draw(theme.secondary_text))
+                .child(
+                    icon(if expanded {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .size(px(14.))
+                    .text_color(theme.secondary_text),
+                )
                 .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                     cx.stop_propagation();
                     this.list_focus.focus(window, cx);
@@ -757,7 +776,7 @@ impl Pane {
             .as_ref()
             .filter(|rename| rename.path == row.path.as_ref());
         let drag = if editing.is_none() {
-            self.drag(&row.path, selected_paths.clone(), &name, icon)
+            self.drag(&row.path, selected_paths.clone(), &name, file_icon)
         } else {
             None
         };
@@ -788,7 +807,7 @@ impl Pane {
                     .overflow_hidden()
                     .pl(offset)
                     .child(disclosure)
-                    .child(icon.draw(theme.secondary_text))
+                    .child(icon(file_icon).text_color(theme.secondary_text))
                     .child(
                         div()
                             .ml_1()
@@ -1052,9 +1071,9 @@ impl Render for Pane {
                 ),
             )
             .children(
-                self.menu
-                    .as_ref()
-                    .map(|menu| menu.render(selected, self.run_state(), theme, cx)),
+                self.menu.as_ref().map(|menu| {
+                    menu.render(selected, self.run_state(), self.copy_icon(), theme, cx)
+                }),
             )
             .child(
                 div()
@@ -1090,7 +1109,7 @@ impl Render for Pane {
 pub fn icon_button(
     id: &'static str,
     label: &'static str,
-    icon: Icon,
+    name: IconName,
     enabled: bool,
     theme: Theme,
 ) -> Stateful<Div> {
@@ -1105,7 +1124,7 @@ pub fn icon_button(
         .items_center()
         .justify_center()
         .rounded(px(6.))
-        .child(icon.draw(if enabled {
+        .child(icon(name).text_color(if enabled {
             theme.text
         } else {
             theme.control_border

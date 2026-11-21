@@ -186,7 +186,7 @@ impl Panes {
                         div()
                             .min_w_0()
                             .truncate()
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .font_weight(FontWeight::MEDIUM)
                             .child(server.name.clone()),
                     )
                     .child(

@@ -12,3 +12,4 @@ path = "src/main.rs"
 [dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.11" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["runtime_shaders"] }
+vscp-core = { path = "../vscp-core" }

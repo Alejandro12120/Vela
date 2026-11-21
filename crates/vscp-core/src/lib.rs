@@ -1,1 +1,12 @@
-//! Platform-independent configuration, SSH and SFTP sessions, transfers, editing, and cache.
+//! SSH and SFTP sessions over system OpenSSH.
+
+pub mod askpass;
+mod error;
+mod session;
+mod sftp;
+mod ssh;
+
+pub use error::Error;
+pub use session::{Client, Session};
+pub use sftp::{Entry, EntryKind};
+pub use ssh::{Auth, ConnectionSpec, bitwarden_agent_sockets};

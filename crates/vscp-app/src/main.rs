@@ -72,6 +72,13 @@ impl Render for Workspace {
 }
 
 fn main() {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "askpass")
+    {
+        std::process::exit(vscp_core::askpass::client_main());
+    }
+
     let started_at = Instant::now();
     let trace_startup = std::env::var("VSCP_TRACE_STARTUP")
         .is_ok_and(|value| value == "1")

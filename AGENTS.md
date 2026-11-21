@@ -29,3 +29,5 @@ Run these commands from the repository root in a macOS graphical session. The re
 ```
 
 Set `VSCP_TRACE_STARTUP=1` on the executable command to print the first-frame startup time.
+
+Run the core SSH/SFTP tests as a regular user with `cargo test -p vscp-core` and the same disposable target settings. The integration fixture starts `/usr/sbin/sshd` on loopback and uses temporary keys, a private `ssh-agent`, and isolated client configuration and known hosts. The password case is ignored by default and takes `VSCP_TEST_PW_HOST`, `VSCP_TEST_PW_PORT`, `VSCP_TEST_PW_USER` and `VSCP_TEST_PW_PASSWORD` for the Linux password-enabled fixture.

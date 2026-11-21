@@ -4,3 +4,15 @@ version = "0.1.0"
 license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+
+[dependencies]
+async-channel = "=2.5.0"
+futures-lite = "=2.6.1"
+getrandom = "=0.4.3"
+libc = "=0.2.191"
+openssh-sftp-client = "=0.15.12"
+thiserror = "=2.0.21"
+tokio = { version = "=1.54.1", features = ["fs", "io-util", "macros", "net", "process", "rt", "sync", "time"] }
+
+[dev-dependencies]
+tempfile = "=3.27.0"

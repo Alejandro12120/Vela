@@ -1,6 +1,6 @@
 # Plan del MVP de vSCP
 
-Estado: andamiaje F0 en la rama `mvp`. Las prioridades siguen siendo, por orden, RAM, arranque instantáneo y fluidez, y tamaño instalado.
+Estado: núcleo SSH/SFTP F1 en la rama `mvp`. Las prioridades siguen siendo, por orden, RAM, arranque instantáneo y fluidez, y tamaño instalado.
 
 ## 1. Qué se descarta del hilo anterior
 
@@ -34,8 +34,8 @@ Prueba de arrastre: el usuario indicó el 2026-11-20 que se considera superada. 
 ### Conexión: OpenSSH del sistema
 
 - Todas las conexiones pasan por el binario `ssh` del sistema. Así se respetan `~/.ssh/config`, `known_hosts`, ProxyJump y el agente sin reimplementarlos.
-- Hay una conexión maestra por servidor: `ssh -M -N` con `ControlPath` propio y `ControlPersist`. La contraseña o la aprobación del agente se piden una sola vez por sesión.
-- SFTP: `ssh -o ControlPath=… -s <destino> sftp` como proceso hijo. Su stdin y stdout se pasan a `openssh_sftp_client::Sftp::new(stdin, stdout, opciones)`, con el crate `openssh-sftp-client` 0.15.x en la última versión que tenga al menos dos semanas. No se usa el crate `openssh` porque hace falta controlar directamente las variables de askpass y las opciones.
+- vSCP conserva un proceso hijo maestro por servidor con `ssh -M -N`, un `ControlPath` propio y `ControlPersist=no`. La contraseña o la aprobación del agente se piden una sola vez por sesión.
+- SFTP: `ssh -o ControlPath=… -s <destino> sftp` como proceso hijo. Su stdin y stdout se pasan a `openssh_sftp_client::Sftp::new(stdin, stdout, opciones)`, con el crate `openssh-sftp-client` fijado en 0.15.12. No se usa el crate `openssh` porque hace falta controlar directamente las variables de askpass y las opciones.
 - Terminal integrada (MVP, F6): cada sesión SSH tiene dos vistas a pantalla completa, **Archivos** (SFTP) y **Terminal**. Se alterna entre ellas con un control segmentado en la cabecera y con ⌘1 / ⌘2. No hay panel inferior ni terminal local: solo sesiones con servidores.
 - Cada sesión recuerda qué vista estaba abierta al cambiar de servidor en la barra lateral.
 - La terminal se arranca la primera vez que se abre su vista, en la carpeta remota que muestra el panel de archivos. Después sigue viva aunque se vuelva a Archivos, conservando el proceso y el historial.
@@ -54,7 +54,7 @@ Prueba de arrastre: el usuario indicó el 2026-11-20 que se considera superada. 
 
 ```text
 -o IdentitiesOnly=yes -o IdentityFile=<clave pública elegida> -o IdentityAgent=<socket de Bitwarden>
--o ControlMaster=auto -o ControlPath=<dir corto>/%C -o ControlPersist=10m
+-M -N -o ControlMaster=yes -o ControlPath=<dir corto>/%C -o ControlPersist=no
 -o StrictHostKeyChecking=ask -p <puerto> <usuario>@<host>
 ```
 
@@ -64,7 +64,7 @@ Prueba de arrastre: el usuario indicó el 2026-11-20 que se considera superada. 
 
 ### Contraseñas y claves de host
 
-- `SSH_ASKPASS` apunta al propio ejecutable (`vscp askpass`), con `SSH_ASKPASS_REQUIRE=force`. Ese proceso pasa la petición a la aplicación por un socket Unix del directorio privado 0700. La aplicación muestra un diálogo y devuelve la respuesta. La contraseña no se guarda.
+- `SSH_ASKPASS` apunta a un lanzador privado que ejecuta `vscp askpass` con el texto recibido de OpenSSH. Se usa `SSH_ASKPASS_REQUIRE=force`. Ese proceso pasa la petición a la aplicación por un socket Unix del directorio privado 0700. La aplicación muestra un diálogo y devuelve la respuesta. La contraseña no se guarda.
 - Con `StrictHostKeyChecking=ask`, OpenSSH también usa askpass para aceptar la primera clave de host. Ese diálogo muestra la huella. Si la clave cambia, `ssh` rechaza la conexión. vSCP muestra el aviso de stderr y no ofrece aceptarla.
 
 ## 3. Arquitectura

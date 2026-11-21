@@ -1,5 +1,6 @@
 //! SSH and SFTP sessions over system OpenSSH.
 
+pub mod agent;
 pub mod askpass;
 pub mod config;
 pub mod edit;

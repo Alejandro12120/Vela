@@ -60,6 +60,9 @@ Use an isolated configuration directory for development runs. The `dev` Cargo fe
 - `VSCP_DEV_EDIT=<absolute remote path>` opens a remote edit after autoconnect.
 - `VSCP_DEV_EDITOR=none` suppresses editor launches for unattended runs.
 - `VSCP_DEV_EDIT_VIEW=popover|settings` shows Ediciones on connection or opens Ajustes on startup for visual checks.
+- `VSCP_DEV_FORM=new` opens the new-server form at startup. `VSCP_DEV_FORM=edit:<display name>` opens the edit form of that server.
+- `VSCP_DEV_ROW_MENU=<display name>` selects that server and opens its `⋯` menu.
+- Server forms list the keys of the agent socket in their Socket field, or else the first Bitwarden socket under `$HOME`. To check the picker without the real Bitwarden, set `HOME` to a temporary directory holding a `.bitwarden-ssh-agent.sock` symlink to the fixture agent, or a stale socket for the unavailable state.
 - With a custom `VSCP_CONFIG_DIR`, remote edits use its `edit-cache/` directory.
 
 For example, from the repository root in a macOS graphical session:

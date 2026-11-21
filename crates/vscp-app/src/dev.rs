@@ -11,7 +11,18 @@ fn value(key: &str) -> Option<String> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Lets a test own the configuration directory without touching the
+    /// process environment. GPUI tests run their tasks on the test thread.
+    pub static TEST_CONFIG: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
 fn config_override() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(dir) = TEST_CONFIG.with(|dir| dir.borrow().clone()) {
+        return Some(dir);
+    }
     value("VSCP_CONFIG_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
@@ -163,6 +174,27 @@ pub fn edit_root() -> io::Result<PathBuf> {
     std::env::home_dir()
         .map(|home| home.join("Library/Caches/vSCP/edit"))
         .ok_or_else(|| io::Error::other("No se encuentra la carpeta de caché"))
+}
+
+/// Opens the `⋯` menu of the server with this display name at startup.
+pub fn row_menu() -> Option<String> {
+    value("VSCP_DEV_ROW_MENU")
+}
+
+pub enum FormRequest {
+    New,
+    Edit(String),
+}
+
+/// `new` opens the new-server form at startup and `edit:<name>` opens the form
+/// of the server with that display name.
+pub fn form() -> Option<FormRequest> {
+    let value = value("VSCP_DEV_FORM")?;
+    match value.split_once(':') {
+        Some(("edit", name)) => Some(FormRequest::Edit(name.to_owned())),
+        None if value == "new" => Some(FormRequest::New),
+        _ => None,
+    }
 }
 
 pub fn edit_view() -> Option<String> {

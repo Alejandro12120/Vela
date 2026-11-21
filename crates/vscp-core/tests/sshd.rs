@@ -328,6 +328,79 @@ async fn selects_one_agent_identity() {
     ));
 }
 
+fn fingerprints(output: Vec<u8>) -> Vec<String> {
+    // Both `ssh-add -l` and `ssh-keygen -l` print `bits SHA256:… comment (type)`.
+    String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .map(|line| line.split_whitespace().nth(1).unwrap().to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn lists_agent_keys_and_connects_with_the_stored_public_key() {
+    let fixture = Fixture::start();
+    let keys = timeout(
+        SHORT_WAIT,
+        vscp_core::agent::list_identities(&fixture.path("agent")),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let expected = fingerprints(checked(
+        Command::new("ssh-add")
+            .env("SSH_AUTH_SOCK", fixture.path("agent"))
+            .env_remove("SSH_AGENT_PID")
+            .args(["-l", "-E", "sha256"]),
+    ));
+    assert_eq!(expected.len(), 2);
+    assert_eq!(
+        keys.iter().map(|key| key.fingerprint()).collect::<Vec<_>>(),
+        expected
+    );
+    assert!(keys.iter().all(|key| key.key_type == "ssh-ed25519"));
+
+    // Store the key the server accepts and compare it with ssh-keygen.
+    let wanted = fingerprints(checked(
+        Command::new("ssh-keygen")
+            .args(["-l", "-E", "sha256", "-f"])
+            .arg(fixture.path("b.pub")),
+    ));
+    let key = keys
+        .iter()
+        .find(|key| key.fingerprint() == wanted[0])
+        .unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let stored = vscp_core::agent::store_public_key(config.path(), key).unwrap();
+    assert_eq!(
+        fingerprints(checked(
+            Command::new("ssh-keygen")
+                .args(["-l", "-E", "sha256", "-f"])
+                .arg(&stored)
+        )),
+        wanted
+    );
+    let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&stored), 0o600);
+    assert_eq!(mode(&config.path().join("keys")), 0o700);
+    assert_eq!(
+        vscp_core::agent::read_public_key(&stored)
+            .unwrap()
+            .fingerprint(),
+        wanted[0]
+    );
+
+    let client = client();
+    let spec = fixture.spec(stored.to_str().unwrap());
+    let identities = timeout(SHORT_WAIT, client.effective_identities(spec.clone()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(identities, vec![stored.clone()]);
+    let session = trust_first(&client, spec).await;
+    disconnect(&session).await;
+}
+
 #[tokio::test]
 async fn accepts_new_host_and_remembers_it() {
     let fixture = Fixture::start();
@@ -1293,7 +1366,7 @@ async fn remote_edit_watches_saves_and_preserves_the_remote_inode() {
             user: fixture.user.clone(),
             auth: spec.auth.clone(),
             initial_remote_path: None,
-            favorite: false,
+            pinned: false,
         },
         remote.clone(),
     );

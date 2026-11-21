@@ -5864,6 +5864,7 @@ name = "vscp-core"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "base64",
  "futures-lite",
  "getrandom 0.4.3",
  "libc",

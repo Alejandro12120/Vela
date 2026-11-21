@@ -1,5 +1,6 @@
 use gpui::{
-    ClickEvent, Context, FontWeight, IntoElement, MouseButton, SharedString, div, prelude::*, px,
+    ClickEvent, Context, Div, FontWeight, IntoElement, MouseButton, Pixels, Point, Render,
+    SharedString, Stateful, Window, div, prelude::*, px,
 };
 use vscp_core::config::Server;
 
@@ -8,20 +9,47 @@ use crate::{
         button::{Variant, button},
         status_dot::status_dot,
     },
+    pane_icons::Icon,
     theme::Theme,
     workspace::{Connection, Workspace},
 };
 
 pub const WIDTH: f32 = 232.;
 
-pub fn sort_servers(servers: &mut [Server]) {
-    servers.sort_by_cached_key(|server| {
-        (
-            !server.favorite,
-            server.name.to_lowercase(),
-            server.id.clone(),
-        )
-    });
+/// A server row being dragged to a new position or group.
+#[derive(Clone)]
+struct ServerDrag {
+    id: String,
+    name: SharedString,
+}
+
+struct ServerDragChip {
+    name: SharedString,
+    offset: Point<Pixels>,
+}
+
+impl Render for ServerDragChip {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::for_window(window);
+        div()
+            .pl(self.offset.x + px(8.))
+            .pt(self.offset.y + px(8.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .h(px(32.))
+                    .max_w(px(200.))
+                    .px_2()
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(theme.control_border)
+                    .bg(theme.panel)
+                    .text_color(theme.text)
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(div().truncate().child(self.name.clone())),
+            )
+    }
 }
 
 pub fn render(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -> impl IntoElement {
@@ -104,6 +132,10 @@ pub fn render(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -> i
                 .child(footer())
         });
     }
+    let dragging = workspace.dragging_server && cx.has_active_drag();
+    let (pinned, unpinned): (Vec<&Server>, Vec<&Server>) =
+        workspace.servers.iter().partition(|server| server.pinned);
+    let grouped = !pinned.is_empty() || dragging;
     sidebar
         .child(
             div()
@@ -113,15 +145,100 @@ pub fn render(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -> i
                 .overflow_y_scroll()
                 .flex()
                 .flex_col()
-                .gap_1()
+                .when(grouped, |list| list.child(group_header("Fijados", theme)))
                 .children(
-                    workspace
-                        .servers
+                    pinned
                         .iter()
                         .map(|server| row(server, workspace, theme, cx)),
-                ),
+                )
+                .when(!pinned.is_empty(), |list| {
+                    list.child(end_zone(true, theme, cx))
+                })
+                .when(pinned.is_empty() && dragging, |list| {
+                    list.child(empty_zone(true, "Suelta aquí para fijar", theme, cx))
+                })
+                .when(grouped, |list| {
+                    list.child(group_header("Servidores", theme))
+                })
+                .children(
+                    unpinned
+                        .iter()
+                        .map(|server| row(server, workspace, theme, cx)),
+                )
+                .when(!unpinned.is_empty(), |list| {
+                    list.child(end_zone(false, theme, cx).flex_1())
+                })
+                .when(unpinned.is_empty() && dragging, |list| {
+                    list.child(empty_zone(
+                        false,
+                        "Suelta aquí para dejar de fijar",
+                        theme,
+                        cx,
+                    ))
+                }),
         )
         .child(footer())
+}
+
+fn group_header(label: &'static str, theme: Theme) -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .h(px(24.))
+        .px_2()
+        .text_size(px(12.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(theme.secondary_text)
+        .child(label)
+}
+
+/// Drop target below a group's last row. The insertion line shows at its top.
+fn end_zone(pinned: bool, theme: Theme, cx: &Context<Workspace>) -> Stateful<Div> {
+    div()
+        .id(if pinned { "end-pinned" } else { "end-unpinned" })
+        .debug_selector(|| if pinned { "end-pinned" } else { "end-unpinned" }.into())
+        .flex_none()
+        .min_h(px(8.))
+        .border_t_2()
+        .border_color(gpui::transparent_black())
+        .drag_over(move |style, _: &ServerDrag, _, _| style.border_color(theme.accent))
+        .on_drop(cx.listener(move |this, drag: &ServerDrag, _, cx| {
+            this.drop_server(&drag.id, pinned, None, cx);
+        }))
+}
+
+/// Shown while dragging when a group has no servers.
+fn empty_zone(
+    pinned: bool,
+    label: &'static str,
+    theme: Theme,
+    cx: &Context<Workspace>,
+) -> Stateful<Div> {
+    div()
+        .id(if pinned {
+            "empty-pinned"
+        } else {
+            "empty-unpinned"
+        })
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .h(px(32.))
+        .rounded(px(6.))
+        .border_1()
+        .border_dashed()
+        .border_color(theme.control_border)
+        .text_size(px(12.))
+        .text_color(theme.secondary_text)
+        .drag_over(move |style, _: &ServerDrag, _, _| {
+            style.border_color(theme.accent).bg(theme.selection)
+        })
+        .on_drop(cx.listener(move |this, drag: &ServerDrag, _, cx| {
+            this.drop_server(&drag.id, pinned, None, cx);
+        }))
+        .child(label)
 }
 
 fn row(
@@ -144,6 +261,17 @@ fn row(
     let select_id = id.clone();
     let menu_id = id.clone();
     let more_id = id.clone();
+    let pin_id = id.clone();
+    let drop_id = id.clone();
+    let over_id = id.clone();
+    let pinned = server.pinned;
+    let shown = selected || menu_open;
+    let group = SharedString::from(format!("server-row-{id}"));
+    let drag = ServerDrag {
+        id: id.clone(),
+        name: server.name.clone().into(),
+    };
+    let workspace_handle = cx.entity().downgrade();
     let endpoint = format!("{}@{}", server.user, server.host);
     let toggle_menu = cx.listener(move |this, _, _, cx| {
         this.select(&more_id);
@@ -152,15 +280,29 @@ fn row(
     });
     div()
         .id(SharedString::from(id.clone()))
+        .debug_selector(|| format!("server-row-{id}"))
         .flex()
         .flex_col()
         .flex_none()
+        .pb(px(2.))
+        .border_t_2()
+        .border_color(gpui::transparent_black())
+        .drag_over(move |style, drag: &ServerDrag, _, _| {
+            if drag.id == over_id {
+                style
+            } else {
+                style.border_color(theme.accent)
+            }
+        })
+        .on_drop(cx.listener(move |this, drag: &ServerDrag, _, cx| {
+            this.drop_server(&drag.id, pinned, Some(&drop_id), cx);
+        }))
         .child(
             div()
-                .group("server-row")
+                .group(group.clone())
+                .relative()
                 .flex()
                 .items_center()
-                .gap_1()
                 .rounded(px(6.))
                 .when(selected, |row| row.bg(theme.selection))
                 .child(
@@ -189,6 +331,7 @@ fn row(
                                 .flex()
                                 .flex_col()
                                 .min_w_0()
+                                .when(shown, |text| text.pr(px(56.)))
                                 .child(
                                     div()
                                         .truncate()
@@ -203,6 +346,16 @@ fn row(
                                         .child(endpoint),
                                 ),
                         )
+                        .on_drag(drag, move |drag, offset, _, cx| {
+                            let _ = workspace_handle.update(cx, |workspace, cx| {
+                                workspace.dragging_server = true;
+                                cx.notify();
+                            });
+                            cx.new(|_| ServerDragChip {
+                                name: drag.name.clone(),
+                                offset,
+                            })
+                        })
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                             this.select(&select_id);
                             if event.click_count() == 2 || matches!(event, ClickEvent::Keyboard(_))
@@ -221,30 +374,88 @@ fn row(
                         ),
                 )
                 .child(
-                    button(
-                        "server-actions",
-                        "⋯",
-                        Variant::Secondary,
-                        theme,
-                        toggle_menu,
-                    )
-                    .aria_label(format!("Acciones de {}", server.name))
-                    .w(px(28.))
-                    .h(px(28.))
-                    .mr_1()
-                    .when(!selected, |button| {
-                        button
-                            .invisible()
-                            .tab_stop(false)
-                            .group_hover("server-row", |style| style.visible())
-                    }),
+                    // Floats over the end of the row, so names keep their width.
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .right_1()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .pl_1()
+                        .rounded(px(6.))
+                        .bg(if selected {
+                            theme.selection
+                        } else {
+                            theme.hover
+                        })
+                        .when(!shown, |actions| {
+                            actions
+                                .invisible()
+                                .group_hover(group, |style| style.visible())
+                        })
+                        .child(pin_button(
+                            pinned,
+                            shown,
+                            theme,
+                            cx.listener(move |this, _, _, cx| this.toggle_pin(&pin_id, cx)),
+                        ))
+                        .child(
+                            button(
+                                "server-actions",
+                                "⋯",
+                                Variant::Secondary,
+                                theme,
+                                toggle_menu,
+                            )
+                            .aria_label(format!("Acciones de {}", server.name))
+                            .w(px(28.))
+                            .h(px(28.))
+                            .when(!shown, |button| button.tab_stop(false)),
+                        ),
                 ),
         )
-        .when(menu_open, |row| row.child(menu(id, connection, theme, cx)))
+        .when(menu_open, |row| {
+            row.child(menu(server, connection, theme, cx))
+        })
+}
+
+/// Pin toggle shown on hover, and while the row is selected or its menu is open.
+fn pin_button(
+    pinned: bool,
+    shown: bool,
+    theme: Theme,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> Stateful<Div> {
+    div()
+        .id("pin-server")
+        .role(gpui::Role::Button)
+        .aria_label(if pinned { "Dejar de fijar" } else { "Fijar" })
+        .tab_index(0)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(24.))
+        .h(px(28.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(gpui::transparent_black())
+        .cursor_pointer()
+        .hover(move |style| style.bg(theme.hover))
+        .focus(move |style| style.border_color(theme.accent))
+        .child(Icon::Pin.draw(if pinned {
+            theme.text
+        } else {
+            theme.secondary_text
+        }))
+        .when(!shown, |button| button.tab_stop(false))
+        .on_click(on_click)
 }
 
 fn menu(
-    id: &str,
+    server: &Server,
     connection: Option<&Connection>,
     theme: Theme,
     cx: &Context<Workspace>,
@@ -254,9 +465,10 @@ fn menu(
         connection,
         Some(Connection::Connecting | Connection::Disconnecting)
     );
-    let connection_id = id.to_owned();
-    let edit_id = id.to_owned();
-    let delete_id = id.to_owned();
+    let connection_id = server.id.clone();
+    let edit_id = server.id.clone();
+    let delete_id = server.id.clone();
+    let pin_id = server.id.clone();
     let menu = div()
         .p_2()
         .ml_2()
@@ -278,6 +490,20 @@ fn menu(
         );
     }
     menu.child(button(
+        "pin",
+        if server.pinned {
+            "Dejar de fijar"
+        } else {
+            "Fijar"
+        },
+        Variant::Secondary,
+        theme,
+        cx.listener(move |this, _, _, cx| {
+            this.row_menu = None;
+            this.toggle_pin(&pin_id, cx);
+        }),
+    ))
+    .child(button(
         "session",
         if connected { "Desconectar" } else { "Conectar" },
         Variant::Secondary,
@@ -309,32 +535,4 @@ fn menu(
         )
         .text_color(theme.danger),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use vscp_core::Auth;
-
-    #[test]
-    fn favorites_first_then_case_insensitive_name() {
-        let server = |id: &str, name: &str, favorite| Server {
-            id: id.into(),
-            name: name.into(),
-            host: "example.test".into(),
-            port: 22,
-            user: "ana".into(),
-            auth: Auth::Password,
-            initial_remote_path: None,
-            favorite,
-        };
-        let mut servers = [
-            server("3", "alfa", false),
-            server("4", "Beta", false),
-            server("2", "Zeta", true),
-            server("1", "bravo", true),
-        ];
-        sort_servers(&mut servers);
-        assert_eq!(servers.map(|server| server.id), ["1", "2", "3", "4"]);
-    }
 }

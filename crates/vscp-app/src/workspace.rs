@@ -14,7 +14,7 @@ use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
     rc::Rc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use gpui::{
@@ -22,7 +22,9 @@ use gpui::{
     PathPromptOptions, Render, Window, actions, div, prelude::*, px,
 };
 use vscp_core::{
-    Auth, Client, Error, Session, askpass,
+    Auth, Client, Error, Session,
+    agent::{self, AgentError, AgentKey},
+    askpass,
     config::{self, Server},
 };
 
@@ -34,7 +36,7 @@ use crate::{
     },
     dev,
     file_workspace::Panes,
-    form::{Field, Form},
+    form::{Errors, Field, Form},
     pane::{PaneMemory, icon_button},
     pane_icons::Icon,
     theme::Theme,
@@ -86,6 +88,9 @@ pub struct Workspace {
     pub row_menu: Option<String>,
     pub dir: Option<PathBuf>,
     pub saving: bool,
+    /// A server row is being dragged. Reset once the drag ends.
+    pub dragging_server: bool,
+    key_requests: u64,
     edits: Edits,
     settings: Settings,
     settings_error: Option<String>,
@@ -149,7 +154,7 @@ impl Workspace {
             let _ = this.update_in(cx, |this, window, cx| {
                 this.loading = false;
                 match result {
-                    Ok((dir, mut servers, agent, index, settings)) => {
+                    Ok((dir, servers, agent, index, settings)) => {
                         this.load_edits(index, window, cx);
                         match settings {
                             Ok(settings) => this.settings = settings,
@@ -158,7 +163,6 @@ impl Workspace {
                         if dev::edit_view().as_deref() == Some("settings") {
                             this.open_dialog(Dialog::Settings, window, cx);
                         }
-                        crate::sidebar::sort_servers(&mut servers);
                         this.selected = servers.first().map(|server| server.id.clone());
                         this.dir = Some(dir);
                         this.servers = servers;
@@ -169,6 +173,23 @@ impl Workspace {
                             let id = server.id.clone();
                             this.select(&id);
                             this.connect(&id, window, cx);
+                        }
+                        if let Some(name) = dev::row_menu()
+                            && let Some(server) = this.servers.iter().find(|server| server.name == name)
+                        {
+                            let id = server.id.clone();
+                            this.select(&id);
+                            this.row_menu = Some(id);
+                        }
+                        match dev::form() {
+                            Some(dev::FormRequest::New) => this.open_form(None, window, cx),
+                            Some(dev::FormRequest::Edit(name)) => {
+                                let id = this.servers.iter().find(|server| server.name == name).map(|server| server.id.clone());
+                                if let Some(id) = id {
+                                    this.open_form(Some(&id), window, cx);
+                                }
+                            }
+                            None => {}
                         }
                     }
                     Err(err) => {
@@ -205,6 +226,8 @@ impl Workspace {
             row_menu: None,
             dir: None,
             saving: false,
+            dragging_server: false,
+            key_requests: 0,
             edits: Edits::default(),
             settings: Settings::default(),
             settings_error: None,
@@ -446,8 +469,125 @@ impl Workspace {
             return;
         }
         let server = id.and_then(|id| self.servers.iter().find(|server| server.id == id));
-        let form = Form::new(server, &self.agent_socket, cx);
+        let form = Form::new(server, &self.agent_socket, self.dir.as_deref(), cx);
+        let socket = form.input(Field::Socket).read(cx).focus_handle(cx);
         self.open_dialog(Dialog::Form(Box::new(form)), window, cx);
+        let blur = cx.on_blur(&socket, window, |this, window, cx| {
+            if this.editing().is_some_and(|form| form.socket_changed(cx)) {
+                this.refresh_keys(window, cx);
+            }
+        });
+        if let Some(form) = self.editing() {
+            form.set_blur(blur);
+        }
+        self.refresh_keys(window, cx);
+    }
+
+    /// Asks the agent for its keys without blocking the interface. A newer
+    /// request or a closed form makes the answer stale.
+    pub fn refresh_keys(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.key_requests += 1;
+        let request = self.key_requests;
+        let client = self.client.clone();
+        let executor = cx.background_executor().clone();
+        let Some(form) = self.editing() else { return };
+        let Some(socket) = form.begin_listing(request, cx) else {
+            return;
+        };
+        cx.notify();
+        let hint = executor.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            hint.timer(Duration::from_millis(2100)).await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
+        cx.spawn_in(window, async move |this, cx| {
+            let path = if socket.is_empty() {
+                executor
+                    .spawn(async { vscp_core::bitwarden_agent_sockets().into_iter().next() })
+                    .await
+            } else {
+                Some(PathBuf::from(socket))
+            };
+            let result = match (client, path) {
+                (Some(client), Some(path)) => client.list_agent_keys(path).await,
+                _ => Err(AgentError::Unavailable),
+            };
+            let _ = this.update_in(cx, |this, _, cx| {
+                let handles = (0..=result.as_ref().map_or(0, Vec::len))
+                    .map(|_| cx.focus_handle())
+                    .collect();
+                if let Some(Dialog::Form(form)) = &mut this.dialog {
+                    form.finish_listing(request, result, handles);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Pins or unpins a server, moving it to the edge of the other group.
+    pub fn toggle_pin(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(pinned) = self
+            .servers
+            .iter()
+            .find(|server| server.id == id)
+            .map(|server| server.pinned)
+        else {
+            return;
+        };
+        self.reorder(cx, |servers| config::set_pinned(servers, id, !pinned));
+    }
+
+    /// Drops a dragged server into a group, before `before` or at the group's end.
+    pub fn drop_server(
+        &mut self,
+        id: &str,
+        pinned: bool,
+        before: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        self.reorder(cx, |servers| {
+            config::move_server(servers, id, pinned, before);
+        });
+    }
+
+    fn reorder(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut Vec<Server>)) {
+        let Some(dir) = self.dir.clone() else { return };
+        if self.saving || self.quitting {
+            return;
+        }
+        let previous = self.servers.clone();
+        let mut servers = previous.clone();
+        change(&mut servers);
+        if servers == previous {
+            return;
+        }
+        self.servers = servers.clone();
+        self.row_menu = None;
+        self.saving = true;
+        cx.notify();
+        let save = {
+            let servers = servers.clone();
+            cx.background_executor()
+                .spawn(async move { config::save(&dir, servers) })
+        };
+        cx.spawn(async move |this, cx| {
+            let result = save.await;
+            let _ = this.update(cx, |this, cx| {
+                this.saving = false;
+                if result.is_ok() {
+                    this.config_error = None;
+                } else {
+                    if this.servers == servers {
+                        this.servers = previous;
+                    }
+                    this.config_error = Some("No se pudo guardar servers.toml.");
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub fn open_delete(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -464,12 +604,9 @@ impl Workspace {
     }
 
     pub fn choose_identity(&mut self, window: &Window, cx: &mut Context<Self>) {
-        let Some(input) = self
-            .editing()
-            .map(|form| form.input(Field::Identity).clone())
-        else {
+        if self.editing().is_none() {
             return;
-        };
+        }
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -478,19 +615,12 @@ impl Workspace {
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = paths.await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                if let Some(form) = this.editing()
-                    && form.input(Field::Identity) == &input
-                {
+            let _ = this.update_in(cx, |this, _, cx| {
+                if let Some(form) = this.editing() {
                     match result {
                         Ok(Ok(Some(paths))) => {
-                            if let Some(path) = paths.first().and_then(|path| path.to_str()) {
-                                input.update(cx, |input, cx| input.set_value(path, window, cx));
-                                form.errors.retain(|(field, _)| *field != Field::Identity);
-                                form.message = None;
-                            } else {
-                                form.message =
-                                    Some("La ruta de la clave pública no se puede leer.");
+                            if let Some(path) = paths.into_iter().next() {
+                                form.pick_file(path);
                             }
                         }
                         Ok(Ok(None)) => {}
@@ -585,20 +715,25 @@ impl Workspace {
                 self.finish_dialog(window, cx);
             }
             Some(Dialog::Form(form)) if !form.is_composing(window, cx) => {
-                let server = match form.validated(cx) {
-                    Ok(server) => server,
-                    Err(errors) => {
-                        form.input(errors[0].0)
-                            .read(cx)
-                            .focus_handle(cx)
-                            .focus(window, cx);
-                        form.errors = errors;
+                let submission = match form.validated(cx) {
+                    Ok(submission) => submission,
+                    Err(Errors { fields, key }) => {
+                        if let Some((field, _)) = fields.first() {
+                            form.input(*field)
+                                .read(cx)
+                                .focus_handle(cx)
+                                .focus(window, cx);
+                        } else {
+                            form.focus_key(window, cx);
+                        }
+                        form.errors = fields;
+                        form.key_error = key;
                         cx.notify();
                         return;
                     }
                 };
                 let id = form.id.clone();
-                self.persist(Some(server), id, window, cx);
+                self.persist(Some((submission.server, submission.key)), id, window, cx);
             }
             Some(Dialog::Edit(EditDialog::Conflict(..)))
                 if !self.confirm_focus.is_focused(window) =>
@@ -617,7 +752,7 @@ impl Workspace {
 
     fn persist(
         &mut self,
-        server: Option<Server>,
+        server: Option<(Server, Option<AgentKey>)>,
         existing: Option<String>,
         window: &Window,
         cx: &mut Context<Self>,
@@ -630,7 +765,7 @@ impl Workspace {
                 .iter()
                 .find(|old| &old.id == id)
                 .zip(server.as_ref())
-                .is_some_and(|(old, new)| {
+                .is_some_and(|(old, (new, _))| {
                     old.host == new.host && old.port == new.port && old.user == new.user
                 })
         {
@@ -648,19 +783,32 @@ impl Workspace {
         let mut servers = self.servers.clone();
         self.saving = true;
         cx.notify();
+        let server_input = server;
         let save = cx.background_executor().spawn(async move {
-            let mut server = server;
-            if let Some(server) = &mut server {
-                server.id = match &existing {
+            let mut server = None;
+            if let Some((mut new, key)) = server_input {
+                new.id = match &existing {
                     Some(id) => id.clone(),
                     None => Server::new_id()?,
                 };
+                if let (Some(key), Auth::Agent { identity_pub, .. }) = (&key, &mut new.auth) {
+                    *identity_pub = agent::store_public_key(&dir, key)?;
+                }
+                server = Some(new);
             }
-            servers.retain(|server| Some(&server.id) != existing.as_ref());
-            if let Some(server) = &server {
-                servers.push(server.clone());
+            match (&mut server, &existing) {
+                // An edited server keeps its place and its pin.
+                (Some(new), Some(id)) => match servers.iter_mut().find(|old| &old.id == id) {
+                    Some(old) => {
+                        new.pinned = old.pinned;
+                        *old = new.clone();
+                    }
+                    None => servers.push(new.clone()),
+                },
+                (Some(new), None) => servers.push(new.clone()),
+                (None, Some(id)) => servers.retain(|old| &old.id != id),
+                (None, None) => {}
             }
-            crate::sidebar::sort_servers(&mut servers);
             config::save(&dir, servers.clone())?;
             Ok::<_, std::io::Error>((servers, server, existing))
         });
@@ -1077,6 +1225,9 @@ impl Render for Workspace {
             });
         }
         let theme = Theme::for_window(window);
+        if !cx.has_active_drag() {
+            self.dragging_server = false;
+        }
         let transfer_overlay = if self.dialog.is_none() && !self.edits.popover {
             match self
                 .selected
@@ -1133,5 +1284,237 @@ impl Render for Workspace {
                 .children(self.edit_popover(theme, window, cx))
                 .children(self.render_dialog(theme, cx))
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use gpui::{Modifiers, MouseButton, TestAppContext, VisualTestContext, point, px};
+
+    use super::*;
+
+    fn write_legacy(dir: &std::path::Path) {
+        let mut text = String::new();
+        for (id, name, favorite) in [
+            ("id-zeta", "Zeta", true),
+            ("id-bravo", "bravo", true),
+            ("id-fixture", "Fixture", false),
+            ("id-beta", "Beta", false),
+        ] {
+            text.push_str(&format!(
+                "[[servers]]\nid = \"{id}\"\nname = \"{name}\"\nhost = \"h\"\nport = 22\nuser = \"u\"\nfavorite = {favorite}\n[servers.auth]\nkind = \"password\"\n\n"
+            ));
+        }
+        fs::write(dir.join("servers.toml"), text).unwrap();
+    }
+
+    fn open<'a>(
+        dir: &std::path::Path,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Workspace>, &'a mut VisualTestContext) {
+        write_legacy(dir);
+        dev::TEST_CONFIG.with(|config| *config.borrow_mut() = Some(dir.to_path_buf()));
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::new(None, None, window, cx));
+        cx.run_until_parked();
+        (workspace, cx)
+    }
+
+    fn order(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<(String, bool)> {
+        workspace.read_with(cx, |workspace, _| {
+            workspace
+                .servers
+                .iter()
+                .map(|server| (server.id.clone(), server.pinned))
+                .collect()
+        })
+    }
+
+    fn saved(dir: &std::path::Path) -> Vec<(String, bool)> {
+        config::load(dir)
+            .unwrap()
+            .into_iter()
+            .map(|server| (server.id, server.pinned))
+            .collect()
+    }
+
+    fn pair(id: &str, pinned: bool) -> (String, bool) {
+        (id.to_owned(), pinned)
+    }
+
+    fn drag(
+        cx: &mut VisualTestContext,
+        from: gpui::Point<gpui::Pixels>,
+        to: gpui::Point<gpui::Pixels>,
+    ) {
+        let none = Modifiers::none();
+        cx.simulate_mouse_move(from, None, none);
+        cx.simulate_mouse_down(from, MouseButton::Left, none);
+        for step in 1..=10 {
+            let t = step as f32 / 10.;
+            let at = point(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
+            cx.simulate_mouse_move(at, MouseButton::Left, none);
+        }
+        cx.simulate_mouse_up(to, MouseButton::Left, none);
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn legacy_favorites_load_in_the_old_order_and_pinning_saves_version_two(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (workspace, cx) = open(dir.path(), cx);
+        assert_eq!(
+            order(&workspace, cx),
+            [
+                pair("id-bravo", true),
+                pair("id-zeta", true),
+                pair("id-beta", false),
+                pair("id-fixture", false)
+            ]
+        );
+
+        workspace.update(cx, |workspace, cx| workspace.toggle_pin("id-fixture", cx));
+        cx.run_until_parked();
+        let expected = [
+            pair("id-bravo", true),
+            pair("id-zeta", true),
+            pair("id-fixture", true),
+            pair("id-beta", false),
+        ];
+        assert_eq!(order(&workspace, cx), expected);
+        assert_eq!(saved(dir.path()), expected);
+        let text = fs::read_to_string(dir.path().join("servers.toml")).unwrap();
+        assert!(
+            text.contains("version = 2") && text.contains("pinned") && !text.contains("favorite")
+        );
+    }
+
+    #[gpui::test]
+    async fn a_click_selects_without_starting_a_drag(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (workspace, cx) = open(dir.path(), cx);
+        let row = cx.debug_bounds("server-row-id-beta").unwrap();
+        let center = row.center();
+        cx.simulate_mouse_move(center, None, Modifiers::none());
+        cx.simulate_click(center, Modifiers::none());
+        cx.run_until_parked();
+        assert!(!cx.update(|_, cx| cx.has_active_drag()));
+        assert_eq!(
+            workspace.read_with(cx, |workspace, _| workspace.selected.clone()),
+            Some("id-beta".into())
+        );
+        // A jitter below GPUI's drag threshold is still a click.
+        let none = Modifiers::none();
+        let nudged = point(center.x + px(1.), center.y);
+        cx.simulate_mouse_down(center, MouseButton::Left, none);
+        cx.simulate_mouse_move(nudged, MouseButton::Left, none);
+        assert!(!cx.update(|_, cx| cx.has_active_drag()));
+        cx.simulate_mouse_up(nudged, MouseButton::Left, none);
+        assert_eq!(order(&workspace, cx).len(), 4);
+    }
+
+    #[gpui::test]
+    async fn dragging_a_row_moves_and_pins_it_and_saves(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (workspace, cx) = open(dir.path(), cx);
+        let selected = workspace.read_with(cx, |workspace, _| workspace.selected.clone());
+
+        // Fixture (unpinned) onto the top of the first pinned row.
+        let from = cx.debug_bounds("server-row-id-fixture").unwrap().center();
+        let target = cx.debug_bounds("server-row-id-bravo").unwrap();
+        drag(cx, from, point(target.center().x, target.top() + px(8.)));
+        let expected = [
+            pair("id-fixture", true),
+            pair("id-bravo", true),
+            pair("id-zeta", true),
+            pair("id-beta", false),
+        ];
+        assert_eq!(order(&workspace, cx), expected);
+        assert_eq!(saved(dir.path()), expected);
+        assert_eq!(
+            workspace.read_with(cx, |workspace, _| workspace.selected.clone()),
+            selected
+        );
+        assert!(!cx.update(|_, cx| cx.has_active_drag()));
+
+        // Bravo (pinned) to the end of the unpinned group.
+        let from = cx.debug_bounds("server-row-id-bravo").unwrap().center();
+        let end = cx.debug_bounds("end-unpinned").unwrap();
+        drag(cx, from, point(end.center().x, end.top() + px(4.)));
+        let expected = [
+            pair("id-fixture", true),
+            pair("id-zeta", true),
+            pair("id-beta", false),
+            pair("id-bravo", false),
+        ];
+        assert_eq!(order(&workspace, cx), expected);
+        assert_eq!(saved(dir.path()), expected);
+
+        // Dropping a row onto itself changes nothing.
+        let own = cx.debug_bounds("server-row-id-beta").unwrap();
+        drag(cx, own.center(), point(own.center().x, own.top() + px(8.)));
+        assert_eq!(order(&workspace, cx), expected);
+    }
+
+    #[gpui::test]
+    async fn saving_stores_the_agent_key_and_edits_keep_their_place_and_pin(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (workspace, cx) = open(dir.path(), cx);
+        let key = AgentKey {
+            key_type: "ssh-ed25519".into(),
+            blob: [&[0, 0, 0, 11][..], b"ssh-ed25519"].concat(),
+            comment: "Servidor".into(),
+        };
+        let new = Server {
+            id: String::new(),
+            name: "Nuevo".into(),
+            host: "n.example".into(),
+            port: 22,
+            user: "ana".into(),
+            auth: Auth::Agent {
+                identity_pub: PathBuf::new(),
+                agent_socket: None,
+            },
+            initial_remote_path: None,
+            pinned: false,
+        };
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.persist(Some((new, Some(key.clone()))), None, window, cx);
+        });
+        cx.run_until_parked();
+
+        let servers = config::load(dir.path()).unwrap();
+        let added = servers.last().unwrap();
+        assert!(!added.pinned);
+        assert_eq!(added.name, "Nuevo");
+        let Auth::Agent { identity_pub, .. } = &added.auth else {
+            panic!("expected agent authentication");
+        };
+        assert_eq!(identity_pub.parent().unwrap(), dir.path().join("keys"));
+        assert_eq!(
+            agent::read_public_key(identity_pub).unwrap().fingerprint(),
+            key.fingerprint()
+        );
+        assert_eq!(servers.len(), 5);
+
+        // Editing the first pinned server keeps its position and its pin.
+        let mut edited = servers[0].clone();
+        edited.name = "bravo renombrado".into();
+        edited.pinned = false;
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.persist(Some((edited, None)), Some("id-bravo".into()), window, cx);
+        });
+        cx.run_until_parked();
+        let servers = config::load(dir.path()).unwrap();
+        assert_eq!(servers[0].id, "id-bravo");
+        assert_eq!(servers[0].name, "bravo renombrado");
+        assert!(servers[0].pinned);
+        assert_eq!(order(&workspace, cx)[0], pair("id-bravo", true));
     }
 }

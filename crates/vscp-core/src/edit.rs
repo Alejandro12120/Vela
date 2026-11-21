@@ -690,7 +690,7 @@ mod tests {
                 user: "tester".into(),
                 auth: crate::Auth::Password,
                 initial_remote_path: None,
-                favorite: false,
+                pinned: false,
             },
             Path::new("/remote").join(file),
         );

@@ -193,7 +193,9 @@ Cada fase termina con compilación de release en el Mac, `cargo fmt --check`, `c
 Funciona: arrastrar entre paneles, de Finder a los paneles y de los paneles a Finder. Dos guardados separados en el editor se suben por separado. Los cambios pedidos están en la fase F5b.
 
 9. **Servidores fijados**, como los threads de T3 Code. Hay una sección «Fijados» arriba y el resto de servidores debajo, cada una en orden manual. Se fija o se suelta con un icono de chincheta al pasar el ratón o desde el menú ⋯. Arrastrar reordena dentro de cada sección. Llevar un servidor a la otra sección lo fija o lo suelta. Se quita la casilla «Favorito» del formulario. Sustituye al orden de favoritos primero y luego alfabético.
+    - Implementación: el orden manual es el orden del array `servers` de `servers.toml`, con `version = 2` y el campo `pinned`. Un archivo anterior, con `favorite`, se ordena una vez al cargar y se guarda en el formato nuevo con el siguiente cambio.
 10. **Clave pública desde Bitwarden.** El formulario lista las claves del agente de Bitwarden con el nombre del elemento, el tipo y la huella SHA256. vSCP guarda la clave pública en su configuración, así que no hace falta ningún archivo. «Desde archivo…» queda como opción secundaria. Si Bitwarden está cerrado, bloqueado o sin claves, se muestra un aviso con «Reintentar».
+    - Implementación: la clave elegida se guarda como `keys/<hash>.pub` en la carpeta de configuración (carpeta 0700, archivo 0600), donde `<hash>` son los 16 primeros bytes del SHA-256 del blob. `identity_pub` apunta a ese archivo, así que `Auth` no cambia.
 11. **Doble clic y «Ejecutar».**
     - El doble clic abre en el editor de Ajustes los archivos de texto, `.sh` incluido. Se reconocen por extensión y por contenido.
     - Imágenes, PDF y demás binarios se abren con la aplicación predeterminada.

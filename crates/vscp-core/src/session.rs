@@ -20,7 +20,11 @@ use tokio::{
     time::timeout,
 };
 
-use crate::{ConnectionSpec, Entry, Error, askpass, sftp, ssh, transfer};
+use crate::{
+    ConnectionSpec, Entry, Error,
+    agent::{self, AgentError, AgentKey},
+    askpass, sftp, ssh, transfer,
+};
 
 type Job = Pin<Box<dyn Future<Output = ()> + Send>>;
 type Operation = Box<dyn FnOnce(Arc<Sftp>) -> Job + Send>;
@@ -98,6 +102,23 @@ impl Client {
         })
         .await?;
         reply.await.map_err(closed)?
+    }
+
+    /// Lists the public keys of the SSH agent at `socket` on the worker, so a
+    /// slow Bitwarden unlock prompt never blocks the caller's thread.
+    pub async fn list_agent_keys(&self, socket: PathBuf) -> Result<Vec<AgentKey>, AgentError> {
+        let (send, reply) = oneshot::channel();
+        let stopping = self.stopping.clone();
+        self.submit(async move {
+            let result = tokio::select! {
+                _ = stopping.recv() => Err(AgentError::Unavailable),
+                result = agent::list_identities(&socket) => result,
+            };
+            let _ = send.send(result);
+        })
+        .await
+        .map_err(|_| AgentError::Unavailable)?;
+        reply.await.map_err(|_| AgentError::Unavailable)?
     }
 
     pub async fn connect(&self, spec: ConnectionSpec) -> Result<Session, Error> {

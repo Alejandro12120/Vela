@@ -1,6 +1,7 @@
 //! SSH and SFTP sessions over system OpenSSH.
 
 pub mod askpass;
+pub mod config;
 mod error;
 mod session;
 mod sftp;

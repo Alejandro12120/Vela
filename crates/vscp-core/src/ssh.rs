@@ -12,7 +12,7 @@ use tokio::{
     io::AsyncReadExt,
     process::{Child, Command},
     task::JoinHandle,
-    time::{Instant, sleep, timeout, timeout_at},
+    time::{sleep, timeout},
 };
 
 use crate::{Error, askpass};
@@ -21,7 +21,8 @@ pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const EXIT_TIMEOUT: Duration = Duration::from_secs(2);
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Auth {
     Agent {
         identity_pub: PathBuf,
@@ -36,6 +37,7 @@ pub struct ConnectionSpec {
     pub port: u16,
     pub user: String,
     pub auth: Auth,
+    pub display_name: Option<String>,
     #[doc(hidden)]
     pub ssh_config: Option<PathBuf>,
     #[doc(hidden)]
@@ -49,9 +51,16 @@ impl ConnectionSpec {
             port,
             user,
             auth,
+            display_name: None,
             ssh_config: None,
             known_hosts: None,
         }
+    }
+
+    pub(crate) fn destination(&self) -> String {
+        self.display_name
+            .clone()
+            .unwrap_or_else(|| format!("{}@{}:{}", self.user, self.host, self.port))
     }
 
     pub(crate) fn argv(&self, control_dir: &Path, mode: &[&str], remote: &[&str]) -> Vec<OsString> {
@@ -284,6 +293,8 @@ impl Master {
     pub(crate) async fn connect(
         spec: ConnectionSpec,
         askpass: askpass::Server,
+        readiness_timeout: Duration,
+        stopping: &async_channel::Receiver<()>,
     ) -> Result<Self, Error> {
         let process = Process::spawn(
             command(
@@ -306,21 +317,26 @@ impl Master {
             askpass,
             process,
         };
-        let deadline = Instant::now() + CONNECT_TIMEOUT;
-        match timeout_at(deadline, master.wait_until_ready()).await {
-            Ok(Ok(())) => Ok(master),
-            Ok(Err(err)) => {
-                let _ = master.disconnect().await;
-                Err(err)
-            }
-            Err(_) => {
-                let _ = master.disconnect().await;
-                let stderr = master.process.stderr().await;
-                Err(Error::ConnectFailed {
-                    status: None,
-                    stderr: format!("Timed out waiting for SSH master\n{stderr}"),
-                })
-            }
+        let timer = master.askpass.readiness_timer(readiness_timeout);
+        let result = tokio::select! {
+            biased;
+            _ = stopping.recv() => Some(Err(Error::Cancelled)),
+            result = master.wait_until_ready() => Some(result),
+            _ = timer => None,
+        };
+        if matches!(result, Some(Ok(()))) {
+            return Ok(master);
+        }
+        let _ = master.disconnect().await;
+        match result {
+            Some(result) => result.map(|()| master),
+            None => Err(Error::ConnectFailed {
+                status: None,
+                stderr: format!(
+                    "Timed out waiting for SSH master\n{}",
+                    master.process.stderr().await
+                ),
+            }),
         }
     }
 
@@ -398,6 +414,7 @@ mod tests {
                 identity_pub: "/tmp/identity.pub".into(),
                 agent_socket: Some("/tmp/agent.sock".into()),
             },
+            display_name: None,
             ssh_config: Some("/tmp/config".into()),
             known_hosts: Some("/tmp/test hosts".into()),
         };

@@ -89,8 +89,10 @@ pub(crate) async fn open(master: &Master) -> Result<(Sftp, Process), Error> {
     Err(Error::Sftp(format!("{err}\n{stderr}")))
 }
 
-pub(crate) async fn close(sftp: Sftp, mut process: Process) -> io::Result<()> {
-    let _ = timeout(CLOSE_TIMEOUT, sftp.close()).await;
+pub(crate) async fn close(sftp: Option<Sftp>, mut process: Process) -> io::Result<()> {
+    if let Some(sftp) = sftp {
+        let _ = timeout(CLOSE_TIMEOUT, sftp.close()).await;
+    }
     process.stop().await?;
     Ok(())
 }

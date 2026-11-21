@@ -12,12 +12,14 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{UnixListener, UnixStream},
     process::Command,
-    sync::oneshot,
+    sync::{oneshot, watch},
     task::{JoinHandle, JoinSet},
-    time::timeout,
+    time::{Instant, sleep_until, timeout},
 };
 
-use crate::ssh::{CONNECT_TIMEOUT, control_dir};
+use crate::ssh::control_dir;
+
+pub(crate) const PROMPT_TIMEOUT: Duration = Duration::from_secs(300);
 
 const MAX_PROMPT: usize = 64 * 1024;
 const MAX_REPLY: usize = 1023; // OpenSSH's askpass response buffer, excluding its trailing NUL.
@@ -32,6 +34,7 @@ pub enum Kind {
 }
 
 pub struct Request {
+    pub destination: String,
     pub prompt: String,
     pub hint: Option<String>,
     pub kind: Kind,
@@ -39,6 +42,10 @@ pub struct Request {
 }
 
 impl Request {
+    pub fn is_pending(&self) -> bool {
+        !self.reply.is_closed()
+    }
+
     /// Send the response, or refuse the prompt with None. Dropping the request also refuses it.
     pub fn respond(self, answer: Option<String>) {
         let _ = self.reply.send(answer);
@@ -73,12 +80,14 @@ pub(crate) struct Server {
     app: PathBuf,
     token: String,
     task: Option<JoinHandle<()>>,
+    activity: watch::Sender<PromptActivity>,
 }
 
 impl Server {
     pub(crate) fn start(
         app: PathBuf,
         requests: async_channel::Sender<Request>,
+        destination: String,
     ) -> io::Result<Self> {
         let directory = control_dir()?;
         let id = random_hex::<8>()?;
@@ -89,11 +98,16 @@ impl Server {
             app,
             token: random_hex::<32>()?,
             task: None,
+            activity: watch::Sender::new(PromptActivity::default()),
         };
-        server.listen(requests)
+        server.listen(requests, destination)
     }
 
-    fn listen(mut self, requests: async_channel::Sender<Request>) -> io::Result<Self> {
+    fn listen(
+        mut self,
+        requests: async_channel::Sender<Request>,
+        destination: String,
+    ) -> io::Result<Self> {
         // OpenSSH passes exactly one argument (the prompt). The launcher inserts
         // the app's subcommand and works with paths containing spaces.
         OpenOptions::new()
@@ -104,6 +118,7 @@ impl Server {
             .write_all(b"#!/bin/sh\nexec \"$VSCP_ASKPASS_APP\" askpass \"$@\"\n")?;
         let listener = UnixListener::bind(&self.socket)?;
         let token = self.token.clone();
+        let activity = self.activity.clone();
         self.task = Some(tokio::spawn(async move {
             let mut handlers = JoinSet::new();
             loop {
@@ -112,8 +127,10 @@ impl Server {
                         let Ok((stream, _)) = result else { break };
                         let token = token.clone();
                         let requests = requests.clone();
+                        let destination = destination.clone();
+                        let activity = activity.clone();
                         handlers.spawn(async move {
-                            let _ = answer_prompt(stream, token, requests).await;
+                            let _ = answer_prompt(stream, token, requests, destination, activity).await;
                         });
                     }
                     _ = handlers.join_next(), if !handlers.is_empty() => {}
@@ -121,6 +138,10 @@ impl Server {
             }
         }));
         Ok(self)
+    }
+
+    pub(crate) fn readiness_timer(&self, budget: Duration) -> impl Future<Output = ()> + use<> {
+        readiness_timer(self.activity.subscribe(), Instant::now(), budget)
     }
 
     pub(crate) fn directory(&self) -> &Path {
@@ -147,7 +168,7 @@ impl Drop for Server {
     }
 }
 
-fn random_hex<const N: usize>() -> io::Result<String> {
+pub(crate) fn random_hex<const N: usize>() -> io::Result<String> {
     use std::fmt::Write as _;
     let mut bytes = [0; N];
     getrandom::fill(&mut bytes).map_err(io::Error::other)?;
@@ -158,10 +179,67 @@ fn random_hex<const N: usize>() -> io::Result<String> {
     Ok(hex)
 }
 
+#[derive(Clone, Copy, Default)]
+struct PromptActivity {
+    count: usize,
+    since: Option<Instant>,
+    elapsed: Duration,
+}
+
+struct PendingPrompt(watch::Sender<PromptActivity>);
+
+impl PendingPrompt {
+    fn start(activity: watch::Sender<PromptActivity>) -> Self {
+        activity.send_modify(|state| {
+            if state.count == 0 {
+                state.since = Some(Instant::now());
+            }
+            state.count += 1;
+        });
+        Self(activity)
+    }
+}
+
+impl Drop for PendingPrompt {
+    fn drop(&mut self) {
+        self.0.send_modify(|state| {
+            state.count -= 1;
+            if state.count == 0
+                && let Some(since) = state.since.take()
+            {
+                state.elapsed += since.elapsed();
+            }
+        });
+    }
+}
+
+async fn readiness_timer(
+    mut activity: watch::Receiver<PromptActivity>,
+    started: Instant,
+    budget: Duration,
+) {
+    loop {
+        let state = *activity.borrow_and_update();
+        if state.since.is_some() {
+            if activity.changed().await.is_err() {
+                return;
+            }
+        } else {
+            tokio::select! {
+                biased;
+                changed = activity.changed() => if changed.is_err() { return },
+                _ = sleep_until(started + budget + state.elapsed) => return,
+            }
+        }
+    }
+}
+
 async fn answer_prompt(
     mut stream: UnixStream,
     token: String,
     requests: async_channel::Sender<Request>,
+    destination: String,
+    activity: watch::Sender<PromptActivity>,
 ) -> io::Result<()> {
     let request = timeout(IO_TIMEOUT, async {
         let mut supplied = [0; 64];
@@ -181,12 +259,14 @@ async fn answer_prompt(
     let (hint, prompt) = request;
     let (reply, answer) = oneshot::channel();
     let request = Request {
+        destination,
         kind: classify(&prompt),
         hint: (!hint.is_empty()).then_some(hint),
         prompt,
         reply,
     };
-    let answer = timeout(CONNECT_TIMEOUT, async {
+    let _pending = PendingPrompt::start(activity);
+    let answer = timeout(PROMPT_TIMEOUT, async {
         requests.send(request).await.ok()?;
         answer.await.ok().flatten()
     })
@@ -250,7 +330,7 @@ fn request_reply() -> io::Result<Option<Vec<u8>>> {
     let hint = std::env::var_os("SSH_ASKPASS_PROMPT").unwrap_or_default();
     let mut stream = BlockingStream::connect(socket)?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
-    stream.set_read_timeout(Some(CONNECT_TIMEOUT + IO_TIMEOUT))?;
+    stream.set_read_timeout(Some(PROMPT_TIMEOUT + IO_TIMEOUT * 2))?;
     stream.write_all(token.as_bytes())?;
     for field in [hint, prompt] {
         let field = field.as_encoded_bytes();
@@ -293,7 +373,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_incorrect_token_without_forwarding_a_prompt() {
         let (send, requests) = async_channel::bounded(1);
-        let server = Server::start(PathBuf::from("/unused"), send).unwrap();
+        let server = Server::start(PathBuf::from("/unused"), send, "test".into()).unwrap();
         timeout(IO_TIMEOUT, async {
             let mut stream = UnixStream::connect(&server.socket).await.unwrap();
             let mut wrong_token = server.token.clone().into_bytes();

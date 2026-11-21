@@ -628,3 +628,114 @@ async fn password_authentication() {
     assert_eq!(passwords, 1);
     disconnect(&session).await;
 }
+
+#[tokio::test]
+async fn pending_host_prompt_pauses_readiness_deadline() {
+    let fixture = Fixture::start();
+    let client = client();
+    let spec = fixture.spec("b.pub");
+    let destination = format!("{}@{}:{}", spec.user, spec.host, spec.port);
+    let budget = Duration::from_millis(700);
+    let session = within(async {
+        tokio::try_join!(client.connect_with_timeout(spec, budget), async {
+            let request = client.next_prompt().await.expect("host key prompt");
+            assert_eq!(request.destination, destination);
+            assert!(matches!(request.kind, askpass::Kind::HostKeyConfirm { .. }));
+            tokio::time::sleep(budget * 2).await;
+            request.respond(Some("yes".into()));
+            Ok(())
+        })
+    })
+    .await
+    .0;
+    disconnect(&session).await;
+}
+
+async fn in_progress_download(
+    fixture: &Fixture,
+    session: &Session,
+) -> (
+    PathBuf,
+    Arc<AtomicBool>,
+    tokio::task::JoinHandle<Result<(), Error>>,
+) {
+    let source = fixture.path("large");
+    File::create(&source)
+        .unwrap()
+        .set_len(64 * 1024 * 1024)
+        .unwrap();
+    let partial = fixture.path("partial");
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (started, ready) = async_channel::bounded(1);
+    let download = tokio::spawn({
+        let session = session.clone();
+        let partial = partial.clone();
+        let cancel = cancel.clone();
+        async move {
+            session
+                .download(
+                    source,
+                    partial,
+                    move |_| {
+                        let _ = started.try_send(());
+                        // Keep the transfer in flight without relying on link throughput.
+                        thread::sleep(Duration::from_millis(2));
+                    },
+                    cancel,
+                )
+                .await
+        }
+    });
+    timeout(SHORT_WAIT, ready.recv()).await.unwrap().unwrap();
+    (partial, cancel, download)
+}
+
+#[tokio::test]
+async fn lists_directory_while_download_is_in_progress() {
+    let fixture = Fixture::start();
+    let client = client();
+    let session = trust_first(&client, fixture.spec("b.pub")).await;
+    let (_, cancel, download) = in_progress_download(&fixture, &session).await;
+    let entries = within(session.list_dir(fixture.temp.path().to_owned())).await;
+    assert!(entries.iter().any(|entry| entry.name == "large"));
+    assert!(!download.is_finished());
+    cancel.store(true, Relaxed);
+    assert!(matches!(download.await.unwrap(), Err(Error::Cancelled)));
+    disconnect(&session).await;
+}
+
+#[tokio::test]
+async fn disconnect_cancels_download_and_reaps_ssh_children() {
+    let fixture = Fixture::start();
+    let client = client();
+    let session = trust_first(&client, fixture.spec("b.pub")).await;
+    let (partial, cancel, download) = in_progress_download(&fixture, &session).await;
+    disconnect(&session).await;
+    assert!(cancel.load(Relaxed));
+    assert!(matches!(download.await.unwrap(), Err(Error::Cancelled)));
+    assert!(!partial.exists());
+    assert!(ssh_children(&fixture).is_empty());
+}
+
+#[tokio::test]
+async fn client_shutdown_reaps_ssh_while_waiting_for_askpass() {
+    let fixture = Fixture::start();
+    let client = client();
+    let spec = fixture.spec("b.pub");
+    within(async {
+        tokio::try_join!(
+            async {
+                assert!(matches!(client.connect(spec).await, Err(Error::Cancelled)));
+                Ok(())
+            },
+            async {
+                let request = client.next_prompt().await.expect("host key prompt");
+                client.shutdown().await;
+                assert!(!request.is_pending());
+                assert!(ssh_children(&fixture).is_empty());
+                Ok(())
+            }
+        )
+    })
+    .await;
+}

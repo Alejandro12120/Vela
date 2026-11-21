@@ -5313,6 +5313,7 @@ version = "0.1.0"
 dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
+ "unicode-segmentation",
  "vscp-core",
 ]
 
@@ -5325,9 +5326,11 @@ dependencies = [
  "getrandom 0.4.3",
  "libc",
  "openssh-sftp-client",
+ "serde",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "toml 1.2.1+spec-1.1.0",
 ]
 
 [[package]]

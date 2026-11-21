@@ -28,7 +28,7 @@ Prueba de arrastre: el usuario indicó el 2026-11-20 que se considera superada. 
   - Recibir archivos arrastrados desde Finder o Dolphin (`FileDropEvent`, `ExternalPaths`).
   - Leer archivos del portapapeles (`ClipboardEntry::ExternalPaths`).
 - Lo que GPUI **no** resuelve: escribir archivos en el portapapeles. En macOS, `write` ignora `ExternalPaths`. Se añadirá un módulo pequeño con `objc2-app-kit` que escriba `NSURL` en `NSPasteboard`, igual que hace `probes/file-handoff/macos.swift`, que ya funcionó en Finder. En Linux quedará pendiente para la fase de Linux.
-- F0 fija Rust 1.98.1. El MacBook usa las Command Line Tools y `xcrun -f metal` no encuentra el compilador. Se activa `runtime_shaders` en `gpui-pre-platform`, que la propaga al backend de macOS para compilar los shaders Metal durante el arranque. La medición de F0 incluye ese coste.
+- F0 fija Rust 1.98.1. El MacBook usa las Command Line Tools y `xcrun -f metal` no encuentra el compilador. Se activa `runtime_shaders` en `gpui-pre-platform`, que la propaga al backend de macOS para compilar los shaders Metal durante el arranque. La medición de F0 incluye ese coste. F2a activa también `font-kit` para rasterizar el texto en macOS.
 - Sin `gpui-component` en el MVP. La 0.9.0 depende de `gpui-pre =0.3.11` y trae árbol y tabla, pero arrastra gráficas, resaltado, `lsp-types`, `ropey` y otras dependencias. Se implementarán solo los controles necesarios: fila de árbol, barra de ruta, botón, campo de texto, diálogo y barra de progreso. Se reconsiderará si el campo de texto resulta costoso, midiendo antes el binario y la RAM.
 
 ### Conexión: OpenSSH del sistema
@@ -76,7 +76,7 @@ crates/
   vscp-app/    GPUI: ventana, paneles, terminal, diálogos, temas y glue de plataforma (macOS: pasteboard).
 ```
 
-- **Configuración**: `servers.toml`, en `~/Library/Application Support/vSCP/` o `~/.config/vscp/`. Por servidor: nombre, host, puerto, usuario, modo de autenticación (`agent` o `password`), ruta de la clave pública, ruta remota inicial y favorito. También se guardan los ajustes de terminal (externa o integrada, comando de Kitty), editor y socket del agente.
+- **Configuración**: `servers.toml`, en `~/Library/Application Support/vSCP/` en macOS y en `$XDG_CONFIG_HOME/vscp/` o `~/.config/vscp/` en Linux. Por servidor se guardan un identificador estable, nombre, host, puerto, usuario, modo de autenticación (`agent` o `password`), ruta de la clave pública y socket opcional para el agente, ruta remota inicial y favorito. Los ajustes de terminal y editor se añadirán en sus fases.
 - **Modelo de árbol**: cada panel guarda un árbol de nodos con hijos cargados de forma perezosa. La interfaz recibe un `Vec` aplanado de filas visibles, con profundidad y estado expandido, y lo pinta con `uniform_list`. Las carpetas expandidas se recuerdan por servidor.
 - **Caché**: hay un directorio de sesión para descargas temporales de arrastre y portapapeles, y otro para copias de edición. Se acota por tamaño y se limpia al cerrar, salvo las copias con cambios sin subir.
 - **Temas** (F7):
@@ -148,7 +148,8 @@ Cada fase termina con compilación de release en el Mac, `cargo fmt --check`, `c
 | --- | --- | --- |
 | F0 Andamiaje | Comprobar `cargo`, `rustc`, `xcode-select -p` y `xcrun -f metal` en el Mac. Workspace con dos crates. `rust-toolchain.toml` fijado después de comprobar la versión mínima de `gpui-pre`. Ventana GPUI vacía con el tema. | La ventana abre en macOS. Se registran la RAM de reposo, el tiempo hasta la ventana y el tamaño del binario. Sirve de referencia frente a los presupuestos (sección 6). |
 | F1 Núcleo SSH/SFTP | `vscp-core` con la conexión maestra, askpass, SFTP sobre `ssh -s`, listado, `stat`, lectura y escritura en streaming. Comprobación `ssh -G` de identidades. | Pruebas de integración contra un `sshd` de usuario: puerto alto, claves de host y de cliente generadas, `StrictHostKeyChecking`. En macOS se usa `/usr/sbin/sshd` sin root. En Linux se usa un contenedor `--rm`. Además, un caso con contraseña. |
-| F2 Paneles | Panel local y remoto con árbol virtualizado, navegación, columnas y selección. Barra lateral de servidores y `servers.toml`. | 10.000 filas con desplazamiento fluido. Expandir no bloquea la interfaz con latencia de red simulada. |
+| F2a Servidores y conexión | Barra lateral, edición y persistencia de `servers.toml`, conexión y diálogos SSH. Operaciones SFTP concurrentes y listado inicial de verificación. | Conectar al servidor de pruebas, mostrar la ruta y el recuento de entradas y listar mientras se descarga otro archivo. |
+| F2b Paneles | Panel local y remoto con árbol virtualizado, navegación, columnas y selección. Sustituye la vista provisional de F2a. | 10.000 filas con desplazamiento fluido. Expandir no bloquea la interfaz con latencia de red simulada. |
 | F3 Transferencias y operaciones | Cola, arrastre entre paneles, conflictos, crear carpeta, renombrar y borrar. | Subida y bajada recursivas de un árbol de prueba con nombres con espacios, `#` y acentos. El contenido coincide byte a byte. Cancelar deja el estado coherente. |
 | F4 Finder | Arrastre de entrada y de salida, ⌘C y ⌘V. Módulo `objc2` de pasteboard. | Prueba manual con trackpad en Finder: el nombre y los bytes coinciden en los cuatro gestos. |
 | F5 Edición remota | Copias de edición, `open` o editor, vigilancia, comprobación de conflicto y subida. | Con VS Code: guardar dos veces seguidas sube dos veces. Un cambio remoto hecho entretanto muestra el conflicto. Desconectar conserva la copia. |

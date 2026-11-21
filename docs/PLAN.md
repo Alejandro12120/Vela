@@ -76,7 +76,7 @@ crates/
   vscp-app/    GPUI: ventana, paneles, terminal, diálogos, temas y glue de plataforma (macOS: pasteboard).
 ```
 
-- **Configuración**: `servers.toml`, en `~/Library/Application Support/vSCP/` en macOS y en `$XDG_CONFIG_HOME/vscp/` o `~/.config/vscp/` en Linux. Por servidor se guardan un identificador estable, nombre, host, puerto, usuario, modo de autenticación (`agent` o `password`), ruta de la clave pública y socket opcional para el agente, ruta remota inicial y favorito. La aplicación elegida para editar archivos remotos se guarda en `settings.toml` con permisos 0600. Los ajustes de terminal se añadirán en F6.
+- **Configuración**: `servers.toml`, en `~/Library/Application Support/vSCP/` en macOS y en `$XDG_CONFIG_HOME/vscp/` o `~/.config/vscp/` en Linux. Por servidor se guardan un identificador estable, nombre, host, puerto, usuario, modo de autenticación (`agent` o `password`), clave pública (elegida del agente o desde archivo) y socket opcional para el agente, ruta remota inicial, fijado y orden manual (decisión 9). La aplicación elegida para editar archivos remotos se guarda en `settings.toml` con permisos 0600. Los ajustes de terminal se añadirán en F6.
 - **Modelo de árbol**: cada panel guarda un árbol de nodos con hijos cargados de forma perezosa. La interfaz recibe un `Vec` aplanado de filas visibles, con profundidad y estado expandido, y lo pinta con `uniform_list`. Las carpetas expandidas se recuerdan en memoria por servidor, panel y ruta raíz.
 - **Caché**: hay un directorio de sesión para descargas temporales de arrastre y portapapeles, y otro para copias de edición. Se acota por tamaño y se limpia al cerrar, salvo las copias con cambios sin subir.
 - **Temas** (F7):
@@ -99,13 +99,13 @@ crates/
 
 ### Entra
 
-1. Lista de servidores en la barra lateral: crear, editar, borrar y conectar. Incluye el estado de la sesión activa.
-2. Autenticación con el agente de Bitwarden usando una clave elegida por servidor, o con contraseña pedida al conectar. Se acepta la clave de host en el primer uso.
+1. Lista de servidores en la barra lateral: crear, editar, borrar y conectar. Incluye el estado de la sesión activa, una sección «Fijados» y orden por arrastre (decisión 9).
+2. Autenticación con el agente de Bitwarden usando una clave elegida de la lista del agente (decisión 10), o con contraseña pedida al conectar. Se acepta la clave de host en el primer uso.
 3. Dos paneles, local a la izquierda y remoto a la derecha:
    - barra de ruta editable;
    - atrás, adelante y subir;
    - carpetas expandibles en el sitio, al estilo de Finder;
-   - columnas de nombre, tamaño, fecha y permisos. Al estrechar un panel desaparecen permisos, fecha y tamaño en ese orden. ⌃⌘S alterna la barra lateral;
+   - columnas de nombre, tamaño, fecha y permisos. Al estrechar un panel desaparecen permisos, fecha y tamaño en ese orden. ⌘S alterna la barra lateral (decisión 13);
    - selección múltiple con ⌘ y ⇧. ↑/↓ mueven la selección, ⇧↑/⇧↓ extienden el rango y ⌘A selecciona todas las filas visibles;
    - → expande y ← contrae o selecciona la carpeta contenedora. ⌘↓ abre la carpeta seleccionada, ⌘↑ sube, ⌘[ retrocede y ⌘] avanza. Tab cambia de panel;
    - ⌘⇧. alterna los archivos ocultos y ⌘R actualiza la raíz y las carpetas expandidas.
@@ -120,7 +120,7 @@ crates/
    - Una nueva copia al portapapeles sustituye y borra la anterior al completarse. Al iniciar y salir se conservan las descargas todavía referenciadas por las URL del portapapeles. El cierre limpia las demás descargas de preparación y deja intacto el portapapeles. Pegar los originales en el panel local requiere la sesión remota de la copia.
    - El arrastre remoto reutiliza la preparación por selección mientras siga vigente. Ofrece las URL si la descarga terminó al salir de la ventana. En caso contrario, el usuario vuelve a arrastrar cuando aparezca «Listo para arrastrar».
    - En `gpui-pre-macos` 0.3.11, `src/window.rs:3789–3792` ofrece únicamente `Copy` a Finder (`OutsideApplication`) y `Copy | Move` dentro de la aplicación y para contextos desconocidos. Se permite arrastrar archivos locales a Finder con sus rutas reales.
-7. Un doble clic abre los archivos locales con la aplicación predeterminada. Para archivos remotos:
+7. Un doble clic abre los archivos de texto en el editor y los binarios con la aplicación predeterminada. «Ejecutar» está en el menú contextual (decisión 11). Para archivos remotos:
    - descarga a una copia local reutilizable y pide confirmación por encima de 100 MB. Al volver a abrir una copia sincronizada, se actualiza si el remoto ha cambiado;
    - «Ajustes» (⌘,) permite elegir la aplicación predeterminada del sistema o un paquete `.app`. Se abre con `open` o `open -a <ruta>`;
    - `notify` 8.2.1 vigila la carpeta para detectar guardados directos y reemplazos atómicos. Cada lote espera 300 ms de silencio y comprueba estabilidad y SHA-256 antes de subir. Los cambios durante una subida se agrupan para la siguiente;
@@ -157,6 +157,7 @@ Cada fase termina con compilación de release en el Mac, `cargo fmt --check`, `c
 | F3 Transferencias y operaciones | Cola, arrastre entre paneles, conflictos, crear carpeta, renombrar y borrar. | Subida y bajada recursivas de un árbol de prueba con nombres con espacios, `#` y acentos. El contenido coincide byte a byte. Cancelar deja el estado coherente. |
 | F4 Finder | Arrastre de entrada y de salida, ⌘C y ⌘V. Módulo `objc2` de pasteboard. | Prueba manual con trackpad en Finder: el nombre y los bytes coinciden en los cuatro gestos. |
 | F5 Edición remota | Copias de edición, `open` o editor, vigilancia, comprobación de conflicto y subida. | Con VS Code: dos guardados separados por más de 300 ms se suben por separado. Una ráfaga sube su contenido final. Un cambio remoto hecho entretanto muestra el conflicto. Desconectar conserva la copia. |
+| F5b Revisión de uso | Decisiones 9–14 de la sección 8. Corregir Enter, que no confirma el cambio de nombre en línea ni el nombre de la carpeta nueva. Pasar `servers.toml` del campo `favorite` a fijado más orden, y conservar las rutas de clave existentes como «Desde archivo». Listar el agente con el protocolo SSH (`REQUEST_IDENTITIES`) y guardar la clave elegida en `keys/<huella>.pub` con permisos 0600 para `IdentityFile`. | Enter confirma el cambio de nombre y la carpeta nueva, con una prueba de teclado. Fijar, soltar y reordenar sobreviven a reiniciar. Se listan las claves de un agente de prueba con dos claves y la elegida es la única identidad de `ssh -G`. Doble clic en `.sh` abre el editor. Capturas en claro y oscuro con los iconos nuevos. |
 | F6 Terminal integrada | Vista Terminal a pantalla completa por sesión, alternable con Archivos. Arranca en la carpeta remota actual. PTY con `ssh` sobre la sesión maestra. Dibujado, teclado, selección, copiar y pegar, IME, ratón y cambio de tamaño. Importación de `kitty.conf`. Historial limitado, unas 5.000 líneas como punto de partida. Acción «Abrir en Kitty». | `vim`, `htop` y `tmux` funcionan. Se pueden escribir acentos con IME. El cambio de tamaño se propaga al remoto. Al alternar de vista, la terminal conserva el proceso y el historial, y sin actividad no consume CPU. Fuente y colores iguales a Kitty en una captura lado a lado. |
 | F7 Temas y vidrio | Modelo de temas, modos, editor, vidrio esmerilado y «Reducir transparencia». | Cambiar de tema o modo se aplica en vivo, sin reiniciar. Los temas de serie pasan el contraste de 4.5:1. Se mide la RAM con el desenfoque activado y desactivado. |
 | F8 Pulido y recorrido final | Reconexión, mensajes de error y revisión de accesibilidad con la skill `apple-design`. | Recorrido completo con Bitwarden real y una clave elegida, sin agotar intentos de autenticación. Mediciones finales frente a los presupuestos, con la terminal abierta. |
@@ -186,5 +187,20 @@ Cada fase termina con compilación de release en el Mac, `cargo fmt --check`, `c
 6. Se acepta GPL-3.0 para vSCP. En F0 se fija `license = "GPL-3.0-or-later"` y se añade `LICENSE`. Esto permite adaptar la terminal de Zed. GPUI y `alacritty_terminal` son Apache-2.0, compatibles con GPLv3.
 7. Hay un módulo de temas en el MVP (F7): modo claro y oscuro, colores personalizables y efecto de vidrio esmerilado.
 8. La terminal no va en un panel inferior. Cada sesión SSH alterna entre dos vistas a pantalla completa, Archivos y Terminal. Sustituye al panel inferior con pestañas de la decisión 5.
+
+### Revisión manual de F0–F5 (2026-11-21)
+
+Funciona: arrastrar entre paneles, de Finder a los paneles y de los paneles a Finder. Dos guardados separados en el editor se suben por separado. Los cambios pedidos están en la fase F5b.
+
+9. **Servidores fijados**, como los threads de T3 Code. Hay una sección «Fijados» arriba y el resto de servidores debajo, cada una en orden manual. Se fija o se suelta con un icono de chincheta al pasar el ratón o desde el menú ⋯. Arrastrar reordena dentro de cada sección. Llevar un servidor a la otra sección lo fija o lo suelta. Se quita la casilla «Favorito» del formulario. Sustituye al orden de favoritos primero y luego alfabético.
+10. **Clave pública desde Bitwarden.** El formulario lista las claves del agente de Bitwarden con el nombre del elemento, el tipo y la huella SHA256. vSCP guarda la clave pública en su configuración, así que no hace falta ningún archivo. «Desde archivo…» queda como opción secundaria. Si Bitwarden está cerrado, bloqueado o sin claves, se muestra un aviso con «Reintentar».
+11. **Doble clic y «Ejecutar».**
+    - El doble clic abre en el editor de Ajustes los archivos de texto, `.sh` incluido. Se reconocen por extensión y por contenido.
+    - Imágenes, PDF y demás binarios se abren con la aplicación predeterminada.
+    - El menú contextual añade «Ejecutar». En un archivo remoto lo ejecuta en el servidor, en la vista Terminal de la F6, y en Kitty hasta que exista esa vista. En un archivo local lo abre con la aplicación predeterminada.
+    - Motivo: con la aplicación predeterminada, un `.sh` se abría en Kitty en vez de editarse.
+12. **Iconos Lucide** (licencia ISC) en toda la interfaz: menús contextuales, menú ⋯ de servidor, modales de confirmación y barra de herramientas. Sustituyen a los iconos dibujados a mano de `pane_icons.rs`. Solo se incluyen los SVG que se usan.
+13. **⌘S alterna la barra lateral**, en lugar de ⌃⌘S. vSCP no tiene «Guardar» propio, porque los archivos se editan en una aplicación externa.
+14. **Barra de ruta**: doble clic selecciona el segmento entre barras y triple clic, la ruta entera, como en los campos de texto de macOS.
 
 Las respuestas también están registradas en `.agent/CONTINUITY.md`.

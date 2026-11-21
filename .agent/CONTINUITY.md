@@ -113,3 +113,13 @@
 - 2026-11-21T06:10:18Z [TOOL] The editor-disabled release app passed shell-written in-place, atomic and rapid saves against scripts/dev-sshd.sh in both themes. It resumed offline changes on restart, preserved independently changed remote bytes, deleted startup orphans and removed synced copies on AppKit quit while keeping conflicts. After 10 s idle one watched edit used 57 MB plus 4.4 MB for both SSH children at 736×733, and 104 MB plus 4.5 MB at 1470×922.
 - 2026-11-21T06:10:18Z [TOOL] Inspected 14 window-only light/dark captures at 736×733. The final review covered synced, pending and conflicting rows, active and completed uploads, the reconnect banner, conflict actions and Ajustes. The review tightened the sidebar gear and action layout, fit the conflict actions on one line and replaced the stale upload-success caption after an offline save. Removed task-owned fixture trees, configs, caches, screenshots and Cargo target. Native process checks found no task-owned SSH or vSCP processes.
 - 2026-11-21T06:10:18Z [TOOL] UNCONFIRMED: real VS Code saves, Launch Services with the default and chosen .app, physical Ediciones and conflict actions, and the Cmd+, shortcut. Native runs suppressed editor launches and sent no UI input.
+- 2026-11-21T10:30Z [USER] Manual review of F0–F5 confirmed several features work. Drag works between panes, from Finder to the panes and from the panes to Finder. Two separate editor saves upload twice. The user requested changes, recorded as decisions 9–14 in docs/PLAN.md §8 and scheduled as phase F5b before F6:
+  - pinned servers like T3 Code threads, with a top section and drag reordering that pins or unpins across sections;
+  - public keys listed from the Bitwarden agent, with a secondary «Desde archivo…» option;
+  - double-click edits text files and opens binaries with the default app, with «Ejecutar» in the context menu;
+  - Lucide icons everywhere;
+  - ⌘S toggles the sidebar;
+  - double-click in the path bar selects a segment and triple-click selects the whole path;
+  - overall UI refinement.
+- 2026-11-21T10:30Z [USER] Bug: Enter does not commit an inline rename or a new folder name, while ⌘⌫ works. UNCONFIRMED cause. The FileList `enter`→StartRename and `FileRename > TextInput` `enter`→CommitRename bindings in pane.rs are the first suspect.
+- 2026-11-21T10:30Z [ASSUMPTION] UNCONFIRMED: does the Bitwarden agent answer REQUEST_IDENTITIES while locked, by prompting, returning an empty list or failing? F5b must probe this with real Bitwarden.

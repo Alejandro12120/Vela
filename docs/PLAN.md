@@ -1,6 +1,6 @@
 # Plan del MVP de vSCP
 
-Estado: aprobado para empezar por F0, 2026-11-20. Todavía no hay código de la aplicación. Las prioridades siguen siendo, por orden, RAM, arranque instantáneo y fluidez, y tamaño instalado.
+Estado: andamiaje F0 en la rama `mvp`. Las prioridades siguen siendo, por orden, RAM, arranque instantáneo y fluidez, y tamaño instalado.
 
 ## 1. Qué se descarta del hilo anterior
 
@@ -28,7 +28,7 @@ Prueba de arrastre: el usuario indicó el 2026-11-20 que se considera superada. 
   - Recibir archivos arrastrados desde Finder o Dolphin (`FileDropEvent`, `ExternalPaths`).
   - Leer archivos del portapapeles (`ClipboardEntry::ExternalPaths`).
 - Lo que GPUI **no** resuelve: escribir archivos en el portapapeles. En macOS, `write` ignora `ExternalPaths`. Se añadirá un módulo pequeño con `objc2-app-kit` que escriba `NSURL` en `NSPasteboard`, igual que hace `probes/file-handoff/macos.swift`, que ya funcionó en Finder. En Linux quedará pendiente para la fase de Linux.
-- El usuario cree que el MacBook solo tiene las Command Line Tools de Xcode. En F0 se comprueba con `xcode-select -p` y `xcrun -f metal`. Sin Xcode completo, se activa la feature `runtime_shaders`, que compila los shaders Metal al arrancar en lugar de durante la compilación. El coste de arranque se medirá en F0 frente al objetivo de 1 s.
+- F0 fija Rust 1.98.1. El MacBook usa las Command Line Tools y `xcrun -f metal` no encuentra el compilador. Se activa `runtime_shaders` en `gpui-pre-platform`, que la propaga al backend de macOS para compilar los shaders Metal durante el arranque. La medición de F0 incluye ese coste.
 - Sin `gpui-component` en el MVP. La 0.9.0 depende de `gpui-pre =0.3.11` y trae árbol y tabla, pero arrastra gráficas, resaltado, `lsp-types`, `ropey` y otras dependencias. Se implementarán solo los controles necesarios: fila de árbol, barra de ruta, botón, campo de texto, diálogo y barra de progreso. Se reconsiderará si el campo de texto resulta costoso, midiendo antes el binario y la RAM.
 
 ### Conexión: OpenSSH del sistema

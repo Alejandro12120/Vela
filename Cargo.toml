@@ -1,0 +1,16 @@
+[workspace]
+members = ["crates/vscp-core", "crates/vscp-app"]
+resolver = "3"
+
+[workspace.package]
+license = "GPL-3.0-or-later"
+edition = "2024"
+rust-version = "1.98.1"
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+strip = true
+lto = "thin"
+debug = 0

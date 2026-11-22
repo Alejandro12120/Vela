@@ -848,6 +848,12 @@ impl Workspace {
             )
             .child(list)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        let panel = crate::components::motion::appear(
+            panel,
+            "edit-popover-appear",
+            4.,
+            crate::components::motion::FAST,
+        );
         Some(
             div()
                 .id("edit-popover-layer")
@@ -1050,7 +1056,7 @@ impl Workspace {
             .count();
         if pending > 0 && self.edits.banner.contains(id) {
             let id = id.to_owned();
-            strip = strip.child(
+            strip = strip.child(crate::components::motion::appear(
                 div()
                     .flex()
                     .items_center()
@@ -1083,7 +1089,10 @@ impl Workspace {
                         )
                         .h(px(24.)),
                     ),
-            );
+                "edit-banner",
+                -4.,
+                crate::components::motion::FAST,
+            ));
         }
         if let Some((target, (_, notice))) = self
             .edits
@@ -1136,7 +1145,15 @@ impl Workspace {
                     .py_1()
                     .text_size(px(12.))
                     .text_color(color)
-                    .child(icon(glyph).size(px(14.)).text_color(color))
+                    .child({
+                        let glyph_icon = icon(glyph).size(px(14.)).text_color(color);
+                        if glyph == IconName::Spinner {
+                            crate::components::motion::spin(glyph_icon, "edit-spinner")
+                                .into_any_element()
+                        } else {
+                            glyph_icon.into_any_element()
+                        }
+                    })
                     .child(
                         div()
                             .id("edit-caption")

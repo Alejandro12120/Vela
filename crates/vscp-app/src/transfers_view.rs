@@ -6,7 +6,8 @@ use std::{
 };
 
 use gpui::{
-    Context, Entity, FocusHandle, FontWeight, Render, Role, WeakEntity, Window, div, prelude::*, px,
+    AnimationExt, Context, Entity, FocusHandle, FontWeight, Render, Role, SpringAnimation,
+    WeakEntity, Window, div, prelude::*, px,
 };
 use vscp_core::{
     Session,
@@ -19,12 +20,16 @@ use crate::{
     components::{
         button::{Variant, button, icon_button, icon_text_button},
         modal,
+        motion::{self, SPRING},
     },
     dev, file_metadata,
     icons::{IconName, icon},
     pane::{Pane, Source, finder::Purpose},
     theme::Theme,
 };
+
+/// Tall enough for the history list and its button.
+const HISTORY_HEIGHT: f32 = 240.;
 
 struct Row {
     id: JobId,
@@ -727,16 +732,21 @@ impl Transfers {
                         .rounded(px(3.))
                         .bg(theme.selection)
                         .child(
-                            div()
-                                .h_full()
-                                .w(gpui::relative(progress))
-                                .rounded(px(3.))
-                                .bg(theme.accent),
+                            // The fill springs to each new value, so it never jumps.
+                            div().h_full().rounded(px(3.)).bg(theme.accent).with_spring(
+                                "transfer-progress",
+                                SpringAnimation::new(SPRING)
+                                    .to(progress)
+                                    .with_epsilon(0.0005),
+                                |fill, progress| fill.w(gpui::relative(progress.clamp(0., 1.))),
+                            ),
                         ),
                 )
             })
-            .when(self.expanded && !self.rows.is_empty(), |strip| {
-                strip
+            .when(!self.rows.is_empty(), |strip| {
+                let panel = div()
+                    .flex()
+                    .flex_col()
                     .child(
                         div()
                             .id("transfer-history")
@@ -804,11 +814,20 @@ impl Transfers {
                                                     .gap_1()
                                                     .text_color(status_color)
                                                     .when_some(status_icon, |label, name| {
-                                                        label.child(
-                                                            icon(name)
-                                                                .size(px(14.))
-                                                                .text_color(status_color),
-                                                        )
+                                                        let glyph = icon(name)
+                                                            .size(px(14.))
+                                                            .text_color(status_color);
+                                                        if name == IconName::Spinner {
+                                                            label.child(motion::spin(
+                                                                glyph,
+                                                                (
+                                                                    "transfer-spinner",
+                                                                    row.id as usize,
+                                                                ),
+                                                            ))
+                                                        } else {
+                                                            label.child(glyph)
+                                                        }
                                                     })
                                                     .child(status_label(row.status, row.errors)),
                                             ),
@@ -837,6 +856,21 @@ impl Transfers {
                             .h(px(25.)),
                         ),
                     )
+                    .into_any_element();
+                // The height springs between its two sizes. Nothing is rendered while closed.
+                strip.child(
+                    div().overflow_hidden().with_spring(
+                        "transfer-history-height",
+                        SpringAnimation::new(SPRING)
+                            .to(px(if self.expanded { HISTORY_HEIGHT } else { 0. }))
+                            .with_epsilon(0.5),
+                        move |region, height| {
+                            region
+                                .max_h(height)
+                                .when(height > px(0.5), move |region| region.child(panel))
+                        },
+                    ),
+                )
             })
             .when_some(
                 self.finder_notice

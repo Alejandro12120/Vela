@@ -468,12 +468,13 @@ impl Form {
                         .gap_2()
                         .text_size(px(12.))
                         .text_color(theme.secondary_text)
-                        .child(
+                        .child(crate::components::motion::spin(
                             icon(IconName::Spinner)
                                 .size(px(14.))
                                 .mt(px(1.))
                                 .text_color(theme.secondary_text),
-                        )
+                            "keys-spinner",
+                        ))
                         .child(
                             div()
                                 .flex()

@@ -30,8 +30,8 @@ use vscp_core::{
 
 use crate::{
     components::{
-        button::{Variant, button},
-        modal,
+        button::{Variant, button, icon_text_button},
+        modal, motion,
         text_input::TextInput,
     },
     dev,
@@ -39,6 +39,7 @@ use crate::{
     form::{Errors, Field, Form},
     icons::IconName,
     pane::{PaneMemory, icon_button},
+    sidebar::{self, RowAction, RowMenu, ServerReorder},
     theme::Theme,
 };
 
@@ -54,6 +55,10 @@ pub fn bind_keys(cx: &mut gpui::App) {
         KeyBinding::new("shift-tab", Previous, Some("Workspace")),
         KeyBinding::new("escape", DismissMenu, Some("Workspace")),
         KeyBinding::new("cmd-s", ToggleSidebar, Some("Workspace")),
+        KeyBinding::new("tab", modal::Next, Some("RowMenu")),
+        KeyBinding::new("down", modal::Next, Some("RowMenu")),
+        KeyBinding::new("shift-tab", modal::Previous, Some("RowMenu")),
+        KeyBinding::new("up", modal::Previous, Some("RowMenu")),
         KeyBinding::new("tab", modal::Next, Some("Dialog")),
         KeyBinding::new("shift-tab", modal::Previous, Some("Dialog")),
         KeyBinding::new("enter", modal::Confirm, Some("Dialog")),
@@ -85,11 +90,14 @@ pub struct Workspace {
     pub servers: Vec<Server>,
     pub selected: Option<String>,
     pub connections: HashMap<String, Connection>,
-    pub row_menu: Option<String>,
+    pub row_menu: Option<RowMenu>,
     pub dir: Option<PathBuf>,
     pub saving: bool,
-    /// A server row is being dragged. Reset once the drag ends.
-    pub dragging_server: bool,
+    /// The card being dragged in the server list, until the drag ends.
+    pub reorder: Option<ServerReorder>,
+    /// A card that just left a drag, with the y where it was let go and when.
+    /// Its row starts there and glides into its slot.
+    settle: Option<(String, f32, Instant)>,
     key_requests: u64,
     edits: Edits,
     settings: Settings,
@@ -179,7 +187,15 @@ impl Workspace {
                         {
                             let id = server.id.clone();
                             this.select(&id);
-                            this.row_menu = Some(id);
+                            if let Some(position) = sidebar::row_centre(&this.servers, &id) {
+                                this.open_row_menu(&id, position, window, cx);
+                            }
+                        }
+                        if let Some((name, dy)) = dev::drag()
+                            && let Some(server) = this.servers.iter().find(|server| server.name == name)
+                        {
+                            let id = server.id.clone();
+                            this.hold_reorder(&id, dy, cx);
                         }
                         match dev::form() {
                             Some(dev::FormRequest::New) => this.open_form(None, window, cx),
@@ -206,6 +222,13 @@ impl Workspace {
         }).detach();
         cx.observe_window_appearance(window, |_, _, cx| cx.notify())
             .detach();
+        // The setting can change while the app runs, so read it when the window is activated.
+        cx.observe_window_activation(window, |_, window, cx| {
+            if window.is_window_active() {
+                cx.set_reduce_motion(crate::accessibility::reduce_motion());
+            }
+        })
+        .detach();
         let executor = cx.background_executor().clone();
         cx.on_app_quit(move |this, cx| {
             let cleanup = (!this.quitting).then(|| crate::pane::finder::quit_cleanup(cx));
@@ -226,7 +249,8 @@ impl Workspace {
             row_menu: None,
             dir: None,
             saving: false,
-            dragging_server: false,
+            reorder: None,
+            settle: None,
             key_requests: 0,
             edits: Edits::default(),
             settings: Settings::default(),
@@ -298,6 +322,181 @@ impl Workspace {
         }
         self.selected = Some(id.to_owned());
         self.row_menu = None;
+    }
+
+    /// The root focus, which a drag takes so that Escape reaches the workspace
+    /// even though the dragged row leaves the tree.
+    pub fn focus_handle(&self) -> FocusHandle {
+        self.focus.clone()
+    }
+
+    pub fn sidebar_visible(&self) -> bool {
+        self.sidebar_visible.get()
+    }
+
+    /// The card that is gliding into its slot after a drag, with its starting y.
+    pub fn settling(&self) -> Option<(&String, f32)> {
+        self.settle
+            .as_ref()
+            .filter(|(_, _, since)| since.elapsed() < Duration::from_secs(1))
+            .map(|(id, y, _)| (id, *y))
+    }
+
+    /// Opens the floating menu of a server row at `position`.
+    pub fn open_row_menu(
+        &mut self,
+        id: &str,
+        position: gpui::Point<gpui::Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.dialog.is_some() || self.reorder.is_some() {
+            return;
+        }
+        let first = cx.focus_handle().tab_stop(true);
+        first.focus(window, cx);
+        self.row_menu = Some(RowMenu {
+            id: id.to_owned(),
+            position,
+            scope: cx.focus_handle(),
+            first,
+            last: cx.focus_handle().tab_stop(true),
+        });
+        cx.notify();
+    }
+
+    pub fn dismiss_row_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.row_menu.take().is_some() {
+            self.focus.focus(window, cx);
+            cx.notify();
+        }
+    }
+
+    pub fn row_menu_action(
+        &mut self,
+        action: RowAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(menu) = self.row_menu.take() else {
+            return;
+        };
+        let id = menu.id;
+        self.focus.focus(window, cx);
+        match action {
+            RowAction::Session => {
+                if matches!(
+                    self.connections.get(&id),
+                    Some(Connection::Connected { .. })
+                ) {
+                    self.disconnect(&id, window, cx);
+                } else {
+                    self.connect(&id, window, cx);
+                }
+            }
+            RowAction::Pin => self.toggle_pin(&id, cx),
+            RowAction::Edit => self.open_form(Some(&id), window, cx),
+            RowAction::Delete => self.open_delete(id, window, cx),
+        }
+        cx.notify();
+    }
+
+    /// Starts moving a card. `grab_offset_y` is the cursor y within the card.
+    pub fn begin_reorder(&mut self, id: &str, grab_offset_y: f32, cx: &mut Context<Self>) {
+        let (pinned, unpinned) = sidebar::split(&self.servers);
+        let Some(y) = sidebar::layout(&pinned, &unpinned, None).row_y(id) else {
+            return;
+        };
+        let is_pinned = pinned.contains(&id);
+        let group = if is_pinned { &pinned } else { &unpinned };
+        let index = group.iter().position(|other| *other == id).unwrap_or(0);
+        self.row_menu = None;
+        self.settle = None;
+        self.reorder = Some(ServerReorder {
+            id: id.to_owned(),
+            grab_offset_y,
+            pointer_y: y + grab_offset_y,
+            target: sidebar::Target {
+                pinned: is_pinned,
+                index,
+            },
+            held: false,
+        });
+        cx.notify();
+    }
+
+    /// Follows the cursor, `pointer_y` being its y within the list content.
+    pub fn reorder_move(&mut self, pointer_y: f32, cx: &mut Context<Self>) {
+        let Some(reorder) = &mut self.reorder else {
+            return;
+        };
+        reorder.pointer_y = pointer_y;
+        let (pinned, unpinned) = sidebar::split(&self.servers);
+        let id = reorder.id.as_str();
+        let others = |group: &[&str]| group.iter().filter(|other| **other != id).count();
+        let centre = pointer_y - reorder.grab_offset_y + sidebar::ROW_H / 2.;
+        // Moving to another group changes the layout the card is measured against,
+        // so repeat until the slot agrees with the layout it produces.
+        for _ in 0..3 {
+            let target = sidebar::target_for(
+                others(&pinned),
+                others(&unpinned),
+                !pinned.is_empty(),
+                reorder.target,
+                pointer_y,
+                centre,
+            );
+            if target == reorder.target {
+                break;
+            }
+            reorder.target = target;
+        }
+        cx.notify();
+    }
+
+    /// Releases the card over the list: it moves to its target and is saved.
+    pub fn drop_reorder(&mut self, cx: &mut Context<Self>) {
+        self.finish_reorder(true, cx);
+    }
+
+    /// Ends the drag. Either way the card glides from where it was let go to its slot.
+    fn finish_reorder(&mut self, drop: bool, cx: &mut Context<Self>) {
+        let Some(reorder) = self.reorder.take() else {
+            return;
+        };
+        let (pinned, unpinned) = sidebar::split(&self.servers);
+        let height = sidebar::layout(
+            &pinned,
+            &unpinned,
+            Some((reorder.id.as_str(), reorder.target)),
+        )
+        .height;
+        let from = sidebar::card_top(&reorder, height);
+        self.settle = Some((reorder.id.clone(), from, Instant::now()));
+        if drop {
+            let group = if reorder.target.pinned {
+                pinned
+            } else {
+                unpinned
+            };
+            let before = group
+                .into_iter()
+                .filter(|id| *id != reorder.id)
+                .nth(reorder.target.index)
+                .map(str::to_owned);
+            self.drop_server(&reorder.id, reorder.target.pinned, before.as_deref(), cx);
+        }
+        cx.notify();
+    }
+
+    /// Development hook: shows a card dragged `dy` px from its slot and holds it.
+    fn hold_reorder(&mut self, id: &str, dy: f32, cx: &mut Context<Self>) {
+        self.begin_reorder(id, sidebar::ROW_H / 2., cx);
+        if let Some(reorder) = &mut self.reorder {
+            reorder.held = true;
+            let pointer = reorder.pointer_y + dy;
+            self.reorder_move(pointer, cx);
+        }
     }
 
     pub fn connect(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -949,16 +1148,24 @@ impl Workspace {
                 theme,
                 cx.listener(|this, _, window, cx| this.cancel_dialog(window, cx)),
             ))
-            .child(
-                button(
-                    "confirm",
-                    if self.saving { "Guardando…" } else { confirm },
-                    Variant::Primary,
-                    theme,
-                    cx.listener(|this, _, window, cx| this.confirm_dialog(window, cx)),
-                )
-                .track_focus(&self.confirm_focus),
-            );
+            .child({
+                let label = if self.saving { "Guardando…" } else { confirm };
+                let on_click = cx.listener(|this, _, window, cx| this.confirm_dialog(window, cx));
+                if label == "Conectar" {
+                    icon_text_button(
+                        "confirm",
+                        IconName::Plug,
+                        label,
+                        Variant::Primary,
+                        None,
+                        theme,
+                        on_click,
+                    )
+                } else {
+                    button("confirm", label, Variant::Primary, theme, on_click)
+                }
+                .track_focus(&self.confirm_focus)
+            });
         Some(
             modal::overlay(
                 title,
@@ -1076,7 +1283,7 @@ impl Workspace {
                     .child(format!("{}@{}", server.user, server.host)),
             );
         if let Some(warning) = self.warnings.get(id) {
-            details = details.child(
+            details = details.child(motion::appear(
                 div()
                     .w_full()
                     .p_3()
@@ -1084,20 +1291,30 @@ impl Workspace {
                     .bg(theme.warning_bg)
                     .text_color(theme.warning)
                     .child(warning.clone()),
-            );
+                "ssh-warning",
+                -4.,
+                motion::FAST,
+            ));
         }
 
-        let action = |label, cx: &Context<Self>| {
+        let action = |label: &'static str, cx: &Context<Self>| {
             let id = id.clone();
-            button(
-                "connect",
-                label,
-                Variant::Primary,
-                theme,
-                cx.listener(move |this, _, window, cx| {
-                    this.connect(&id, window, cx);
-                }),
-            )
+            let on_click = cx.listener(move |this, _, window, cx| {
+                this.connect(&id, window, cx);
+            });
+            if label == "Conectar" {
+                icon_text_button(
+                    "connect",
+                    IconName::Plug,
+                    label,
+                    Variant::Primary,
+                    None,
+                    theme,
+                    on_click,
+                )
+            } else {
+                button("connect", label, Variant::Primary, theme, on_click)
+            }
         };
         let details = match self.connections.get(id) {
             Some(Connection::Connecting) => details.child("Conectando…"),
@@ -1230,8 +1447,9 @@ impl Render for Workspace {
             });
         }
         let theme = Theme::for_window(window);
-        if !cx.has_active_drag() {
-            self.dragging_server = false;
+        if self.reorder.as_ref().is_some_and(|reorder| !reorder.held) && !cx.has_active_drag() {
+            // The drag ended without a drop over the list.
+            self.finish_reorder(false, cx);
         }
         let transfer_overlay = if self.dialog.is_none() && !self.edits.popover {
             match self
@@ -1261,8 +1479,13 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(|_, _: &Next, window, cx| window.focus_next(cx)))
             .on_action(cx.listener(|_, _: &Previous, window, cx| window.focus_prev(cx)))
-            .on_action(cx.listener(|this, _: &DismissMenu, _, cx| {
-                this.row_menu = None;
+            .on_action(cx.listener(|this, _: &DismissMenu, window, cx| {
+                if this.reorder.is_some() {
+                    cx.stop_active_drag(window);
+                    this.finish_reorder(false, cx);
+                    return;
+                }
+                this.dismiss_row_menu(window, cx);
                 this.edits.popover = false;
                 cx.notify();
             }))
@@ -1281,13 +1504,21 @@ impl Render for Workspace {
                 root.child(div().p_4().child("Cerrando conexiones…"))
             })
             .when(!self.quitting, |root| {
-                root.when(self.sidebar_visible.get(), |root| {
-                    root.child(crate::sidebar::render(self, theme, cx))
-                })
-                .child(self.content(theme, cx))
-                .children(transfer_overlay)
-                .children(self.edit_popover(theme, window, cx))
-                .children(self.render_dialog(theme, cx))
+                root.child(sidebar::render(self, theme, cx))
+                    .child(self.content(theme, cx))
+                    .children(transfer_overlay)
+                    .children(self.edit_popover(theme, window, cx))
+                    .children(self.render_dialog(theme, cx))
+                    .children(self.row_menu.as_ref().and_then(|menu| {
+                        let server = self.servers.iter().find(|server| server.id == menu.id)?;
+                        Some(sidebar::row_menu(
+                            menu,
+                            server,
+                            self.connections.get(&menu.id),
+                            theme,
+                            cx,
+                        ))
+                    }))
             })
     }
 }
@@ -1349,21 +1580,90 @@ mod tests {
         (id.to_owned(), pinned)
     }
 
-    fn drag(
-        cx: &mut VisualTestContext,
-        from: gpui::Point<gpui::Pixels>,
-        to: gpui::Point<gpui::Pixels>,
-    ) {
+    fn row_bounds(cx: &mut VisualTestContext, id: &str) -> gpui::Bounds<gpui::Pixels> {
+        let selector: &'static str = Box::leak(format!("server-row-{id}").into_boxed_str());
+        cx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("no row for {id}"))
+    }
+
+    /// Presses a card 20 px below its row top and moves just far enough to start
+    /// the drag. Returns the cursor position at the start of the drag.
+    fn grab(cx: &mut VisualTestContext, id: &str) -> gpui::Point<gpui::Pixels> {
+        let row = row_bounds(cx, id);
         let none = Modifiers::none();
-        cx.simulate_mouse_move(from, None, none);
-        cx.simulate_mouse_down(from, MouseButton::Left, none);
-        for step in 1..=10 {
-            let t = step as f32 / 10.;
-            let at = point(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
-            cx.simulate_mouse_move(at, MouseButton::Left, none);
-        }
-        cx.simulate_mouse_up(to, MouseButton::Left, none);
+        let down = point(row.center().x, row.top() + px(20.));
+        cx.simulate_mouse_move(down, None, none);
+        cx.simulate_mouse_down(down, MouseButton::Left, none);
+        let start = point(down.x, down.y + px(4.));
+        cx.simulate_mouse_move(start, MouseButton::Left, none);
+        assert!(
+            cx.update(|_, cx| cx.has_active_drag()),
+            "the drag did not start"
+        );
+        start
+    }
+
+    fn carry(cx: &mut VisualTestContext, to: gpui::Point<gpui::Pixels>) {
+        cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    }
+
+    fn release(cx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>) {
+        cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
+        // Let the rows finish gliding, so the next grab finds them in their slots.
+        for _ in 0..30 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(50));
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+        }
+    }
+
+    fn target(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> Option<crate::sidebar::Target> {
+        workspace.read_with(cx, |workspace, _| {
+            workspace.reorder.as_ref().map(|reorder| reorder.target)
+        })
+    }
+
+    fn slot(pinned: bool, index: usize) -> Option<crate::sidebar::Target> {
+        Some(crate::sidebar::Target { pinned, index })
+    }
+
+    /// Five pinned servers a1..a5 and two unpinned ones b1, b2, in this order.
+    fn open_many<'a>(
+        dir: &std::path::Path,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Workspace>, &'a mut VisualTestContext) {
+        let mut text = String::new();
+        for (id, favorite) in [
+            ("a1", true),
+            ("a2", true),
+            ("a3", true),
+            ("a4", true),
+            ("a5", true),
+            ("b1", false),
+            ("b2", false),
+        ] {
+            text.push_str(&format!(
+                "[[servers]]\nid = \"{id}\"\nname = \"{id}\"\nhost = \"h\"\nport = 22\nuser = \"u\"\nfavorite = {favorite}\n[servers.auth]\nkind = \"password\"\n\n"
+            ));
+        }
+        fs::write(dir.join("servers.toml"), text).unwrap();
+        dev::TEST_CONFIG.with(|config| *config.borrow_mut() = Some(dir.to_path_buf()));
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::new(None, None, window, cx));
+        cx.run_until_parked();
+        (workspace, cx)
+    }
+
+    fn ids(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<String> {
+        order(workspace, cx)
+            .into_iter()
+            .map(|(id, pinned)| format!("{}{id}", if pinned { "*" } else { "" }))
+            .collect()
     }
 
     #[gpui::test]
@@ -1423,46 +1723,165 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn dragging_a_row_moves_and_pins_it_and_saves(cx: &mut TestAppContext) {
+    async fn a_card_dragged_by_one_and_six_tenths_rows_targets_two_slots_further(
+        cx: &mut TestAppContext,
+    ) {
         let dir = tempfile::tempdir().unwrap();
-        let (workspace, cx) = open(dir.path(), cx);
-        let selected = workspace.read_with(cx, |workspace, _| workspace.selected.clone());
-
-        // Fixture (unpinned) onto the top of the first pinned row.
-        let from = cx.debug_bounds("server-row-id-fixture").unwrap().center();
-        let target = cx.debug_bounds("server-row-id-bravo").unwrap();
-        drag(cx, from, point(target.center().x, target.top() + px(8.)));
-        let expected = [
-            pair("id-fixture", true),
-            pair("id-bravo", true),
-            pair("id-zeta", true),
-            pair("id-beta", false),
-        ];
-        assert_eq!(order(&workspace, cx), expected);
-        assert_eq!(saved(dir.path()), expected);
+        let (workspace, cx) = open_many(dir.path(), cx);
+        let start = grab(cx, "a2");
+        assert_eq!(target(&workspace, cx), slot(true, 1));
+        let row = crate::sidebar::ROW_H;
+        let at = |rows: f32| point(start.x, start.y + px(rows * row));
+        carry(cx, at(0.4));
+        assert_eq!(target(&workspace, cx), slot(true, 1));
+        carry(cx, at(0.6));
+        assert_eq!(target(&workspace, cx), slot(true, 2));
+        carry(cx, at(1.4));
+        assert_eq!(target(&workspace, cx), slot(true, 2));
+        carry(cx, at(1.6));
+        assert_eq!(target(&workspace, cx), slot(true, 3));
+        release(cx, at(1.6));
+        let expected = ["*a1", "*a3", "*a4", "*a2", "*a5", "b1", "b2"];
+        assert_eq!(ids(&workspace, cx), expected);
+        let saved = config::load(dir.path()).unwrap();
         assert_eq!(
-            workspace.read_with(cx, |workspace, _| workspace.selected.clone()),
-            selected
+            saved
+                .iter()
+                .map(|server| server.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a1", "a3", "a4", "a2", "a5", "b1", "b2"]
         );
+        assert!(workspace.read_with(cx, |workspace, _| workspace.reorder.is_none()));
+        assert!(!cx.update(|_, cx| cx.has_active_drag()));
+    }
+
+    #[gpui::test]
+    async fn crossing_the_divider_changes_the_group_and_saves_the_pin(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (workspace, cx) = open_many(dir.path(), cx);
+        let start = grab(cx, "a5");
+        assert_eq!(target(&workspace, cx), slot(true, 4));
+        // Below the last pinned slot and the divider: the unpinned group. The open
+        // slot moves with the card, so the card ends up over the group's second slot.
+        let row = crate::sidebar::ROW_H;
+        let at = |rows: f32| point(start.x, start.y + px(rows * row));
+        carry(cx, at(0.3));
+        assert_eq!(target(&workspace, cx), slot(true, 4));
+        carry(cx, at(1.2));
+        assert_eq!(target(&workspace, cx), slot(false, 1));
+        carry(cx, at(1.5));
+        assert_eq!(target(&workspace, cx), slot(false, 1));
+        // The divider is crossed back once the card is above its shifted position.
+        carry(cx, at(-0.5));
+        assert_eq!(target(&workspace, cx), slot(true, 4));
+        carry(cx, at(2.6));
+        assert_eq!(target(&workspace, cx), slot(false, 2));
+        release(cx, at(2.6));
+        assert_eq!(
+            ids(&workspace, cx),
+            ["*a1", "*a2", "*a3", "*a4", "b1", "b2", "a5"]
+        );
+        let saved = config::load(dir.path()).unwrap();
+        assert_eq!(
+            saved
+                .iter()
+                .map(|server| (server.id.as_str(), server.pinned))
+                .collect::<Vec<_>>(),
+            [
+                ("a1", true),
+                ("a2", true),
+                ("a3", true),
+                ("a4", true),
+                ("b1", false),
+                ("b2", false),
+                ("a5", false)
+            ]
+        );
+        // An unpinned card dragged over the top of the pinned group pins it.
+        grab(cx, "b2");
+        let top = point(px(100.), row_bounds(cx, "a1").top() + px(4.));
+        carry(cx, top);
+        assert_eq!(target(&workspace, cx), slot(true, 0));
+        release(cx, top);
+        assert_eq!(
+            ids(&workspace, cx),
+            ["*b2", "*a1", "*a2", "*a3", "*a4", "b1", "a5"]
+        );
+    }
+
+    #[gpui::test]
+    async fn releasing_outside_the_list_or_pressing_escape_cancels_without_saving(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (workspace, cx) = open_many(dir.path(), cx);
+        cx.update(|_, cx| bind_keys(cx));
+        let before = fs::read_to_string(dir.path().join("servers.toml")).unwrap();
+        let initial = ids(&workspace, cx);
+
+        // Released over the main area.
+        let start = grab(cx, "a2");
+        carry(cx, point(start.x, start.y + px(100.)));
+        assert_eq!(target(&workspace, cx), slot(true, 3));
+        let outside = point(px(600.), px(300.));
+        carry(cx, outside);
+        release(cx, outside);
+        assert_eq!(ids(&workspace, cx), initial);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("servers.toml")).unwrap(),
+            before
+        );
+        assert!(workspace.read_with(cx, |workspace, _| workspace.reorder.is_none()));
         assert!(!cx.update(|_, cx| cx.has_active_drag()));
 
-        // Bravo (pinned) to the end of the unpinned group.
-        let from = cx.debug_bounds("server-row-id-bravo").unwrap().center();
-        let end = cx.debug_bounds("end-unpinned").unwrap();
-        drag(cx, from, point(end.center().x, end.top() + px(4.)));
-        let expected = [
-            pair("id-fixture", true),
-            pair("id-zeta", true),
-            pair("id-beta", false),
-            pair("id-bravo", false),
-        ];
-        assert_eq!(order(&workspace, cx), expected);
-        assert_eq!(saved(dir.path()), expected);
+        // Escape during the drag.
+        let start = grab(cx, "a3");
+        carry(cx, point(start.x, start.y + px(100.)));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(workspace.read_with(cx, |workspace, _| workspace.reorder.is_none()));
+        assert!(!cx.update(|_, cx| cx.has_active_drag()));
+        release(cx, point(start.x, start.y + px(100.)));
+        assert_eq!(ids(&workspace, cx), initial);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("servers.toml")).unwrap(),
+            before
+        );
+    }
 
-        // Dropping a row onto itself changes nothing.
-        let own = cx.debug_bounds("server-row-id-beta").unwrap();
-        drag(cx, own.center(), point(own.center().x, own.top() + px(8.)));
-        assert_eq!(order(&workspace, cx), expected);
+    #[gpui::test]
+    async fn dropping_a_card_on_its_own_slot_changes_nothing(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (workspace, cx) = open_many(dir.path(), cx);
+        let initial = ids(&workspace, cx);
+        let start = grab(cx, "a3");
+        carry(cx, point(start.x, start.y + px(10.)));
+        assert_eq!(target(&workspace, cx), slot(true, 2));
+        release(cx, point(start.x, start.y + px(10.)));
+        assert_eq!(ids(&workspace, cx), initial);
+    }
+
+    #[gpui::test]
+    async fn without_pinned_servers_the_heading_takes_a_dropped_card(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (workspace, cx) = open(dir.path(), cx);
+        workspace.update(cx, |workspace, cx| {
+            workspace.toggle_pin("id-bravo", cx);
+        });
+        cx.run_until_parked();
+        workspace.update(cx, |workspace, cx| {
+            workspace.toggle_pin("id-zeta", cx);
+        });
+        cx.run_until_parked();
+        // Everything is unpinned now. Dragging above the list targets the pinned group.
+        let first = order(&workspace, cx)[0].0.clone();
+        assert!(!order(&workspace, cx)[0].1);
+        let start = grab(cx, &first);
+        carry(cx, point(start.x, px(40.)));
+        assert_eq!(target(&workspace, cx), slot(true, 0));
+        release(cx, point(start.x, px(40.)));
+        assert!(order(&workspace, cx)[0].1);
+        assert_eq!(order(&workspace, cx)[0].0, first);
     }
 
     #[gpui::test]

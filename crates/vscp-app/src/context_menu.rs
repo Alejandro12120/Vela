@@ -6,7 +6,7 @@ use gpui::{
 };
 
 use crate::{
-    components::{menu::menu_item, modal},
+    components::{menu::menu_item, modal, motion},
     icons::IconName,
     pane::Pane,
     theme::Theme,
@@ -200,7 +200,7 @@ impl Menu {
             anchored()
                 .position(self.position)
                 .snap_to_window_with_margin(px(8.))
-                .child(panel),
+                .child(motion::appear(panel, "file-menu-appear", 3., motion::FAST)),
         )
         .with_priority(1)
         .into_any_element()

@@ -176,9 +176,26 @@ pub fn edit_root() -> io::Result<PathBuf> {
         .ok_or_else(|| io::Error::other("No se encuentra la carpeta de caché"))
 }
 
-/// Opens the `⋯` menu of the server with this display name at startup.
+/// Opens the floating menu of the server with this display name at its row's centre at startup.
 pub fn row_menu() -> Option<String> {
     value("VSCP_DEV_ROW_MENU")
+}
+
+/// `<name>:<dy>` shows the card of the server with that display name dragged
+/// `dy` px from its slot and holds it there, for visual checks.
+pub fn drag() -> Option<(String, f32)> {
+    let value = value("VSCP_DEV_DRAG")?;
+    let (name, dy) = value.rsplit_once(':')?;
+    Some((name.to_owned(), dy.parse().ok()?))
+}
+
+/// `1` or `0` overrides the system "reduce motion" setting.
+pub fn reduce_motion() -> Option<bool> {
+    match value("VSCP_DEV_REDUCE_MOTION")?.as_str() {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
 }
 
 pub enum FormRequest {

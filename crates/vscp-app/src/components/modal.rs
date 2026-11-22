@@ -1,8 +1,9 @@
 use gpui::{
-    AnyElement, Context, Div, FocusHandle, FontWeight, Rgba, SharedString, actions, div, point,
-    prelude::*, px,
+    Animation, AnimationExt, AnyElement, Context, Div, FocusHandle, FontWeight, Rgba, SharedString,
+    actions, div, ease_out_quint, point, prelude::*, px,
 };
 
+use super::motion;
 use crate::{
     icons::{IconName, icon},
     theme::Theme,
@@ -27,6 +28,7 @@ pub fn overlay<T: 'static>(
     cx: &Context<T>,
 ) -> Div {
     let title = title.into();
+    let overlay = theme.overlay;
     div()
         .absolute()
         .inset_0()
@@ -34,9 +36,16 @@ pub fn overlay<T: 'static>(
         .flex()
         .items_center()
         .justify_center()
-        .bg(theme.overlay)
         .occlude()
         .child(
+            // The backdrop fades in on its own, so the dialog is not dimmed by it.
+            div().absolute().inset_0().with_animation(
+                "modal-backdrop",
+                Animation::new(motion::FAST).with_easing(ease_out_quint()),
+                move |backdrop, t| backdrop.bg(overlay.opacity(t)),
+            ),
+        )
+        .child(motion::appear(
             div()
                 .id("modal")
                 .role(gpui::Role::Dialog)
@@ -106,5 +115,8 @@ pub fn overlay<T: 'static>(
                         .child(body),
                 )
                 .child(footer),
-        )
+            "modal-dialog",
+            6.,
+            motion::BASE,
+        ))
 }

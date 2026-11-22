@@ -8,15 +8,15 @@ use std::{
 };
 
 use gpui::{
-    App, BackgroundExecutor, ClickEvent, Context, Div, ElementId, Entity, FocusHandle, Focusable,
-    FontFeatures, FontWeight, KeyBinding, MouseButton, MouseDownEvent, Pixels, Render, Role,
-    ScrollStrategy, Stateful, UniformListScrollHandle, Window, actions, div, prelude::*, px,
+    AnyElement, App, BackgroundExecutor, ClickEvent, Context, Div, ElementId, Entity, FocusHandle,
+    Focusable, FontFeatures, FontWeight, KeyBinding, MouseButton, MouseDownEvent, Pixels, Render,
+    Role, ScrollStrategy, Stateful, UniformListScrollHandle, Window, actions, div, prelude::*, px,
     uniform_list,
 };
 use vscp_core::{EntryKind, Error, Session, local};
 
 use crate::{
-    components::text_input::TextInput,
+    components::{motion, text_input::TextInput},
     dev, file_metadata,
     icons::{IconName, icon},
     theme::Theme,
@@ -238,7 +238,21 @@ pub struct Pane {
     menu: Option<Menu>,
     branch_generation: u64,
     branch_revisions: HashMap<Arc<Path>, u64>,
+    /// The last folder toggled, so only its chevron turns. Rows drawn later start turned.
+    toggled: Option<(Arc<Path>, bool, Instant)>,
+    /// The last folder expanded by the user. Rows below it fade in while this is fresh.
+    expansion: Option<Expansion>,
+    expansions: u64,
 }
+
+struct Expansion {
+    folder: Arc<Path>,
+    generation: u64,
+    since: Instant,
+}
+
+/// How long after an expansion its rows may still fade in, which covers a slow listing.
+const FADE_WINDOW: std::time::Duration = std::time::Duration::from_millis(1500);
 
 impl Pane {
     pub fn new(
@@ -276,6 +290,9 @@ impl Pane {
             menu: None,
             branch_generation: 0,
             branch_revisions: HashMap::new(),
+            toggled: None,
+            expansion: None,
+            expansions: 0,
         }
     }
 
@@ -549,6 +566,14 @@ impl Pane {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
+        self.toggled = Some((path.clone(), expanded, Instant::now()));
+        self.expansions += 1;
+        // Collapsing is instant. Expanding fades the new rows in.
+        self.expansion = expanded.then(|| Expansion {
+            folder: path.clone(),
+            generation: self.expansions,
+            since: Instant::now(),
+        });
         self.tree.set_expanded(path, expanded);
         self.check_copy_selection();
         self.remember();
@@ -702,6 +727,30 @@ impl Pane {
             )
     }
 
+    /// A row, fading in when it appeared because the user expanded a folder.
+    fn row_with_fade(&self, index: usize, style: &RowStyle, cx: &Context<Self>) -> AnyElement {
+        let row = self.row(index, style, cx);
+        let path = &self.tree.rows[index].path;
+        match &self.expansion {
+            Some(expansion)
+                if expansion.since.elapsed() < FADE_WINDOW
+                    && path.starts_with(&expansion.folder)
+                    && **path != *expansion.folder =>
+            {
+                motion::fade(
+                    row,
+                    (
+                        ElementId::Path(path.clone()),
+                        format!("fade-{}", expansion.generation),
+                    ),
+                    motion::FAST,
+                )
+                .into_any_element()
+            }
+            _ => row.into_any_element(),
+        }
+    }
+
     fn row(&self, index: usize, style: &RowStyle, cx: &Context<Self>) -> Stateful<Div> {
         let RowStyle {
             theme,
@@ -751,15 +800,18 @@ impl Pane {
                 .aria_label(if expanded { "Contraer" } else { "Expandir" })
                 .aria_expanded(expanded)
                 .cursor_pointer()
-                .child(
-                    icon(if expanded {
-                        IconName::ChevronDown
-                    } else {
-                        IconName::ChevronRight
-                    })
-                    .size(px(14.))
-                    .text_color(theme.secondary_text),
-                )
+                .child(motion::chevron(
+                    icon(IconName::ChevronRight)
+                        .size(px(14.))
+                        .text_color(theme.secondary_text),
+                    (ElementId::Path(row.path.clone()), "chevron"),
+                    expanded,
+                    self.toggled.as_ref().is_some_and(|(toggled, state, at)| {
+                        *toggled == row.path
+                            && *state == expanded
+                            && at.elapsed() < motion::FAST * 2
+                    }),
+                ))
                 .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                     cx.stop_propagation();
                     this.list_focus.focus(window, cx);
@@ -902,7 +954,9 @@ impl Render for Pane {
         };
         let list = uniform_list("rows", self.tree.rows.len(), move |range, _, cx| {
             entity.update(cx, |this, cx| {
-                range.map(|index| this.row(index, &style, cx)).collect()
+                range
+                    .map(|index| this.row_with_fade(index, &style, cx))
+                    .collect()
             })
         })
         .flex_1()
@@ -961,7 +1015,7 @@ impl Render for Pane {
             }))
             .child(self.drop_zone(self.toolbar(theme, cx).id("pane-toolbar"), None, theme, cx))
             .when_some(self.path_error.clone(), |pane, error| {
-                pane.child(
+                pane.child(motion::appear(
                     div()
                         .px_2()
                         .py_1()
@@ -969,7 +1023,10 @@ impl Render for Pane {
                         .text_color(theme.danger)
                         .bg(theme.danger_bg)
                         .child(error),
-                )
+                    "path-error",
+                    -4.,
+                    motion::FAST,
+                ))
             })
             .child(self.drop_zone(columns.header(theme).id("column-headers"), None, theme, cx))
             .child(

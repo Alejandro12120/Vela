@@ -7,8 +7,9 @@ use gpui::{
 use vscp_core::{Session, config::Server};
 
 use crate::{
-    components::button::{Variant, button},
+    components::button::{Variant, icon_text_button},
     dev,
+    icons::IconName,
     pane::{Pane, PaneMemory, Source},
     theme::Theme,
     transfers_view::{TransferOverlay, Transfers},
@@ -197,10 +198,12 @@ impl Panes {
                             .child(format!("{}@{}", server.user, server.host)),
                     )
                     .child(
-                        button(
+                        icon_text_button(
                             "disconnect",
+                            IconName::Unplug,
                             "Desconectar",
                             Variant::Secondary,
+                            None,
                             theme,
                             disconnect,
                         )

@@ -1,3 +1,4 @@
+mod accessibility;
 mod components;
 mod context_menu;
 mod dev;
@@ -50,6 +51,7 @@ fn main() {
             if let Some(appearance) = dev::appearance() {
                 cx.set_window_appearance(Some(appearance));
             }
+            cx.set_reduce_motion(accessibility::reduce_motion());
             dev::trace_keystrokes(cx);
             pane::finder::initialize(cx);
             workspace::bind_keys(cx);

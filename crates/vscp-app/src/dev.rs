@@ -258,15 +258,26 @@ pub fn open_file(path: &std::path::Path, editor: Option<&std::path::Path>) -> io
     if launches_suppressed() {
         return Ok(());
     }
-    let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
-    let mut command = std::process::Command::new("/usr/bin/open");
-    if vscp_core::local::is_text(&real)? {
-        match editor {
-            Some(editor) => command.arg("-a").arg(editor),
-            None => command.arg("-t"),
-        };
+    #[cfg(target_os = "macos")]
+    {
+        let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+        let mut command = std::process::Command::new("/usr/bin/open");
+        if vscp_core::local::is_text(&real)? {
+            match editor {
+                Some(editor) => command.arg("-a").arg(editor),
+                None => command.arg("-t"),
+            };
+        }
+        run(command.arg(path), "No se pudo abrir el archivo")
     }
-    run(command.arg(path), "No se pudo abrir el archivo")
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = editor;
+        run(
+            std::process::Command::new("xdg-open").arg(path),
+            "No se pudo abrir el archivo",
+        )
+    }
 }
 
 /// Opens `path` with its default application, whatever its type.
@@ -274,10 +285,20 @@ pub fn open_default(path: &std::path::Path) -> io::Result<()> {
     if launches_suppressed() {
         return Ok(());
     }
-    run(
-        std::process::Command::new("/usr/bin/open").arg(path),
-        "No se pudo abrir el archivo",
-    )
+    #[cfg(target_os = "macos")]
+    {
+        run(
+            std::process::Command::new("/usr/bin/open").arg(path),
+            "No se pudo abrir el archivo",
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        run(
+            std::process::Command::new("xdg-open").arg(path),
+            "No se pudo abrir el archivo",
+        )
+    }
 }
 
 /// Starts a new Kitty running `ssh` with `args`.
@@ -285,12 +306,24 @@ pub fn open_kitty_ssh(args: &[std::ffi::OsString]) -> io::Result<()> {
     if launches_suppressed() {
         return Ok(());
     }
-    run(
-        std::process::Command::new("/usr/bin/open")
-            .args(["-na", "kitty", "--args", "/usr/bin/ssh"])
-            .args(args),
-        "No se pudo abrir Kitty",
-    )
+    #[cfg(target_os = "macos")]
+    {
+        run(
+            std::process::Command::new("/usr/bin/open")
+                .args(["-na", "kitty", "--args", "/usr/bin/ssh"])
+                .args(args),
+            "No se pudo abrir Kitty",
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        run(
+            std::process::Command::new("kitty")
+                .args(["--detach", "/usr/bin/ssh"])
+                .args(args),
+            "No se pudo abrir Kitty",
+        )
+    }
 }
 
 fn launches_suppressed() -> bool {

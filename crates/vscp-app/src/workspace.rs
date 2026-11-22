@@ -61,13 +61,13 @@ actions!(
 
 pub fn bind_keys(cx: &mut gpui::App) {
     cx.bind_keys([
-        KeyBinding::new("cmd-1", ShowFiles, Some("Workspace")),
-        KeyBinding::new("cmd-2", ShowTerminal, Some("Workspace")),
-        KeyBinding::new("cmd-,", OpenSettings, Some("Workspace")),
+        crate::keybindings::binding(cx, "secondary-1", ShowFiles, Some("Workspace")),
+        crate::keybindings::binding(cx, "secondary-2", ShowTerminal, Some("Workspace")),
+        crate::keybindings::binding(cx, "secondary-,", OpenSettings, Some("Workspace")),
         KeyBinding::new("tab", Next, Some("Workspace")),
         KeyBinding::new("shift-tab", Previous, Some("Workspace")),
         KeyBinding::new("escape", DismissMenu, Some("Workspace")),
-        KeyBinding::new("cmd-s", ToggleSidebar, Some("Workspace")),
+        crate::keybindings::binding(cx, "secondary-s", ToggleSidebar, Some("Workspace")),
         KeyBinding::new("tab", modal::Next, Some("RowMenu")),
         KeyBinding::new("down", modal::Next, Some("RowMenu")),
         KeyBinding::new("shift-tab", modal::Previous, Some("RowMenu")),
@@ -1238,7 +1238,7 @@ impl Workspace {
             true,
             theme,
         )
-        .aria_keyshortcuts("Meta+S")
+        .aria_keyshortcuts(crate::keybindings::shortcut("Meta+S", "Control+S"))
         .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx)))
     }
 
@@ -1473,7 +1473,7 @@ fn technical_text(text: String, theme: Theme) -> gpui::Div {
         .p_2()
         .rounded(px(6.))
         .bg(theme.selection)
-        .font_family("Menlo")
+        .font_family(crate::theme::monospace())
         .text_size(px(12.))
         .child(text)
 }

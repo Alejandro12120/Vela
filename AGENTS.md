@@ -90,3 +90,9 @@ For example, from the repository root in a macOS graphical session:
   VSCP_CONFIG_DIR="$config_dir" VSCP_DEV_LOG=1 "$CARGO_TARGET_DIR/release/vscp"
 )
 ```
+
+## Linux (Arch, Wayland)
+
+Build in a disposable `archlinux:latest` container when Podman or Docker is available, mounting the repository at `/src` and using a container-only target directory. The container needs `base-devel rustup pkgconf wayland libxkbcommon libxkbcommon-x11 vulkan-icd-loader vulkan-headers fontconfig freetype2 openssh openbsd-netcat python libx11 libxcb`; `rustup` then installs the toolchain from `rust-toolchain.toml`. Without a container runtime, build on the host with a disposable `CARGO_TARGET_DIR`, `CARGO_BUILD_JOBS=1` and `CARGO_INCREMENTAL=0`; the host needs the same runtime libraries plus a Vulkan ICD or Mesa EGL.
+
+Run the dev release binary in a Wayland session. `VSCP_CONFIG_DIR` isolates the configuration and `VSCP_DEV_LOG=1` prints the usual diagnostics. The window sets the `vscp` app id for Hyprland rules. On Linux, Cmd shortcuts are Ctrl (`secondary-`), and the integrated terminal uses Ctrl+Shift+C, Ctrl+Shift+V and Ctrl+Shift+A so Ctrl+C, Ctrl+V and Ctrl+A reach the shell. Files open with `xdg-open`, Kitty launches with `kitty --detach`, and «Mostrar en la carpeta» opens the parent folder. Dolphin drag-out and the file clipboard are still pending in F9.

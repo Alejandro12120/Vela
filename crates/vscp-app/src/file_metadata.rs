@@ -96,11 +96,11 @@ pub fn permissions(entry: &Entry) -> String {
         EntryKind::Directory => 'd',
         EntryKind::Symlink => 'l',
         EntryKind::File => '-',
-        EntryKind::Other => match mode & libc::S_IFMT as u32 {
-            m if m == libc::S_IFIFO as u32 => 'p',
-            m if m == libc::S_IFSOCK as u32 => 's',
-            m if m == libc::S_IFCHR as u32 => 'c',
-            m if m == libc::S_IFBLK as u32 => 'b',
+        EntryKind::Other => match mode & 0o170000 {
+            0o010000 => 'p',
+            0o140000 => 's',
+            0o020000 => 'c',
+            0o060000 => 'b',
             _ => '?',
         },
     };

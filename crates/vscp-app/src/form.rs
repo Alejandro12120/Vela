@@ -597,7 +597,7 @@ fn key_row(
             Some(note) => div().truncate().child(note),
             None => div()
                 .truncate()
-                .font_family("Menlo")
+                .font_family(crate::theme::monospace())
                 .child(fingerprint.clone()),
         },
         theme,
@@ -685,7 +685,7 @@ fn file_card(path: &Path, key: Option<&AgentKey>, theme: Theme) -> Div {
                 &key.key_type,
                 div()
                     .truncate()
-                    .font_family("Menlo")
+                    .font_family(crate::theme::monospace())
                     .child(short_fingerprint(&key.fingerprint())),
                 theme,
             ))

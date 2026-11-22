@@ -1,6 +1,10 @@
+#[cfg(target_os = "macos")]
 use std::path::{Path, PathBuf};
 
-use gpui::{PathPromptOptions, prelude::*};
+#[cfg(target_os = "macos")]
+use gpui::PathPromptOptions;
+use gpui::prelude::*;
+#[cfg(target_os = "macos")]
 use vscp_core::settings::Settings;
 
 use super::{AnyElement, Context, Dialog, Theme, Variant, Window, Workspace, button, div, modal};
@@ -53,6 +57,7 @@ impl Workspace {
         .detach();
     }
 
+    #[cfg(target_os = "macos")]
     fn choose_editor(&mut self, window: &Window, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -85,6 +90,7 @@ impl Workspace {
         .detach();
     }
 
+    #[cfg(target_os = "macos")]
     fn save_editor(&mut self, editor: Option<PathBuf>, window: &Window, cx: &mut Context<Self>) {
         let Some(dir) = self.dir.clone() else { return };
         if self.saving {
@@ -116,55 +122,64 @@ impl Workspace {
     }
 
     pub(super) fn settings_dialog(&self, theme: Theme, cx: &Context<Self>) -> AnyElement {
-        let editor = self.settings.editor.as_ref();
         let terminal = self
             .active_terminal_settings(cx)
             .or(self.kitty_settings.as_ref());
-        let body = div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .items_start()
-            .child("Editor para archivos remotos")
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(button(
-                        "settings-default",
-                        "Aplicación predeterminada",
-                        if editor.is_none() {
-                            Variant::Selected
-                        } else {
-                            Variant::Secondary
-                        },
-                        theme,
-                        cx.listener(|this, _, window, cx| this.save_editor(None, window, cx)),
-                    ))
-                    .child(button(
-                        "settings-choose",
-                        "Elegir aplicación…",
-                        if editor.is_some() {
-                            Variant::Selected
-                        } else {
-                            Variant::Secondary
-                        },
-                        theme,
-                        cx.listener(|this, _, window, cx| {
-                            if !this.saving {
-                                this.choose_editor(window, cx);
-                            }
-                        }),
-                    )),
-            )
-            .when_some(editor, |body, editor| {
-                body.child(
+        let mut body = div().flex().flex_col().gap_2().items_start();
+        #[cfg(target_os = "macos")]
+        {
+            let editor = self.settings.editor.as_ref();
+            body = body
+                .child("Editor para archivos remotos")
+                .child(
                     div()
-                        .text_color(theme.secondary_text)
-                        .child(editor.display().to_string()),
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(button(
+                            "settings-default",
+                            "Aplicación predeterminada",
+                            if editor.is_none() {
+                                Variant::Selected
+                            } else {
+                                Variant::Secondary
+                            },
+                            theme,
+                            cx.listener(|this, _, window, cx| this.save_editor(None, window, cx)),
+                        ))
+                        .child(button(
+                            "settings-choose",
+                            "Elegir aplicación…",
+                            if editor.is_some() {
+                                Variant::Selected
+                            } else {
+                                Variant::Secondary
+                            },
+                            theme,
+                            cx.listener(|this, _, window, cx| {
+                                if !this.saving {
+                                    this.choose_editor(window, cx);
+                                }
+                            }),
+                        )),
                 )
-            })
+                .when_some(editor, |body, editor| {
+                    body.child(
+                        div()
+                            .text_color(theme.secondary_text)
+                            .child(editor.display().to_string()),
+                    )
+                });
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            body = body.child(
+                div()
+                    .text_color(theme.secondary_text)
+                    .child("Los archivos se abren con la aplicación predeterminada (xdg-open)."),
+            );
+        }
+        let body = body
             .when_some(self.settings_error.clone(), |body, error| {
                 body.child(div().text_color(theme.danger).child(error))
             })
@@ -210,6 +225,7 @@ impl Workspace {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn is_application(path: &Path) -> bool {
     path.is_absolute()
         && path

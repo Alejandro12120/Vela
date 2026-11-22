@@ -90,3 +90,25 @@ impl Theme {
         }
     }
 }
+
+pub fn monospace() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "Menlo"
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        use std::sync::OnceLock;
+        static FAMILY: OnceLock<String> = OnceLock::new();
+        FAMILY.get_or_init(|| {
+            std::process::Command::new("fc-match")
+                .args(["-f", "%{family[0]}", "monospace"])
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+                .filter(|family| !family.is_empty())
+                .unwrap_or_else(|| "DejaVu Sans Mono".into())
+        })
+    }
+}

@@ -83,21 +83,21 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", CommitRename, Some("FileRename > TextInput")),
         KeyBinding::new("escape", CancelRename, Some("FileRename > TextInput")),
         KeyBinding::new("escape", DismissFileMenu, Some("FilePane")),
-        KeyBinding::new("cmd-shift-n", NewFolder, Some("FileList")),
-        KeyBinding::new("cmd-backspace", DeleteFiles, Some("FileList")),
+        crate::keybindings::binding(cx, "secondary-shift-n", NewFolder, Some("FileList")),
+        crate::keybindings::binding(cx, "secondary-backspace", DeleteFiles, Some("FileList")),
         KeyBinding::new("up", MoveUp, Some("FileList")),
         KeyBinding::new("down", MoveDown, Some("FileList")),
         KeyBinding::new("shift-up", ExtendUp, Some("FileList")),
         KeyBinding::new("shift-down", ExtendDown, Some("FileList")),
         KeyBinding::new("right", Expand, Some("FileList")),
         KeyBinding::new("left", Collapse, Some("FileList")),
-        KeyBinding::new("cmd-down", OpenFolder, Some("FileList")),
-        KeyBinding::new("cmd-up", Parent, Some("FilePane")),
-        KeyBinding::new("cmd-[", Back, Some("FilePane")),
-        KeyBinding::new("cmd-]", Forward, Some("FilePane")),
-        KeyBinding::new("cmd-r", Refresh, Some("FilePane")),
-        KeyBinding::new("cmd-shift-.", ToggleHidden, Some("FilePane")),
-        KeyBinding::new("cmd-a", SelectAll, Some("FileList")),
+        crate::keybindings::binding(cx, "secondary-down", OpenFolder, Some("FileList")),
+        crate::keybindings::binding(cx, "secondary-up", Parent, Some("FilePane")),
+        crate::keybindings::binding(cx, "secondary-[", Back, Some("FilePane")),
+        crate::keybindings::binding(cx, "secondary-]", Forward, Some("FilePane")),
+        crate::keybindings::binding(cx, "secondary-r", Refresh, Some("FilePane")),
+        crate::keybindings::binding(cx, "secondary-shift-.", ToggleHidden, Some("FilePane")),
+        crate::keybindings::binding(cx, "secondary-a", SelectAll, Some("FileList")),
         KeyBinding::new("tab", SwitchPane, Some("FilePane")),
         KeyBinding::new("shift-tab", SwitchPane, Some("FilePane")),
         KeyBinding::new("enter", SubmitPath, Some("PathBar > TextInput")),
@@ -1279,8 +1279,10 @@ impl Columns {
             }),
             self.modified
                 .then(|| Self::date_cell(file_metadata::modified(entry.mtime, now))),
-            self.permissions
-                .then(|| Self::mode_cell(file_metadata::permissions(entry)).font_family("Menlo")),
+            self.permissions.then(|| {
+                Self::mode_cell(file_metadata::permissions(entry))
+                    .font_family(crate::theme::monospace())
+            }),
         ]
         .into_iter()
         .flatten()

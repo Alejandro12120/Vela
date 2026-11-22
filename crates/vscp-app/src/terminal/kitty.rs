@@ -34,9 +34,10 @@ impl Default for Kitty {
         // https://github.com/kovidgoyal/kitty/blob/master/kitty/options/definition.py
         // On macOS, kitty resolves its default “monospace” family to Menlo.
         // https://github.com/kovidgoyal/kitty/blob/master/kitty/fonts/core_text.py
+        // On Linux the family comes from fontconfig.
         Self {
             path: None,
-            family: "Menlo".into(),
+            family: crate::theme::monospace().into(),
             variants: Default::default(),
             size: 11.,
             palette: Palette::default(),
@@ -49,16 +50,17 @@ impl Default for Kitty {
 
 impl Kitty {
     pub fn resolve_family(&mut self, names: &[String]) {
-        if self.family != "Menlo"
+        let fallback = crate::theme::monospace();
+        if !self.family.eq_ignore_ascii_case(fallback)
             && !names
                 .iter()
                 .any(|name| name.eq_ignore_ascii_case(&self.family))
         {
             crate::dev::log(format!(
-                "Terminal: fuente {} no instalada. Se usa Menlo.",
+                "Terminal: fuente {} no instalada. Se usa {fallback}.",
                 self.family
             ));
-            self.family = "Menlo".into();
+            self.family = fallback.into();
         }
     }
 
@@ -176,7 +178,7 @@ fn family(value: &str) -> Option<String> {
     };
     match value {
         "" | "auto" => None,
-        "monospace" => Some("Menlo".into()),
+        "monospace" => Some(crate::theme::monospace().into()),
         _ => Some(value.into()),
     }
 }
@@ -264,7 +266,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let settings = Kitty::read(&dir.path().join("kitty.conf"));
         assert!(settings.path.is_none());
-        assert_eq!(settings.family, "Menlo");
+        assert_eq!(settings.family, crate::theme::monospace());
         assert_eq!(settings.size, 11.);
         assert_eq!(settings.history, 5000);
         assert_eq!(settings.palette.foreground, 0xdddddd);

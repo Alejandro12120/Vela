@@ -983,7 +983,11 @@ impl Workspace {
                     .child(action(
                         "edit-reveal",
                         IconName::FolderOpen,
-                        "Mostrar en Finder",
+                        if cfg!(target_os = "macos") {
+                            "Mostrar en Finder"
+                        } else {
+                            "Mostrar en la carpeta"
+                        },
                         None,
                         Workspace::reveal_edit,
                     ))
@@ -1207,14 +1211,30 @@ fn name(target: &Target) -> String {
 }
 
 fn reveal(path: &Path) -> io::Result<()> {
-    if std::process::Command::new("/usr/bin/open")
-        .arg("-R")
-        .arg(path)
-        .status()?
-        .success()
+    #[cfg(target_os = "macos")]
     {
-        Ok(())
-    } else {
-        Err(io::Error::other("No se pudo mostrar la copia en Finder"))
+        if std::process::Command::new("/usr/bin/open")
+            .arg("-R")
+            .arg(path)
+            .status()?
+            .success()
+        {
+            Ok(())
+        } else {
+            Err(io::Error::other("No se pudo mostrar la copia en Finder"))
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let folder = path.parent().unwrap_or(path);
+        if std::process::Command::new("xdg-open")
+            .arg(folder)
+            .status()?
+            .success()
+        {
+            Ok(())
+        } else {
+            Err(io::Error::other("No se pudo mostrar la carpeta"))
+        }
     }
 }

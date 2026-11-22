@@ -81,7 +81,7 @@ impl Menu {
                 Action::NewFolder,
                 IconName::FolderPlus,
                 "Nueva carpeta",
-                "⌘⇧N",
+                crate::keybindings::shortcut("⌘⇧N", "Ctrl+⇧N"),
                 true,
             ),
             Item::new(
@@ -115,7 +115,7 @@ impl Menu {
                 Action::Delete,
                 IconName::Trash,
                 "Eliminar…",
-                "⌘⌫",
+                crate::keybindings::shortcut("⌘⌫", "Ctrl+⌫"),
                 self.on_row && selected > 0,
             )
             .danger(),
@@ -126,7 +126,13 @@ impl Menu {
                 "F5",
                 self.on_row && selected > 0,
             ),
-            Item::new(Action::Refresh, IconName::Refresh, "Refrescar", "⌘R", true),
+            Item::new(
+                Action::Refresh,
+                IconName::Refresh,
+                "Refrescar",
+                crate::keybindings::shortcut("⌘R", "Ctrl+R"),
+                true,
+            ),
         ]);
         actions
     }

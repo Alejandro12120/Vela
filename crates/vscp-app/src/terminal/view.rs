@@ -36,9 +36,18 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("tab", Tab, Some("Terminal")),
         KeyBinding::new("shift-tab", BackTab, Some("Terminal")),
         KeyBinding::new("escape", Escape, Some("Terminal")),
-        KeyBinding::new("cmd-c", Copy, Some("Terminal")),
-        KeyBinding::new("cmd-v", Paste, Some("Terminal")),
-        KeyBinding::new("cmd-a", SelectAll, Some("Terminal")),
+    ]);
+    #[cfg(target_os = "macos")]
+    cx.bind_keys([
+        crate::keybindings::binding(cx, "cmd-c", Copy, Some("Terminal")),
+        crate::keybindings::binding(cx, "cmd-v", Paste, Some("Terminal")),
+        crate::keybindings::binding(cx, "cmd-a", SelectAll, Some("Terminal")),
+    ]);
+    #[cfg(not(target_os = "macos"))]
+    cx.bind_keys([
+        crate::keybindings::binding(cx, "ctrl-shift-c", Copy, Some("Terminal")),
+        crate::keybindings::binding(cx, "ctrl-shift-v", Paste, Some("Terminal")),
+        crate::keybindings::binding(cx, "ctrl-shift-a", SelectAll, Some("Terminal")),
     ]);
 }
 
@@ -80,7 +89,7 @@ impl TerminalView {
             terminal: None,
             settings: Kitty::default(),
             focus: cx.focus_handle(),
-            fonts: std::array::from_fn(|_| font("Menlo")),
+            fonts: std::array::from_fn(|_| font(crate::theme::monospace())),
             geometry: None,
             ime_bounds: None,
             last_logged_size: None,
@@ -727,9 +736,13 @@ mod tests {
     fn keyboard_routes_control_text_and_workspace_shortcuts(cx: &mut TestAppContext) {
         let (host, _, sink, cx) = open(cx);
         cx.simulate_input("a");
-        cx.simulate_keystrokes("tab escape enter ctrl-c cmd-c");
+        #[cfg(target_os = "macos")]
+        let copy = "cmd-c";
+        #[cfg(not(target_os = "macos"))]
+        let copy = "ctrl-shift-c";
+        cx.simulate_keystrokes(&format!("tab escape enter ctrl-c {copy}"));
         assert_eq!(*sink.lock().unwrap(), b"a\t\x1b\r\x03");
-        cx.simulate_keystrokes("cmd-1");
+        cx.simulate_keystrokes("secondary-1");
         assert!(host.read_with(cx, |host, _| host.view == SessionView::Files));
         assert_eq!(*sink.lock().unwrap(), b"a\t\x1b\r\x03");
     }

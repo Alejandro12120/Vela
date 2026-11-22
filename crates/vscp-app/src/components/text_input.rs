@@ -835,14 +835,21 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("right", Right, Some("TextInput")),
         KeyBinding::new("shift-left", SelectLeft, Some("TextInput")),
         KeyBinding::new("shift-right", SelectRight, Some("TextInput")),
-        KeyBinding::new("cmd-a", SelectAll, Some("TextInput")),
-        KeyBinding::new("cmd-v", Paste, Some("TextInput")),
-        KeyBinding::new("cmd-c", Copy, Some("TextInput")),
-        KeyBinding::new("cmd-x", Cut, Some("TextInput")),
         KeyBinding::new("home", Home, Some("TextInput")),
         KeyBinding::new("end", End, Some("TextInput")),
-        KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some("TextInput")),
     ]);
+    cx.bind_keys([
+        crate::keybindings::binding(cx, "secondary-a", SelectAll, Some("TextInput")),
+        crate::keybindings::binding(cx, "secondary-v", Paste, Some("TextInput")),
+        crate::keybindings::binding(cx, "secondary-c", Copy, Some("TextInput")),
+        crate::keybindings::binding(cx, "secondary-x", Cut, Some("TextInput")),
+    ]);
+    #[cfg(target_os = "macos")]
+    cx.bind_keys([KeyBinding::new(
+        "ctrl-cmd-space",
+        ShowCharacterPalette,
+        Some("TextInput"),
+    )]);
 }
 
 #[cfg(test)]

@@ -6,6 +6,7 @@ mod file_metadata;
 mod file_workspace;
 mod form;
 mod icons;
+mod keybindings;
 mod pane;
 #[cfg(target_os = "macos")]
 mod pasteboard_macos;
@@ -21,8 +22,8 @@ mod workspace;
 use std::time::Instant;
 
 use gpui::{
-    App, AppContext, Bounds, KeyBinding, Menu, MenuItem, QuitMode, TitlebarOptions,
-    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, actions, px, size,
+    App, AppContext, Bounds, Menu, MenuItem, QuitMode, TitlebarOptions, WindowBackgroundAppearance,
+    WindowBounds, WindowKind, WindowOptions, actions, px, size,
 };
 
 use workspace::Workspace;
@@ -59,7 +60,7 @@ fn main() {
             pane::bind_keys(cx);
             terminal::view::bind_keys(cx);
             components::text_input::bind_keys(cx);
-            cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
+            cx.bind_keys([keybindings::binding(cx, "secondary-q", Quit, None)]);
             cx.set_menus([Menu::new("vSCP").items([MenuItem::action("Salir de vSCP", Quit)])]);
 
             let window = cx
@@ -81,6 +82,7 @@ fn main() {
                         }),
                         window_min_size: Some(size(px(640.0), px(420.0))),
                         window_background: WindowBackgroundAppearance::Opaque,
+                        app_id: Some("vscp".into()),
                         ..Default::default()
                     },
                     |window, cx| {

@@ -16,6 +16,7 @@ pub enum IconName {
     ChevronRight,
     ChevronDown,
     Folder,
+    SquareTerminal,
     FolderOpen,
     File,
     FileText,
@@ -59,6 +60,7 @@ impl IconName {
         IconName::ChevronRight,
         IconName::ChevronDown,
         IconName::Folder,
+        IconName::SquareTerminal,
         IconName::FolderOpen,
         IconName::File,
         IconName::FileText,
@@ -100,6 +102,7 @@ impl IconName {
             Self::Sidebar => "icons/panel-left.svg",
             Self::ChevronRight => "icons/chevron-right.svg",
             Self::ChevronDown => "icons/chevron-down.svg",
+            Self::SquareTerminal => "icons/square-terminal.svg",
             Self::Folder => "icons/folder.svg",
             Self::FolderOpen => "icons/folder-open.svg",
             Self::File => "icons/file.svg",
@@ -134,6 +137,10 @@ impl IconName {
 }
 
 const ICONS: &[(&str, &[u8])] = &[
+    (
+        "icons/square-terminal.svg",
+        include_bytes!("../assets/icons/square-terminal.svg"),
+    ),
     (
         "icons/chevron-left.svg",
         include_bytes!("../assets/icons/chevron-left.svg"),

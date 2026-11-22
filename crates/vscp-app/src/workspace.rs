@@ -2,6 +2,8 @@
 mod edits_view;
 #[path = "settings_view.rs"]
 mod settings_view;
+#[path = "terminal_workspace.rs"]
+mod terminal_workspace;
 
 use edits_view::{EditDialog, Edits};
 use vscp_core::{
@@ -35,21 +37,32 @@ use crate::{
         text_input::TextInput,
     },
     dev,
-    file_workspace::Panes,
+    file_workspace::{Panes, SessionView, session_switch},
     form::{Errors, Field, Form},
     icons::IconName,
     pane::{PaneMemory, icon_button},
     sidebar::{self, RowAction, RowMenu, ServerReorder},
+    terminal::kitty::Kitty,
     theme::Theme,
 };
 
 actions!(
     workspace,
-    [Next, Previous, DismissMenu, ToggleSidebar, OpenSettings]
+    [
+        Next,
+        Previous,
+        DismissMenu,
+        ToggleSidebar,
+        OpenSettings,
+        ShowFiles,
+        ShowTerminal
+    ]
 );
 
 pub fn bind_keys(cx: &mut gpui::App) {
     cx.bind_keys([
+        KeyBinding::new("cmd-1", ShowFiles, Some("Workspace")),
+        KeyBinding::new("cmd-2", ShowTerminal, Some("Workspace")),
         KeyBinding::new("cmd-,", OpenSettings, Some("Workspace")),
         KeyBinding::new("tab", Next, Some("Workspace")),
         KeyBinding::new("shift-tab", Previous, Some("Workspace")),
@@ -101,6 +114,7 @@ pub struct Workspace {
     key_requests: u64,
     edits: Edits,
     settings: Settings,
+    kitty_settings: Option<Kitty>,
     settings_error: Option<String>,
     loading: bool,
     sidebar_visible: Rc<Cell<bool>>,
@@ -170,6 +184,7 @@ impl Workspace {
                         }
                         if dev::edit_view().as_deref() == Some("settings") {
                             this.open_dialog(Dialog::Settings, window, cx);
+                            this.read_kitty(false, window, cx);
                         }
                         this.selected = servers.first().map(|server| server.id.clone());
                         this.dir = Some(dir);
@@ -229,10 +244,9 @@ impl Workspace {
             }
         })
         .detach();
-        let executor = cx.background_executor().clone();
-        cx.on_app_quit(move |this, cx| {
+        cx.on_app_quit(|this, cx| {
             let cleanup = (!this.quitting).then(|| crate::pane::finder::quit_cleanup(cx));
-            let shutdown = this.shutdown(executor.clone());
+            let shutdown = this.shutdown(cx);
             async move {
                 shutdown.await;
                 if let Some(cleanup) = cleanup {
@@ -254,6 +268,7 @@ impl Workspace {
             key_requests: 0,
             edits: Edits::default(),
             settings: Settings::default(),
+            kitty_settings: None,
             settings_error: None,
             loading: true,
             sidebar_visible: Rc::new(Cell::new(true)),
@@ -275,10 +290,19 @@ impl Workspace {
         }
     }
 
-    fn shutdown(&mut self, executor: gpui::BackgroundExecutor) -> impl Future<Output = ()> + use<> {
+    fn shutdown(&mut self, cx: &mut Context<Self>) -> impl Future<Output = ()> + use<> {
+        let executor = cx.background_executor().clone();
         self.dialog = None;
         self.prompt_task.take();
         self.prompts.clear();
+        for connection in self.connections.values() {
+            if let Connection::Connected { panes, .. } = connection
+                && let Some(terminal) = &panes.terminal
+            {
+                terminal.update(cx, |terminal, _| terminal.stop());
+            }
+        }
+        self.connections.clear();
         let client = self.client.clone();
         let index = self.edits.shutdown();
         async move {
@@ -303,7 +327,7 @@ impl Workspace {
         }
         self.quitting = true;
         crate::pane::finder::begin_quit(cx);
-        let shutdown = self.shutdown(cx.background_executor().clone());
+        let shutdown = self.shutdown(cx);
         cx.notify();
         cx.spawn_in(window, async move |_, cx| {
             shutdown.await;
@@ -587,7 +611,7 @@ impl Workspace {
     ) -> Connection {
         let id = &server.id;
         let memory = self.pane_memory.entry(id.to_owned()).or_default().clone();
-        let panes = Panes::new(
+        let mut panes = Panes::new(
             session.clone(),
             server,
             path,
@@ -596,6 +620,24 @@ impl Workspace {
             window,
             cx,
         );
+        let run_server = id.clone();
+        cx.subscribe_in(
+            panes.remote(),
+            window,
+            move |this, _, run: &crate::pane::RunRemote, window, cx| {
+                this.run_remote(&run_server, run, window, cx);
+            },
+        )
+        .detach();
+        if dev::terminal_view() {
+            let terminal = Self::terminal_for(&mut panes, id, window, cx);
+            panes.view = SessionView::Terminal;
+            let command = vscp_core::terminal_start_command(
+                &panes.remote().read(cx).directory().to_string_lossy(),
+            );
+            let args = session.terminal_command(&command);
+            terminal.update(cx, |terminal, cx| terminal.start(args, window, cx));
+        }
         let edit_server = server.clone();
         cx.subscribe_in(
             panes.remote(),
@@ -635,12 +677,15 @@ impl Workspace {
         if !matches!(self.connections.get(id), Some(Connection::Connected { .. })) {
             return;
         }
-        let Some(Connection::Connected { session, .. }) = self
+        let Some(Connection::Connected { session, panes }) = self
             .connections
             .insert(id.into(), Connection::Disconnecting)
         else {
             return;
         };
+        if let Some(terminal) = panes.terminal {
+            terminal.update(cx, |terminal, _| terminal.stop());
+        }
         let id = id.to_owned();
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
@@ -1204,7 +1249,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn content(&self, theme: Theme, cx: &Context<Self>) -> impl IntoElement {
+    fn content(&self, theme: Theme, window: &Window, cx: &Context<Self>) -> impl IntoElement {
         if let Some(server) = self
             .servers
             .iter()
@@ -1214,7 +1259,33 @@ impl Workspace {
             let id = server.id.clone();
             return panes.render(
                 server,
-                self.sidebar_button(theme, cx),
+                (
+                    self.sidebar_button(theme, cx),
+                    session_switch(panes.view, theme, {
+                        let workspace = cx.weak_entity();
+                        move |view, window, cx| {
+                            let _ = workspace
+                                .update(cx, |this, cx| this.switch_session_view(view, window, cx));
+                        }
+                    }),
+                    (panes.view == SessionView::Terminal).then(|| {
+                        icon_text_button(
+                            "open-kitty",
+                            IconName::ExternalLink,
+                            "Abrir en Kitty",
+                            Variant::Secondary,
+                            None,
+                            theme,
+                            cx.listener(|this, _, window, cx| {
+                                this.open_terminal_in_kitty(window, cx)
+                            }),
+                        )
+                        .h(px(26.))
+                        .px_1()
+                        .into_any_element()
+                    }),
+                    self.sidebar_visible.get() && window.viewport_size().width < px(862.),
+                ),
                 theme,
                 self.edit_header(&id, theme, cx),
                 self.edit_status(&id, theme, cx),
@@ -1451,6 +1522,16 @@ impl Render for Workspace {
             // The drag ended without a drop over the list.
             self.finish_reorder(false, cx);
         }
+        for (id, connection) in &self.connections {
+            if let Connection::Connected { panes, .. } = connection
+                && let Some(terminal) = &panes.terminal
+            {
+                let visible = !self.quitting
+                    && self.selected.as_ref() == Some(id)
+                    && panes.view == SessionView::Terminal;
+                terminal.update(cx, |terminal, _| terminal.set_selected(visible, window));
+            }
+        }
         let transfer_overlay = if self.dialog.is_none() && !self.edits.popover {
             match self
                 .selected
@@ -1469,6 +1550,12 @@ impl Render for Workspace {
             .size_full()
             .track_focus(&self.focus)
             .key_context("Workspace")
+            .on_action(cx.listener(|this, _: &ShowFiles, window, cx| {
+                this.switch_session_view(SessionView::Files, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowTerminal, window, cx| {
+                this.switch_session_view(SessionView::Terminal, window, cx);
+            }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| {
                 if this.dialog.is_none() {
                     this.toggle_sidebar(window, cx);
@@ -1505,7 +1592,7 @@ impl Render for Workspace {
             })
             .when(!self.quitting, |root| {
                 root.child(sidebar::render(self, theme, cx))
-                    .child(self.content(theme, cx))
+                    .child(self.content(theme, window, cx))
                     .children(transfer_overlay)
                     .children(self.edit_popover(theme, window, cx))
                     .children(self.render_dialog(theme, cx))

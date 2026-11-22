@@ -11,6 +11,46 @@ impl Workspace {
             return;
         }
         self.open_dialog(Dialog::Settings, window, cx);
+        if self.active_terminal_settings(cx).is_none() {
+            self.read_kitty(false, window, cx);
+        }
+    }
+
+    fn active_terminal_settings<'a>(
+        &'a self,
+        cx: &'a gpui::App,
+    ) -> Option<&'a crate::terminal::kitty::Kitty> {
+        let id = self.selected.as_ref()?;
+        let super::Connection::Connected { panes, .. } = self.connections.get(id)? else {
+            return None;
+        };
+        panes.terminal.as_ref().map(|view| view.read(cx).settings())
+    }
+
+    pub(super) fn read_kitty(&mut self, apply: bool, window: &Window, cx: &mut Context<Self>) {
+        let read = cx
+            .background_executor()
+            .spawn(async { crate::terminal::kitty::Kitty::load() });
+        cx.spawn_in(window, async move |workspace, cx| {
+            let mut settings = read.await;
+            let _ = workspace.update_in(cx, |workspace, window, cx| {
+                settings.resolve_family(&cx.text_system().all_font_names());
+                if apply {
+                    for connection in workspace.connections.values() {
+                        if let super::Connection::Connected { panes, .. } = connection
+                            && let Some(view) = &panes.terminal
+                        {
+                            view.update(cx, |view, cx| view.reload(settings.clone(), window, cx));
+                        }
+                    }
+                }
+                workspace.kitty_settings = Some(settings);
+                if window.is_window_active() {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn choose_editor(&mut self, window: &Window, cx: &mut Context<Self>) {
@@ -77,6 +117,9 @@ impl Workspace {
 
     pub(super) fn settings_dialog(&self, theme: Theme, cx: &Context<Self>) -> AnyElement {
         let editor = self.settings.editor.as_ref();
+        let terminal = self
+            .active_terminal_settings(cx)
+            .or(self.kitty_settings.as_ref());
         let body = div()
             .flex()
             .flex_col()
@@ -124,7 +167,21 @@ impl Workspace {
             })
             .when_some(self.settings_error.clone(), |body, error| {
                 body.child(div().text_color(theme.danger).child(error))
-            });
+            })
+            .child(
+                div().w_full().mt_2().pt_2().border_t_1().border_color(theme.border)
+                    .flex().flex_col().items_start().gap_2().child("Terminal")
+                    .when_some(terminal, |section, settings| {
+                        let path = settings.path.as_ref().map_or_else(
+                            || "No se encontró kitty.conf; se usan los valores de Kitty por defecto".into(),
+                            |path| path.display().to_string(),
+                        );
+                        section.child(div().text_color(theme.secondary_text).child(path))
+                            .child(div().text_color(theme.secondary_text).child(format!("{} · {} pt", settings.family, settings.size)))
+                    })
+                    .child(button("settings-kitty-reload", "Volver a leer", Variant::Secondary, theme,
+                        cx.listener(|this, _, window, cx| this.read_kitty(true, window, cx)))),
+            );
         let footer = div().flex().justify_end().child(
             button(
                 "settings-close",

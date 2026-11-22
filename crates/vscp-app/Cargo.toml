@@ -10,6 +10,7 @@ name = "vscp"
 path = "src/main.rs"
 
 [dependencies]
+alacritty_terminal = { version = "=0.26.0", default-features = false }
 gpui = { package = "gpui-pre", version = "=0.3.11" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["runtime_shaders", "font-kit"] }
 vscp-core = { path = "../vscp-core" }

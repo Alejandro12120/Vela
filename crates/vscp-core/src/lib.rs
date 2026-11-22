@@ -14,6 +14,9 @@ mod ssh;
 pub use error::Error;
 pub use session::{Client, Session};
 pub use sftp::{Entry, EntryKind};
-pub use ssh::{Auth, ConnectionSpec, bitwarden_agent_sockets, run_script_command, shell_quote};
+pub use ssh::{
+    Auth, ConnectionSpec, bitwarden_agent_sockets, run_script_command, shell_quote,
+    terminal_start_command,
+};
 
 pub mod transfer;

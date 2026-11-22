@@ -222,6 +222,38 @@ pub fn edit_view() -> Option<String> {
 /// in Ajustes or, without one, to the default text editor (`open -t`). Anything
 /// else opens with its default application. The real path, with symbolic links
 /// resolved, decides whether the file is text.
+pub fn terminal_view() -> bool {
+    value("VSCP_DEV_VIEW").as_deref() == Some("terminal")
+}
+
+pub fn terminal_input() -> Option<String> {
+    value("VSCP_DEV_TERMINAL_INPUT").map(|text| {
+        let mut chars = text.chars().peekable();
+        let mut input = String::new();
+        while let Some(ch) = chars.next() {
+            if ch == '\\' {
+                let escaped = match chars.peek() {
+                    Some('n') => Some('\n'),
+                    Some('r') => Some('\r'),
+                    Some('\\') => Some('\\'),
+                    _ => None,
+                };
+                if let Some(escaped) = escaped {
+                    chars.next();
+                    input.push(escaped);
+                    continue;
+                }
+            }
+            input.push(ch);
+        }
+        input
+    })
+}
+
+pub fn kitty_conf() -> Option<PathBuf> {
+    value("VSCP_DEV_KITTY_CONF").map(PathBuf::from)
+}
+
 pub fn open_file(path: &std::path::Path, editor: Option<&std::path::Path>) -> io::Result<()> {
     if launches_suppressed() {
         return Ok(());

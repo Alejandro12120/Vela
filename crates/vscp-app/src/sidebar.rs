@@ -627,7 +627,7 @@ fn row(
                             cx.new(|_| NoPreview)
                         })
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                            this.select(&select_id);
+                            this.select_session(&select_id, window, cx);
                             if event.click_count() == 2 || matches!(event, ClickEvent::Keyboard(_))
                             {
                                 this.connect(&select_id, window, cx);

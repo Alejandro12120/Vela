@@ -17,6 +17,7 @@ pub enum Action {
     NewFolder,
     Rename,
     Run,
+    RunInKitty,
     Delete,
     Copy,
     Refresh,
@@ -28,6 +29,7 @@ pub enum RunState {
     Hidden,
     Disabled,
     Enabled,
+    Remote,
 }
 
 struct Item {
@@ -96,7 +98,16 @@ impl Menu {
                 IconName::Play,
                 "Ejecutar",
                 "",
-                run == RunState::Enabled,
+                matches!(run, RunState::Enabled | RunState::Remote),
+            ));
+        }
+        if run == RunState::Remote {
+            actions.push(Item::new(
+                Action::RunInKitty,
+                IconName::ExternalLink,
+                "Ejecutar en Kitty",
+                "",
+                true,
             ));
         }
         actions.extend([

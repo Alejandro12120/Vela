@@ -361,7 +361,8 @@ impl Pane {
         match action {
             Action::NewFolder => self.new_folder(folder, window, cx),
             Action::Rename => self.start_selected_rename(window, cx),
-            Action::Run => self.run_selected(window, cx),
+            Action::Run => self.run_selected(false, window, cx),
+            Action::RunInKitty => self.run_selected(true, window, cx),
             Action::Delete => self.delete_selected(cx),
             Action::Copy => self.copy_to_other(window, cx),
             Action::Refresh => self.refresh(window, cx),
@@ -398,13 +399,13 @@ impl Pane {
         };
         match self.source {
             Source::Local => RunState::Enabled,
-            Source::Remote(_) if remote_runnable(row) => RunState::Enabled,
+            Source::Remote(_) if remote_runnable(row) => RunState::Remote,
             Source::Remote(_) => RunState::Disabled,
         }
     }
 
-    fn run_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.run_state() != RunState::Enabled {
+    fn run_selected(&mut self, kitty: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.run_state(), RunState::Enabled | RunState::Remote) {
             return;
         }
         let Some(row) = self.selected_file() else {
@@ -426,6 +427,14 @@ impl Pane {
                         self.report_error("El nombre no se puede ejecutar como texto.".into(), cx);
                         return;
                     };
+                    if !kitty {
+                        cx.emit(super::RunRemote {
+                            directory: directory.into(),
+                            name: name.into(),
+                            executable,
+                        });
+                        return;
+                    }
                     let command = vscp_core::run_script_command(directory, name, executable);
                     let args = session.terminal_command(&command);
                     (

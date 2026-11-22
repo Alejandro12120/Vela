@@ -1,21 +1,50 @@
-use std::{cell::Cell, path::PathBuf, rc::Rc, sync::Arc, time::Duration};
+use std::{
+    cell::Cell,
+    path::PathBuf,
+    rc::Rc,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use gpui::{
-    App, AppContext, ClickEvent, Div, Entity, FocusHandle, FontWeight, Stateful, Window, div,
-    prelude::*, px,
+    Animation, AnimationExt, AnyElement, App, AppContext, ClickEvent, Div, Entity, FocusHandle,
+    FontWeight, Stateful, Window, div, prelude::*, px,
 };
 use vscp_core::{Session, config::Server};
 
 use crate::{
-    components::button::{Variant, icon_text_button},
+    components::{
+        button::{Variant, icon_text_button},
+        motion,
+    },
     dev,
     icons::IconName,
     pane::{Pane, PaneMemory, Source},
+    terminal::view::TerminalView,
     theme::Theme,
     transfers_view::{TransferOverlay, Transfers},
 };
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum SessionView {
+    #[default]
+    Files,
+    Terminal,
+}
+
+impl SessionView {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Files => "Archivos",
+            Self::Terminal => "Terminal",
+        }
+    }
+}
+
 pub struct Panes {
+    pub view: SessionView,
+    pub terminal: Option<Entity<TerminalView>>,
+    pub switched: Option<Instant>,
     local: Entity<Pane>,
     remote: Entity<Pane>,
     local_focus: FocusHandle,
@@ -130,6 +159,9 @@ impl Panes {
             });
         }
         Self {
+            view: SessionView::Files,
+            terminal: None,
+            switched: None,
             local,
             remote,
             local_focus,
@@ -151,18 +183,116 @@ impl Panes {
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
-        self.local_focus.focus(window, cx);
+        if self.view == SessionView::Terminal
+            && let Some(terminal) = &self.terminal
+        {
+            terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
+        } else {
+            self.local_focus.focus(window, cx);
+        }
+    }
+
+    fn body(&self, theme: Theme) -> AnyElement {
+        let files = || {
+            div()
+                .size_full()
+                .flex()
+                .bg(theme.panel)
+                .child(self.local.clone())
+                .child(div().w(px(1.)).flex_none().bg(theme.border))
+                .child(self.remote.clone())
+        };
+        let terminal = || {
+            div()
+                .size_full()
+                .flex()
+                .bg(theme.panel)
+                .children(self.terminal.clone())
+        };
+        let (current, previous) = match self.view {
+            SessionView::Files => (files(), terminal()),
+            SessionView::Terminal => (terminal(), files()),
+        };
+        let mut body = div()
+            .id("session-body")
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .overflow_hidden();
+        if let Some(switched) = self.switched
+            && switched.elapsed() < motion::FAST
+        {
+            let id = ("session-view", self.view as u32);
+            body = body.child(previous.absolute().inset_0()).child(
+                current.relative().occlude().with_animation(
+                    id,
+                    Animation::new(motion::FAST),
+                    |view, progress| view.opacity(progress),
+                ),
+            );
+        } else {
+            body = body.child(current);
+        }
+        body.into_any_element()
     }
 
     pub fn render(
         &self,
         server: &Server,
-        sidebar_button: impl IntoElement,
+        controls: (impl IntoElement, impl IntoElement, Option<AnyElement>, bool),
         theme: Theme,
         edit_header: impl IntoElement,
         edit_status: impl IntoElement,
         disconnect: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> Stateful<Div> {
+        let (sidebar_button, view_switch, kitty_button, compact) = controls;
+        let identity = div()
+            .flex_1()
+            .min_w_0()
+            .h(px(40.))
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(sidebar_button)
+            .child(view_switch)
+            .child(
+                div()
+                    .max_w(px(98.))
+                    .flex_none()
+                    .truncate()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(server.name.clone()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(theme.secondary_text)
+                    .child(format!("{}@{}", server.user, server.host)),
+            );
+        let actions = div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(
+                icon_text_button(
+                    "disconnect",
+                    IconName::Unplug,
+                    "Desconectar",
+                    Variant::Secondary,
+                    None,
+                    theme,
+                    disconnect,
+                )
+                .h(px(26.))
+                .px_1(),
+            )
+            .child(edit_header)
+            .children(kitty_button)
+            .when(compact, |actions| actions.justify_end().pb_2());
         div()
             .id("main")
             .relative()
@@ -174,55 +304,53 @@ impl Panes {
             .bg(theme.panel)
             .child(
                 div()
-                    .h(px(40.))
                     .flex_none()
                     .flex()
-                    .items_center()
-                    .gap_2()
+                    .gap_1()
                     .px_2()
                     .border_b_1()
                     .border_color(theme.border)
-                    .child(sidebar_button)
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(server.name.clone()),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(theme.secondary_text)
-                            .child(format!("{}@{}", server.user, server.host)),
-                    )
-                    .child(
-                        icon_text_button(
-                            "disconnect",
-                            IconName::Unplug,
-                            "Desconectar",
-                            Variant::Secondary,
-                            None,
-                            theme,
-                            disconnect,
-                        )
-                        .h(px(26.)),
-                    )
-                    .child(div().flex_1())
-                    .child(edit_header),
+                    .when(compact, |header| header.flex_col().gap_0())
+                    .child(identity)
+                    .child(actions),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_h_0()
-                    .min_w_0()
-                    .child(self.local.clone())
-                    .child(div().w(px(1.)).flex_none().bg(theme.border))
-                    .child(self.remote.clone()),
-            )
+            .child(self.body(theme))
             .child(edit_status)
             .child(self.transfers.clone())
     }
+}
+
+pub fn session_switch(
+    current: SessionView,
+    theme: Theme,
+    switch: impl Fn(SessionView, &mut Window, &mut App) + Clone + 'static,
+) -> Div {
+    div()
+        .flex_none()
+        .flex()
+        .rounded(px(6.))
+        .bg(theme.hover)
+        .children([SessionView::Files, SessionView::Terminal].map(|view| {
+            let switch = switch.clone();
+            let name = match view {
+                SessionView::Files => IconName::Folder,
+                SessionView::Terminal => IconName::SquareTerminal,
+            };
+            icon_text_button(
+                view.label(),
+                name,
+                view.label(),
+                if current == view {
+                    Variant::Selected
+                } else {
+                    Variant::Secondary
+                },
+                None,
+                theme,
+                move |_, window, cx| switch(view, window, cx),
+            )
+            .h(px(26.))
+            .px_1()
+            .gap_1()
+        }))
 }

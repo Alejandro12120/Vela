@@ -33,6 +33,12 @@ Set `VSCP_TRACE_STARTUP=1` on the executable command to print the first-frame st
 
 Run the core SSH/SFTP tests as a regular user with `cargo test -p vscp-core` and the same disposable target settings. The integration fixture starts `/usr/sbin/sshd` on loopback and uses temporary keys, a private `ssh-agent`, and isolated client configuration and known hosts. The password case is ignored by default and takes `VSCP_TEST_PW_HOST`, `VSCP_TEST_PW_PORT`, `VSCP_TEST_PW_USER` and `VSCP_TEST_PW_PASSWORD` for the Linux password-enabled fixture.
 
+Run the local PTY test without loading the user's Kitty configuration or starting SSH. Use the same disposable Cargo target settings as above.
+
+```sh
+cargo test -p vscp-app terminal::tests::pty_output_reaches_grid_and_can_resize
+```
+
 ## Manual SSH fixture
 
 Run `scripts/dev-sshd.sh` in a terminal as a regular user. It needs system OpenSSH, `nc` and Python 3. Enter the printed host, port, user, public key and agent socket in the server form. Ctrl+C stops the loopback server and its private agent and removes their temporary files.
@@ -41,6 +47,9 @@ Use an isolated configuration directory for development runs. The `dev` Cargo fe
 
 - `VSCP_CONFIG_DIR` sets the directory for `servers.toml` and the OpenSSH `known_hosts` file.
 - `VSCP_DEV_AUTOCONNECT` connects to the server with the given display name after loading the list.
+- `VSCP_DEV_VIEW=terminal` opens the Terminal view after autoconnect.
+- `VSCP_DEV_TERMINAL_INPUT=<text>` sends the text once after starting a terminal. It decodes `\n`, `\r` and `\\`.
+- `VSCP_DEV_KITTY_CONF=<path>` overrides the Kitty configuration file for a development run.
 - `VSCP_DEV_LOG=1` prints connection results, listing durations, visible row counts, transfer events, native file-drag payload decisions and remote-edit watcher, debounce and upload decisions to stderr. It also prints a `[keys]` line for each keystroke with its resolved action (or `none`) and the key context stack, to diagnose key routing.
 - `VSCP_DEV_THEME=light|dark` overrides the application theme without changing system appearance.
 - `VSCP_DEV_LOCAL_ROOT=<absolute path>` overrides the local pane's starting folder.

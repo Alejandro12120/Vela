@@ -217,6 +217,13 @@ impl gpui::EventEmitter<OpenLocalFile> for Pane {}
 
 impl gpui::EventEmitter<EditFile> for Pane {}
 
+pub struct RunRemote {
+    pub directory: String,
+    pub name: String,
+    pub executable: bool,
+}
+impl gpui::EventEmitter<RunRemote> for Pane {}
+
 pub struct Pane {
     source: Source,
     tree: Tree,
@@ -294,6 +301,10 @@ impl Pane {
             expansion: None,
             expansions: 0,
         }
+    }
+
+    pub fn directory(&self) -> &Path {
+        self.tree.root.as_ref()
     }
 
     pub fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -125,7 +125,7 @@ impl ConnectionSpec {
     pub fn terminal_command(&self, control_dir: &Path, remote_command: &str) -> Vec<OsString> {
         self.argv(
             control_dir,
-            &["-o", "ControlMaster=no", "-t"],
+            &["-o", "ControlMaster=no", "-o", "BatchMode=yes", "-t"],
             &[remote_command],
         )
     }
@@ -134,6 +134,14 @@ impl ConnectionSpec {
 /// Wrap `value` in single quotes for a POSIX shell, writing each `'` as `'\''`.
 pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Start a login shell in the directory shown by the remote pane.
+pub fn terminal_start_command(directory: &str) -> String {
+    format!(
+        "export COLORTERM=truecolor; cd {} 2>/dev/null; exec \"$SHELL\" -l",
+        shell_quote(directory),
+    )
 }
 
 /// Remote command that runs `name` from `directory`, then leaves a login shell
@@ -501,6 +509,8 @@ mod tests {
             [
                 "-o",
                 "ControlMaster=no",
+                "-o",
+                "BatchMode=yes",
                 "-t",
                 "-o",
                 "PreferredAuthentications=password,keyboard-interactive",
@@ -520,6 +530,14 @@ mod tests {
                 "user@host",
                 "cd '/srv' && './a.sh'",
             ]
+        );
+    }
+
+    #[test]
+    fn terminal_start_quotes_the_remote_directory() {
+        assert_eq!(
+            terminal_start_command("/srv/it's ñ"),
+            "export COLORTERM=truecolor; cd '/srv/it'\\''s ñ' 2>/dev/null; exec \"$SHELL\" -l",
         );
     }
 

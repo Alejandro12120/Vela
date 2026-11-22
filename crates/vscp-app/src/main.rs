@@ -12,6 +12,7 @@ mod pasteboard_macos;
 mod rename;
 mod sidebar;
 mod staging;
+mod terminal;
 mod theme;
 mod transfers_view;
 mod tree;
@@ -56,6 +57,7 @@ fn main() {
             pane::finder::initialize(cx);
             workspace::bind_keys(cx);
             pane::bind_keys(cx);
+            terminal::view::bind_keys(cx);
             components::text_input::bind_keys(cx);
             cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
             cx.set_menus([Menu::new("vSCP").items([MenuItem::action("Salir de vSCP", Quit)])]);

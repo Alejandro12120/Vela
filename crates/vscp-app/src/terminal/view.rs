@@ -277,7 +277,23 @@ impl TerminalView {
 
     pub fn set_settings(&mut self, mut settings: Kitty, cx: &App) {
         let names = cx.text_system().all_font_names();
+        let configured = settings.family.clone();
         settings.resolve_family(&names);
+        if crate::dev::logging() {
+            let key = crate::theme::family_key(&configured);
+            let present = names
+                .iter()
+                .any(|name| crate::theme::family_key(name) == key);
+            let path = settings
+                .path
+                .as_ref()
+                .map_or_else(|| "none".to_owned(), |path| path.display().to_string());
+            crate::dev::log(format!(
+                "Terminal: kitty.conf {path}; font_family {configured}; resolved {}; installed {}",
+                settings.family,
+                if present { "yes" } else { "no" }
+            ));
+        }
         let installed = |family: &str| names.iter().any(|name| name.eq_ignore_ascii_case(family));
         let fallback = names
             .iter()

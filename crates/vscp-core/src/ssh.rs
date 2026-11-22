@@ -5,7 +5,7 @@ use std::{
     os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt},
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use tokio::{
@@ -291,6 +291,17 @@ pub(crate) struct Process {
 
 impl Process {
     pub(crate) fn spawn(command: &mut Command) -> io::Result<Self> {
+        // The SSH children are spawned from the `vscp-network` thread, which
+        // lives for the whole session. A dead thread must also kill its child.
+        #[cfg(target_os = "linux")]
+        unsafe {
+            command.pre_exec(|| {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
         let mut child = command.stderr(Stdio::piped()).spawn()?;
         let mut stderr = child.stderr.take().expect("piped stderr");
         let stderr = tokio::spawn(async move {
@@ -320,11 +331,108 @@ impl Drop for Process {
     }
 }
 
+/// Reads the expanded ControlPath from `ssh -G` output. `-G` reports the
+/// effective configuration as stable `key value` lines, unlike the localized
+/// prose of a failed `-O check`, so it is used to find the `%C` socket.
+fn control_path_from_g(output: &[u8]) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    output
+        .split(|&byte| byte == b'\n')
+        .find_map(|line| line.strip_prefix(b"controlpath "))
+        .map(|path| PathBuf::from(OsString::from_vec(path.trim_ascii().to_vec())))
+        .filter(|path| !path.as_os_str().is_empty())
+}
+
+fn master_pid(output: &[u8]) -> Option<u32> {
+    String::from_utf8_lossy(output).lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("Master running (pid=")?
+            .strip_suffix(')')?
+            .parse()
+            .ok()
+    })
+}
+
+/// A master is an orphan unless its parent is a live process named `vscp`;
+/// in that case a second application instance owns the socket.
+fn is_orphan(parent_comm: Option<&str>) -> bool {
+    parent_comm.and_then(|comm| comm.rsplit('/').next()) != Some("vscp")
+}
+
+/// Removes a socket left by a killed master. Returns the effective path even
+/// when nothing needed removing, so the session can wait for orphan cleanup.
+async fn clear_stale_socket(spec: &ConnectionSpec, askpass: &askpass::Server) -> Option<PathBuf> {
+    let path = timeout(
+        CONNECT_TIMEOUT,
+        command(spec, askpass, &["-G"], &[]).output(),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .filter(|output| output.status.success())
+    .and_then(|output| control_path_from_g(&output.stdout));
+    let answers = timeout(
+        EXIT_TIMEOUT,
+        command(spec, askpass, &["-O", "check"], &[]).output(),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .is_some_and(|output| output.status.success());
+    if !answers
+        && let Some(path) = &path
+        && path.exists()
+    {
+        let _ = fs::remove_file(path);
+    }
+    path
+}
+
+async fn parent_comm(pid: u32) -> Option<String> {
+    let output = timeout(
+        EXIT_TIMEOUT,
+        tokio::process::Command::new("ps")
+            .args(["-o", "ppid=", "-p", &pid.to_string()])
+            .output(),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)?;
+    let ppid = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if ppid.is_empty() || !ppid.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let output = timeout(
+        EXIT_TIMEOUT,
+        tokio::process::Command::new("ps")
+            .args(["-o", "comm=", "-p", &ppid])
+            .output(),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)?;
+    if !output.status.success() {
+        return None;
+    }
+    let comm = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!comm.is_empty()).then_some(comm)
+}
+
 pub(crate) struct Master {
     pub(crate) spec: ConnectionSpec,
     pub(crate) askpass: askpass::Server,
     process: Process,
+    control_path: Option<PathBuf>,
 }
+
+const MASTER_ARGS: [&str; 6] = [
+    "-M",
+    "-N",
+    "-o",
+    "ControlMaster=yes",
+    "-o",
+    "ControlPersist=no",
+];
 
 impl Master {
     pub(crate) async fn connect(
@@ -333,26 +441,14 @@ impl Master {
         readiness_timeout: Duration,
         stopping: &async_channel::Receiver<()>,
     ) -> Result<Self, Error> {
-        let process = Process::spawn(
-            command(
-                &spec,
-                &askpass,
-                &[
-                    "-M",
-                    "-N",
-                    "-o",
-                    "ControlMaster=yes",
-                    "-o",
-                    "ControlPersist=no",
-                ],
-                &[],
-            )
-            .stdout(Stdio::null()),
-        )?;
+        let control_path = clear_stale_socket(&spec, &askpass).await;
+        let process =
+            Process::spawn(command(&spec, &askpass, &MASTER_ARGS, &[]).stdout(Stdio::null()))?;
         let mut master = Self {
             spec,
             askpass,
             process,
+            control_path,
         };
         let timer = master.askpass.readiness_timer(readiness_timeout);
         let result = tokio::select! {
@@ -380,6 +476,7 @@ impl Master {
     async fn wait_until_ready(&mut self) -> Result<(), Error> {
         // Check an existing socket before trusting it. An owned master must be the
         // process listening, even if another client connected to the same host.
+        let mut retried = false;
         loop {
             if let Some(status) = self.process.child.try_wait()? {
                 return Err(Error::ssh(status, self.process.stderr().await));
@@ -392,6 +489,29 @@ impl Master {
                     .any(|line| line == expected)
                 {
                     return Ok(());
+                }
+                let other_master = master_pid(&result.stderr);
+                let orphan = !retried
+                    && match other_master {
+                        Some(pid) => is_orphan(parent_comm(pid).await.as_deref()),
+                        None => false,
+                    };
+                if orphan {
+                    // A previous instance was killed without unlinking its
+                    // socket. Ask that master to exit, then reclaim the path.
+                    let _ = timeout(EXIT_TIMEOUT, self.control("exit").output()).await;
+                    if let Some(path) = &self.control_path {
+                        let deadline = Instant::now() + EXIT_TIMEOUT;
+                        while fs::metadata(path).is_ok() && Instant::now() < deadline {
+                            sleep(POLL_INTERVAL).await;
+                        }
+                    }
+                    let _ = self.process.stop().await;
+                    self.process = Process::spawn(
+                        command(&self.spec, &self.askpass, &MASTER_ARGS, &[]).stdout(Stdio::null()),
+                    )?;
+                    retried = true;
+                    continue;
                 }
                 return Err(Error::ConnectFailed {
                     status: None,
@@ -606,6 +726,39 @@ mod tests {
         assert!(validate_control_dir(&alias, uid).is_err());
         fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(validate_control_dir(&directory, uid).is_err());
+    }
+
+    #[test]
+    fn control_path_is_read_from_ssh_g_output() {
+        let output =
+            b"host test\nuser tester\ncontrolpath /tmp/vscp-1000/0123456789abcdef\nport 22\n";
+        assert_eq!(
+            control_path_from_g(output),
+            Some(PathBuf::from("/tmp/vscp-1000/0123456789abcdef"))
+        );
+        assert_eq!(control_path_from_g(b"host test\n"), None);
+        assert_eq!(control_path_from_g(b"controlpath \n"), None);
+    }
+
+    #[test]
+    fn master_pid_is_parsed_from_check_output() {
+        assert_eq!(master_pid(b"Master running (pid=1234)\n"), Some(1234));
+        assert_eq!(
+            master_pid(b"Control socket connect(/tmp/x): No such file\n"),
+            None
+        );
+        assert_eq!(master_pid(b""), None);
+    }
+
+    #[test]
+    fn orphan_decision_requires_a_live_vscp_parent() {
+        assert!(is_orphan(None));
+        assert!(!is_orphan(Some("vscp")));
+        assert!(!is_orphan(Some(
+            "/Applications/vscp.app/Contents/MacOS/vscp"
+        )));
+        assert!(is_orphan(Some("zsh")));
+        assert!(is_orphan(Some("vscp ")));
     }
 
     #[test]

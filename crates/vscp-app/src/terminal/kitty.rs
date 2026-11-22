@@ -51,10 +51,11 @@ impl Default for Kitty {
 impl Kitty {
     pub fn resolve_family(&mut self, names: &[String]) {
         let fallback = crate::theme::monospace();
-        if !self.family.eq_ignore_ascii_case(fallback)
+        let key = crate::theme::family_key(&self.family);
+        if key != crate::theme::family_key(fallback)
             && !names
                 .iter()
-                .any(|name| name.eq_ignore_ascii_case(&self.family))
+                .any(|name| crate::theme::family_key(name) == key)
         {
             crate::dev::log(format!(
                 "Terminal: fuente {} no instalada. Se usa {fallback}.",
@@ -259,6 +260,29 @@ mod tests {
         assert_eq!(settings.palette.background, 0x123456);
         assert_eq!(settings.palette.ansi[0], 0x223344);
         assert_eq!(settings.size, 14.);
+    }
+
+    #[test]
+    fn hyde_include_layout_keeps_a_family_with_different_spacing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("kitty")).unwrap();
+        fs::write(root.join("kitty/kitty.conf"), "include hyde.conf\n").unwrap();
+        fs::write(
+            root.join("kitty/hyde.conf"),
+            "font_family Caskaydia Cove Nerd Font Mono\ninclude theme.conf\n",
+        )
+        .unwrap();
+        fs::write(root.join("kitty/theme.conf"), "foreground #abc\n").unwrap();
+
+        let mut settings = Kitty::read(&root.join("kitty/kitty.conf"));
+        assert_eq!(settings.family, "Caskaydia Cove Nerd Font Mono");
+        settings.resolve_family(&["CaskaydiaCove Nerd Font Mono".to_owned()]);
+        assert_eq!(settings.family, "Caskaydia Cove Nerd Font Mono");
+
+        settings.family = "JET-BRAINS MONO-nerd font".into();
+        settings.resolve_family(&["JetBrainsMono Nerd Font".to_owned()]);
+        assert_eq!(settings.family, "JET-BRAINS MONO-nerd font");
     }
 
     #[test]

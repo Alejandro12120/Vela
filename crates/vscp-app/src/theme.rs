@@ -91,6 +91,15 @@ impl Theme {
     }
 }
 
+/// Compares font family names case-insensitively, ignoring spaces and hyphens.
+pub(crate) fn family_key(value: &str) -> String {
+    value
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace() && *byte != b'-')
+        .map(|byte| byte.to_ascii_lowercase() as char)
+        .collect()
+}
+
 pub fn monospace() -> &'static str {
     #[cfg(target_os = "macos")]
     {
@@ -101,14 +110,48 @@ pub fn monospace() -> &'static str {
         use std::sync::OnceLock;
         static FAMILY: OnceLock<String> = OnceLock::new();
         FAMILY.get_or_init(|| {
-            std::process::Command::new("fc-match")
-                .args(["-f", "%{family[0]}", "monospace"])
+            let matched = std::process::Command::new("fc-match")
+                .args(["-f", "%{family[0]}", "monospace:spacing=100"])
                 .output()
                 .ok()
                 .filter(|output| output.status.success())
                 .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-                .filter(|family| !family.is_empty())
-                .unwrap_or_else(|| "DejaVu Sans Mono".into())
+                .filter(|family| {
+                    !family.is_empty() && !family.to_ascii_lowercase().contains("cjk")
+                });
+            if let Some(family) = matched {
+                return family;
+            }
+            let installed = std::process::Command::new("fc-list")
+                .args([":spacing=mono", "family"])
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+                .unwrap_or_default();
+            const CANDIDATES: [&str; 10] = [
+                "JetBrainsMono Nerd Font",
+                "JetBrains Mono",
+                "CaskaydiaCove Nerd Font Mono",
+                "Cascadia Mono",
+                "FiraCode Nerd Font",
+                "Fira Code",
+                "Hack",
+                "DejaVu Sans Mono",
+                "Noto Sans Mono",
+                "Liberation Mono",
+            ];
+            CANDIDATES
+                .iter()
+                .copied()
+                .find(|family| {
+                    installed.lines().any(|line| {
+                        line.split(',')
+                            .any(|name| family_key(name) == family_key(family))
+                    })
+                })
+                .unwrap_or("DejaVu Sans Mono")
+                .to_owned()
         })
     }
 }

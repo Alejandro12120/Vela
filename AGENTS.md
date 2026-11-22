@@ -50,7 +50,7 @@ Use an isolated configuration directory for development runs. The `dev` Cargo fe
 - `VSCP_DEV_VIEW=terminal` opens the Terminal view after autoconnect.
 - `VSCP_DEV_TERMINAL_INPUT=<text>` sends the text once after starting a terminal. It decodes `\n`, `\r` and `\\`.
 - `VSCP_DEV_KITTY_CONF=<path>` overrides the Kitty configuration file for a development run.
-- `VSCP_DEV_LOG=1` prints connection results, listing durations, visible row counts, transfer events, native file-drag payload decisions and remote-edit watcher, debounce and upload decisions to stderr. It also prints a `[keys]` line for each keystroke with its resolved action (or `none`) and the key context stack, to diagnose key routing.
+- `VSCP_DEV_LOG=1` prints connection results, listing durations, visible row counts, transfer events, native file-drag payload decisions and remote-edit watcher, debounce and upload decisions to stderr. It also prints a `[keys]` line for each keystroke with its resolved action (or `none`) and the key context stack, to diagnose key routing. When a terminal loads its settings it prints `Terminal: kitty.conf <path or none>; font_family <configured value or default>; resolved <family>; installed <yes/no>`, once with the initial default and again after reading the Kitty configuration.
 - `VSCP_DEV_THEME=light|dark` overrides the application theme without changing system appearance.
 - `VSCP_DEV_LOCAL_ROOT=<absolute path>` overrides the local pane's starting folder.
 - `VSCP_DEV_REMOTE_DELAY_MS=<milliseconds>` delays each remote listing asynchronously.

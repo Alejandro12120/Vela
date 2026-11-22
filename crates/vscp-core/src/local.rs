@@ -91,79 +91,6 @@ fn entry_kind(kind: FileType) -> EntryKind {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::os::unix::fs::symlink;
-
-    #[test]
-    fn known_extensions_are_text_without_reading() {
-        let dir = tempfile::tempdir().unwrap();
-        // Not even created: a known extension is not read.
-        assert!(is_text(&dir.path().join("run.SH")).unwrap());
-        assert!(is_text(&dir.path().join("a.service")).unwrap());
-        assert!(is_text(&dir.path().join("notas.md")).unwrap());
-    }
-
-    #[test]
-    fn other_files_are_classified_by_content() {
-        let dir = tempfile::tempdir().unwrap();
-        let write = |name: &str, bytes: &[u8]| {
-            let path = dir.path().join(name);
-            fs::write(&path, bytes).unwrap();
-            path
-        };
-        assert!(is_text(&write("Makefile", "all:\n\techo ñ\n".as_bytes())).unwrap());
-        assert!(is_text(&write("vacío", b"")).unwrap());
-        assert!(!is_text(&write("imagen.png", b"\x89PNG\r\n\x1a\n\0\0")).unwrap());
-        assert!(!is_text(&write("binario", b"abc\0def")).unwrap());
-        assert!(!is_text(&write("latin1", b"caf\xe9 au lait")).unwrap());
-        assert!(is_text(&write("sin-extension", "hola ñandú".as_bytes())).unwrap());
-        assert!(is_text(&dir.path().join("fantasma.txt")).unwrap());
-        assert!(is_text(&dir.path().join("inexistente")).is_err());
-    }
-
-    #[test]
-    fn a_cut_multibyte_sequence_at_the_sample_end_is_text() {
-        let mut bytes = vec![b'a'; SNIFF_BYTES - 1];
-        bytes.extend("ñ".as_bytes());
-        // Only the first byte of "ñ" fits in the sample.
-        assert!(looks_like_text(&bytes[..SNIFF_BYTES]));
-        // Four stray continuation-leading bytes are not a cut sequence.
-        assert!(!looks_like_text(&[b'a', 0xc3, 0xc3, 0xc3, 0xc3]));
-        let emoji = "😀".as_bytes();
-        assert!(looks_like_text(&emoji[..3]));
-    }
-
-    #[test]
-    fn lists_metadata_and_symbolic_links() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path();
-        fs::write(path.join("espa cio # ñ"), b"abc").unwrap();
-        fs::create_dir(path.join("folder")).unwrap();
-        symlink("folder", path.join("link")).unwrap();
-        symlink("missing", path.join("broken")).unwrap();
-        let entries = list_dir(path).unwrap();
-        assert_eq!(entries.len(), 4);
-        let find = |name: &str| entries.iter().find(|entry| entry.name == name).unwrap();
-        let file = find("espa cio # ñ");
-        assert_eq!(file.kind, EntryKind::File);
-        assert_eq!(file.size, Some(3));
-        assert!(file.mode.is_some() && file.mtime.is_some());
-        assert_eq!(find("folder").kind, EntryKind::Directory);
-        let link = find("link");
-        assert_eq!(link.kind, EntryKind::Symlink);
-        assert_eq!(link.symlink_target_kind, Some(EntryKind::Directory));
-        assert_eq!(find("broken").kind, EntryKind::Symlink);
-        assert_eq!(find("broken").symlink_target_kind, None);
-        assert_eq!(
-            stat(&path.join("link")).unwrap().symlink_target_kind,
-            link.symlink_target_kind
-        );
-        assert!(list_dir(&path.join("broken")).is_err());
-    }
-}
-
 /// Rename without replacing an existing item.
 #[cfg(target_os = "macos")]
 pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
@@ -248,4 +175,77 @@ fn sends_a_test_file_to_trash() {
     fs::remove_file(&trashed).unwrap();
     assert!(!file.exists());
     assert_eq!(result.unwrap(), b"vSCP test");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn known_extensions_are_text_without_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        // Not even created: a known extension is not read.
+        assert!(is_text(&dir.path().join("run.SH")).unwrap());
+        assert!(is_text(&dir.path().join("a.service")).unwrap());
+        assert!(is_text(&dir.path().join("notas.md")).unwrap());
+    }
+
+    #[test]
+    fn other_files_are_classified_by_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, bytes: &[u8]| {
+            let path = dir.path().join(name);
+            fs::write(&path, bytes).unwrap();
+            path
+        };
+        assert!(is_text(&write("Makefile", "all:\n\techo ñ\n".as_bytes())).unwrap());
+        assert!(is_text(&write("vacío", b"")).unwrap());
+        assert!(!is_text(&write("imagen.png", b"\x89PNG\r\n\x1a\n\0\0")).unwrap());
+        assert!(!is_text(&write("binario", b"abc\0def")).unwrap());
+        assert!(!is_text(&write("latin1", b"caf\xe9 au lait")).unwrap());
+        assert!(is_text(&write("sin-extension", "hola ñandú".as_bytes())).unwrap());
+        assert!(is_text(&dir.path().join("fantasma.txt")).unwrap());
+        assert!(is_text(&dir.path().join("inexistente")).is_err());
+    }
+
+    #[test]
+    fn a_cut_multibyte_sequence_at_the_sample_end_is_text() {
+        let mut bytes = vec![b'a'; SNIFF_BYTES - 1];
+        bytes.extend("ñ".as_bytes());
+        // Only the first byte of "ñ" fits in the sample.
+        assert!(looks_like_text(&bytes[..SNIFF_BYTES]));
+        // Four stray continuation-leading bytes are not a cut sequence.
+        assert!(!looks_like_text(&[b'a', 0xc3, 0xc3, 0xc3, 0xc3]));
+        let emoji = "😀".as_bytes();
+        assert!(looks_like_text(&emoji[..3]));
+    }
+
+    #[test]
+    fn lists_metadata_and_symbolic_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        fs::write(path.join("espa cio # ñ"), b"abc").unwrap();
+        fs::create_dir(path.join("folder")).unwrap();
+        symlink("folder", path.join("link")).unwrap();
+        symlink("missing", path.join("broken")).unwrap();
+        let entries = list_dir(path).unwrap();
+        assert_eq!(entries.len(), 4);
+        let find = |name: &str| entries.iter().find(|entry| entry.name == name).unwrap();
+        let file = find("espa cio # ñ");
+        assert_eq!(file.kind, EntryKind::File);
+        assert_eq!(file.size, Some(3));
+        assert!(file.mode.is_some() && file.mtime.is_some());
+        assert_eq!(find("folder").kind, EntryKind::Directory);
+        let link = find("link");
+        assert_eq!(link.kind, EntryKind::Symlink);
+        assert_eq!(link.symlink_target_kind, Some(EntryKind::Directory));
+        assert_eq!(find("broken").kind, EntryKind::Symlink);
+        assert_eq!(find("broken").symlink_target_kind, None);
+        assert_eq!(
+            stat(&path.join("link")).unwrap().symlink_target_kind,
+            link.symlink_target_kind
+        );
+        assert!(list_dir(&path.join("broken")).is_err());
+    }
 }

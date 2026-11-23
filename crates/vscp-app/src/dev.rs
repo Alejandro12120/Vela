@@ -201,14 +201,16 @@ pub fn reduce_motion() -> Option<bool> {
 pub enum FormRequest {
     New,
     Edit(String),
+    Duplicate(String),
 }
 
-/// `new` opens the new-server form at startup and `edit:<name>` opens the form
-/// of the server with that display name.
+/// `new` opens the new-server form at startup, `edit:<name>` opens the form of
+/// that server, and `duplicate:<name>` opens it prefilled as a new copy.
 pub fn form() -> Option<FormRequest> {
     let value = value("VSCP_DEV_FORM")?;
     match value.split_once(':') {
         Some(("edit", name)) => Some(FormRequest::Edit(name.to_owned())),
+        Some(("duplicate", name)) => Some(FormRequest::Duplicate(name.to_owned())),
         None if value == "new" => Some(FormRequest::New),
         _ => None,
     }

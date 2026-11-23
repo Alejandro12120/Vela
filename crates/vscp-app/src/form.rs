@@ -112,6 +112,27 @@ impl Form {
         config_dir: Option<&Path>,
         cx: &mut App,
     ) -> Self {
+        Self::build(server, false, default_socket, config_dir, cx)
+    }
+
+    /// Opens the add-server form prefilled from `server`, but with no id and a
+    /// suffixed name, so saving appends an independent copy.
+    pub fn duplicate(
+        server: &Server,
+        default_socket: &str,
+        config_dir: Option<&Path>,
+        cx: &mut App,
+    ) -> Self {
+        Self::build(Some(server), true, default_socket, config_dir, cx)
+    }
+
+    fn build(
+        server: Option<&Server>,
+        duplicate: bool,
+        default_socket: &str,
+        config_dir: Option<&Path>,
+        cx: &mut App,
+    ) -> Self {
         let mut values = [""; FIELDS.len()];
         values[Field::Port as usize] = "22";
         values[Field::Socket as usize] = default_socket;
@@ -119,9 +140,13 @@ impl Form {
         let mut agent = true;
         let mut identity = Identity::None;
         let mut existing = None;
+        let mut duplicate_name = None;
         if let Some(server) = server {
+            if duplicate {
+                duplicate_name = Some(format!("{} duplicate", server.name));
+            }
             port.push_str(&server.port.to_string());
-            values[Field::Name as usize] = &server.name;
+            values[Field::Name as usize] = duplicate_name.as_deref().unwrap_or(&server.name);
             values[Field::Host as usize] = &server.host;
             values[Field::Port as usize] = &port;
             values[Field::User as usize] = &server.user;
@@ -161,7 +186,11 @@ impl Form {
             cx.new(|cx| TextInput::new(values[field as usize], label, placeholder, false, cx))
         });
         Self {
-            id: server.map(|server| server.id.clone()),
+            id: if duplicate {
+                None
+            } else {
+                server.map(|server| server.id.clone())
+            },
             inputs,
             agent,
             errors: Vec::new(),

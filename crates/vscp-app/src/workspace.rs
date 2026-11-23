@@ -220,6 +220,12 @@ impl Workspace {
                                     this.open_form(Some(&id), window, cx);
                                 }
                             }
+                            Some(dev::FormRequest::Duplicate(name)) => {
+                                let id = this.servers.iter().find(|server| server.name == name).map(|server| server.id.clone());
+                                if let Some(id) = id {
+                                    this.open_duplicate_form(&id, window, cx);
+                                }
+                            }
                             None => {}
                         }
                     }
@@ -420,6 +426,7 @@ impl Workspace {
             }
             RowAction::Pin => self.toggle_pin(&id, cx),
             RowAction::Edit => self.open_form(Some(&id), window, cx),
+            RowAction::Duplicate => self.open_duplicate_form(&id, window, cx),
             RowAction::Delete => self.open_delete(id, window, cx),
         }
         cx.notify();
@@ -714,6 +721,22 @@ impl Workspace {
         }
         let server = id.and_then(|id| self.servers.iter().find(|server| server.id == id));
         let form = Form::new(server, &self.agent_socket, self.dir.as_deref(), cx);
+        self.show_form(form, window, cx);
+    }
+
+    /// Prefills the add-server form from a saved server without reusing its id.
+    pub fn open_duplicate_form(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dir.is_none() || self.dialog.is_some() || self.saving {
+            return;
+        }
+        let Some(server) = self.servers.iter().find(|server| server.id == id) else {
+            return;
+        };
+        let form = Form::duplicate(server, &self.agent_socket, self.dir.as_deref(), cx);
+        self.show_form(form, window, cx);
+    }
+
+    fn show_form(&mut self, form: Form, window: &mut Window, cx: &mut Context<Self>) {
         let socket = form.input(Field::Socket).read(cx).focus_handle(cx);
         self.open_dialog(Dialog::Form(Box::new(form)), window, cx);
         let blur = cx.on_blur(&socket, window, |this, window, cx| {
@@ -2027,5 +2050,108 @@ mod tests {
         assert_eq!(servers[0].name, "bravo renombrado");
         assert!(servers[0].pinned);
         assert_eq!(order(&workspace, cx)[0], pair("id-bravo", true));
+    }
+
+    #[gpui::test]
+    async fn duplicating_a_server_saves_an_independent_copy(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let key = AgentKey {
+            key_type: "ssh-ed25519".into(),
+            blob: [&[0, 0, 0, 11][..], b"ssh-ed25519"].concat(),
+            comment: "Servidor".into(),
+        };
+        let key_path = agent::store_public_key(dir.path(), &key).unwrap();
+        let original = Server {
+            id: "original".into(),
+            name: "Servidor principal".into(),
+            host: "h.example".into(),
+            port: 2201,
+            user: "ana".into(),
+            auth: Auth::Agent {
+                identity_pub: key_path.clone(),
+                agent_socket: Some("/tmp/agente".into()),
+            },
+            initial_remote_path: Some("/srv/ñ".into()),
+            pinned: true,
+        };
+        config::save(dir.path(), vec![original.clone()]).unwrap();
+        dev::TEST_CONFIG.with(|config| *config.borrow_mut() = Some(dir.path().to_path_buf()));
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::new(None, None, window, cx));
+        cx.run_until_parked();
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_duplicate_form("original", window, cx)
+        });
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, cx| {
+            let Some(Dialog::Form(form)) = &workspace.dialog else {
+                panic!("the duplicate form is not open");
+            };
+            assert_eq!(form.id, None);
+            let value = |field| form.input(field).read(cx).value();
+            assert_eq!(value(Field::Name), "Servidor principal duplicate");
+            assert_eq!(value(Field::Host), "h.example");
+            assert_eq!(value(Field::Port), "2201");
+            assert_eq!(value(Field::User), "ana");
+            assert_eq!(value(Field::Socket), "/tmp/agente");
+            assert_eq!(value(Field::RemotePath), "/srv/ñ");
+            let submission = form.validated(cx).unwrap();
+            assert_eq!(submission.server.name, "Servidor principal duplicate");
+            assert_eq!(submission.server.auth, original.auth);
+            assert!(submission.key.is_none());
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.confirm_dialog(window, cx)
+        });
+        cx.run_until_parked();
+        let servers = config::load(dir.path()).unwrap();
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0], original);
+        let copy = &servers[1];
+        assert_ne!(copy.id, original.id);
+        assert!(!copy.pinned);
+        assert_eq!(copy.name, "Servidor principal duplicate");
+        assert_eq!(copy.auth, original.auth);
+        assert_eq!(copy.initial_remote_path, original.initial_remote_path);
+
+        // Deleting either server keeps the shared key file for the other one.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_delete(original.id.clone(), window, cx)
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.confirm_dialog(window, cx)
+        });
+        cx.run_until_parked();
+        let remaining = config::load(dir.path()).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, copy.id);
+        assert_eq!(remaining[0].auth, original.auth);
+        assert!(key_path.exists());
+    }
+
+    #[gpui::test]
+    async fn the_five_item_row_menu_keeps_its_tab_wrap(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (workspace, cx) = open(dir.path(), cx);
+        cx.update(|_, cx| bind_keys(cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_row_menu("id-bravo", point(px(100.), px(100.)), window, cx)
+        });
+        cx.run_until_parked();
+        let (first, last) = workspace.read_with(cx, |workspace, _| {
+            let menu = workspace.row_menu.as_ref().unwrap();
+            (menu.first.clone(), menu.last.clone())
+        });
+        cx.update(|window, cx| assert_eq!(window.focused(cx), Some(first.clone())));
+        for _ in 0..4 {
+            cx.simulate_keystrokes("tab");
+            cx.run_until_parked();
+        }
+        cx.update(|window, cx| assert_eq!(window.focused(cx), Some(last.clone())));
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+        cx.update(|window, cx| assert_eq!(window.focused(cx), Some(first)));
     }
 }

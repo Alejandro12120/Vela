@@ -234,6 +234,7 @@ pub enum RowAction {
     Session,
     Pin,
     Edit,
+    Duplicate,
     Delete,
 }
 
@@ -714,7 +715,7 @@ pub fn row_menu(
         connection,
         Some(Connection::Connecting | Connection::Disconnecting)
     );
-    let items: [(RowAction, IconName, &'static str, bool, bool); 4] = [
+    let items: [(RowAction, IconName, &'static str, bool, bool); 5] = [
         (
             RowAction::Session,
             if connected {
@@ -746,6 +747,13 @@ pub fn row_menu(
             IconName::Pencil,
             "Editar…",
             !working,
+            false,
+        ),
+        (
+            RowAction::Duplicate,
+            IconName::Copy,
+            "Duplicar…",
+            true,
             false,
         ),
         (
@@ -818,8 +826,9 @@ pub fn row_menu(
         .child(item(0))
         .child(item(1))
         .child(item(2))
+        .child(item(3))
         .child(div().h(px(1.)).mx_2().my_1().bg(theme.border))
-        .child(item(3));
+        .child(item(4));
     deferred(
         anchored()
             .position(menu.position)

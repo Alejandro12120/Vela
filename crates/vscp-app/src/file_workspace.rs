@@ -258,16 +258,17 @@ impl Panes {
             .child(view_switch)
             .child(
                 div()
-                    .max_w(px(98.))
-                    .flex_none()
+                    .flex_grow(1.)
+                    .flex_shrink(0.01)
+                    .min_w_0()
                     .truncate()
                     .font_weight(FontWeight::MEDIUM)
                     .child(server.name.clone()),
             )
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
+                    .flex_shrink(1.)
+                    .min_w(px(80.))
                     .truncate()
                     .text_color(theme.secondary_text)
                     .child(format!("{}@{}", server.user, server.host)),
@@ -328,6 +329,8 @@ pub fn session_switch(
     div()
         .flex_none()
         .flex()
+        .gap_1()
+        .p_1()
         .rounded(px(6.))
         .bg(theme.hover)
         .children([SessionView::Files, SessionView::Terminal].map(|view| {

@@ -24,6 +24,7 @@ pub(crate) fn binding<A: Action>(
 pub(crate) const fn shortcut(mac: &'static str, other: &'static str) -> &'static str {
     #[cfg(target_os = "macos")]
     {
+        let _ = other;
         mac
     }
     #[cfg(not(target_os = "macos"))]

@@ -330,9 +330,6 @@ pub fn session_switch(
         .flex_none()
         .flex()
         .gap_1()
-        .p_1()
-        .rounded(px(6.))
-        .bg(theme.hover)
         .children([SessionView::Files, SessionView::Terminal].map(|view| {
             let switch = switch.clone();
             let name = match view {

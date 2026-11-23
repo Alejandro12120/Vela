@@ -3,7 +3,7 @@ use alacritty_terminal::{
     vte::ansi::{Color, NamedColor, Rgb},
 };
 
-#[derive(Clone)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Palette {
     pub foreground: u32,
     pub background: u32,
@@ -33,6 +33,25 @@ impl Default for Palette {
 }
 
 impl Palette {
+    pub fn with_theme(self, theme: vscp_core::appearance::TerminalColors) -> Self {
+        let rgb = |rgba: u32| rgba >> 8;
+        Self {
+            foreground: theme.foreground.map_or(self.foreground, rgb),
+            background: theme.background.map_or(self.background, rgb),
+            cursor: theme.cursor.map(rgb).or(self.cursor),
+            cursor_text: theme.cursor_text.map(rgb).or(self.cursor_text),
+            selection_foreground: theme
+                .selection_foreground
+                .map(rgb)
+                .or(self.selection_foreground),
+            selection_background: theme
+                .selection_background
+                .map(rgb)
+                .or(self.selection_background),
+            ansi: std::array::from_fn(|index| theme.ansi[index].map_or(self.ansi[index], rgb)),
+        }
+    }
+
     pub fn set(&mut self, key: &str, value: &str) {
         let color = parse_color(value);
         match key {
@@ -125,6 +144,24 @@ fn parse_color(value: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merges_partial_theme_and_kitty_colors() {
+        let mut palette = Palette::default();
+        palette.set("background", "#123456");
+        palette.set("color1", "#001122");
+        palette.set("color2", "#334455");
+        let mut theme = vscp_core::appearance::TerminalColors {
+            background: Some(0x9988_77ff),
+            ..Default::default()
+        };
+        theme.ansi[1] = Some(0x6633_00ff);
+        let result = palette.with_theme(theme);
+        assert_eq!(result.background, 0x998877);
+        assert_eq!(result.ansi[1], 0x663300);
+        assert_eq!(result.ansi[2], 0x334455);
+        assert_eq!(result.ansi[3], Palette::default().ansi[3]);
+    }
 
     #[test]
     fn palette_cube_grey_and_truecolor() {

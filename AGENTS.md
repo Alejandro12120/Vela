@@ -43,6 +43,8 @@ cargo test -p vscp-app terminal::tests::pty_output_reaches_grid_and_can_resize
 
 Run `scripts/dev-sshd.sh` in a terminal as a regular user. It needs system OpenSSH, `nc` and Python 3. Enter the printed host, port, user, public key and agent socket in the server form. Ctrl+C stops the loopback server and its private agent and removes their temporary files.
 
+User themes live in `themes/<id>.toml` under the configuration directory. `settings.toml` stores the selected theme, color scheme, glass settings and remote editor.
+
 Use an isolated configuration directory for development runs. The `dev` Cargo feature enables these environment variables in both debug and release binaries.
 
 - `VSCP_CONFIG_DIR` sets the directory for `servers.toml` and the OpenSSH `known_hosts` file.
@@ -52,7 +54,9 @@ Use an isolated configuration directory for development runs. The `dev` Cargo fe
 - `VSCP_DEV_KITTY_CONF=<path>` overrides the Kitty configuration file for a development run.
 - `VSCP_DEV_TERMINAL_FONT_SIZE=<pt>` sets the initial terminal font size in points (clamped to 6–48) for captures, without physical keys. Reset still returns to the `Kitty.size` from `kitty.conf`.
 - `VSCP_DEV_LOG=1` prints connection results, listing durations, visible row counts, transfer events, native file-drag payload decisions and remote-edit watcher, debounce and upload decisions to stderr. Font-size changes print `Terminal: font size <n>`. It also prints a `[keys]` line for each keystroke with its resolved action (or `none`) and the key context stack, to diagnose key routing. When a terminal loads its settings it prints `Terminal: kitty.conf <path or none>; font_family <configured value or default>; resolved <family>; installed <yes/no>`, once with the initial default and again after reading the Kitty configuration.
-- `VSCP_DEV_THEME=light|dark` overrides the application theme without changing system appearance.
+- `VSCP_DEV_THEME=light|dark` overrides system appearance as seen by vSCP in Sistema mode.
+- `VSCP_DEV_THEME_ID=<id>` overrides the active theme for the run without saving.
+- `VSCP_DEV_SETTINGS=appearance|interface` opens Ajustes on startup and scrolls to Apariencia or Interfaz. `VSCP_DEV_SETTINGS=delete:<id>` opens the confirmation for a user theme.
 - `VSCP_DEV_LOCAL_ROOT=<absolute path>` overrides the local pane's starting folder.
 - `VSCP_DEV_REMOTE_DELAY_MS=<milliseconds>` delays each remote listing asynchronously.
 - `VSCP_DEV_EXPAND=<relative path>[,...]` opens the named folders and their ancestors in the initial remote tree.

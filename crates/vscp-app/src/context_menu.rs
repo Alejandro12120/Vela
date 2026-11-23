@@ -227,8 +227,8 @@ impl Menu {
 pub struct Tooltip(pub &'static str);
 
 impl gpui::Render for Tooltip {
-    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
-        let theme = Theme::for_window(window);
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        let theme = Theme::current(window, cx);
         div()
             .px_2()
             .py_1()

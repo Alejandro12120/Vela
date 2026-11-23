@@ -166,7 +166,7 @@ impl Element for Surface {
             view.spawn_measured(geometry.size, window, cx);
             view.ime_bounds = None;
             let mut frame = Frame::default();
-            let palette = &view.settings.palette;
+            let palette = &view.palette;
             let Some(terminal) = view.terminal.as_mut() else {
                 frame.backgrounds.push((palette.background, bounds));
                 return frame;
@@ -339,13 +339,7 @@ impl Element for Surface {
         let ime = view
             .ime_bounds
             .zip(view.marked.as_ref())
-            .map(|(rect, marked)| {
-                (
-                    rect,
-                    marked.text.replace(['\n', '\r'], " "),
-                    view.settings.palette.clone(),
-                )
-            });
+            .map(|(rect, marked)| (rect, marked.text.replace(['\n', '\r'], " "), view.palette));
         window.handle_input(&focus, ElementInputHandler::new(bounds, self.0.clone()), cx);
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             for &(color, rect) in &frame.backgrounds {

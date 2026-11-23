@@ -50,6 +50,14 @@ pub fn appearance() -> Option<WindowAppearance> {
     }
 }
 
+pub fn theme_id() -> Option<String> {
+    value("VSCP_DEV_THEME_ID")
+}
+
+pub fn settings_page() -> Option<String> {
+    value("VSCP_DEV_SETTINGS")
+}
+
 pub fn logging() -> bool {
     value("VSCP_DEV_LOG").as_deref() == Some("1")
 }

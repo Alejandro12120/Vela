@@ -189,7 +189,7 @@ impl Terminal {
             redraw: Arc::default(),
             io: Arc::new(Mutex::new(PtyReplies {
                 sender: None,
-                palette: settings.palette.clone(),
+                palette: settings.palette,
                 size: size.window(),
             })),
             ended: Arc::default(),
@@ -238,8 +238,11 @@ impl Terminal {
     }
 
     fn reconfigure(&self, settings: &Kitty) {
-        self.listener.io.lock().unwrap().palette = settings.palette.clone();
         self.grid.lock().set_options(Self::config(settings));
+    }
+
+    fn set_palette(&self, palette: Palette) {
+        self.listener.io.lock().unwrap().palette = palette;
     }
 
     fn ended(&self) -> bool {

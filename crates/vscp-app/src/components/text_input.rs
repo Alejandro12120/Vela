@@ -589,7 +589,7 @@ impl Element for TextElement {
         let end = input.display_index(input.selected_range.end);
         let cursor = input.display_index(input.cursor_offset());
         let style = window.text_style();
-        let theme = Theme::for_window(window);
+        let theme = Theme::current(window, cx);
 
         let (display_text, text_color) = if input.content.is_empty() {
             (input.placeholder.clone(), theme.secondary_text.into())
@@ -729,7 +729,7 @@ impl Element for TextElement {
 
 impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::for_window(window);
+        let theme = Theme::current(window, cx);
         div()
             .id("text-input")
             .role(if self.secure {

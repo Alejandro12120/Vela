@@ -46,6 +46,9 @@ pub enum IconName {
     Unplug,
     Spinner,
     Edits,
+    Monitor,
+    Moon,
+    Sun,
 }
 
 impl IconName {
@@ -91,6 +94,9 @@ impl IconName {
         IconName::Unplug,
         IconName::Spinner,
         IconName::Edits,
+        IconName::Monitor,
+        IconName::Moon,
+        IconName::Sun,
     ];
 
     pub fn path(self) -> &'static str {
@@ -134,12 +140,21 @@ impl IconName {
             Self::Plug => "icons/plug.svg",
             Self::Unplug => "icons/unplug.svg",
             Self::Spinner => "icons/loader-circle.svg",
+            Self::Sun => "icons/sun.svg",
+            Self::Moon => "icons/moon.svg",
+            Self::Monitor => "icons/monitor.svg",
             Self::Edits => "icons/file-pen.svg",
         }
     }
 }
 
 const ICONS: &[(&str, &[u8])] = &[
+    (
+        "icons/monitor.svg",
+        include_bytes!("../assets/icons/monitor.svg"),
+    ),
+    ("icons/moon.svg", include_bytes!("../assets/icons/moon.svg")),
+    ("icons/sun.svg", include_bytes!("../assets/icons/sun.svg")),
     (
         "icons/square-terminal.svg",
         include_bytes!("../assets/icons/square-terminal.svg"),

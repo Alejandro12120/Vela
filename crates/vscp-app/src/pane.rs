@@ -1088,7 +1088,7 @@ impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.update_drop_decoration(cx.has_active_drag());
         self.check_copy_selection();
-        let theme = Theme::for_window(window);
+        let theme = Theme::current(window, cx);
         let active = self.focus.contains_focused(window, cx);
         let width = window.viewport_size().width
             - if self.sidebar.get() {

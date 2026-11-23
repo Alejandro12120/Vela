@@ -1,4 +1,5 @@
 mod accessibility;
+mod appearance;
 mod components;
 mod context_menu;
 mod dev;
@@ -66,50 +67,64 @@ fn main() {
             cx.bind_keys([keybindings::binding(cx, "secondary-q", Quit, None)]);
             cx.set_menus([Menu::new("vSCP").items([MenuItem::action("Salir de vSCP", Quit)])]);
 
-            let window = cx
-                .open_window(
-                    WindowOptions {
-                        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                            None,
-                            size(px(dev::window_width().unwrap_or(1100.)), px(700.)),
-                            cx,
-                        ))),
-                        kind: if dev::floating_window() {
-                            WindowKind::Floating
-                        } else {
-                            WindowKind::Normal
-                        },
-                        titlebar: Some(TitlebarOptions {
-                            title: Some("vSCP".into()),
-                            ..Default::default()
-                        }),
-                        window_min_size: Some(size(px(640.0), px(420.0))),
-                        window_background: WindowBackgroundAppearance::Opaque,
-                        app_id: Some("vscp".into()),
-                        ..Default::default()
-                    },
-                    |window, cx| {
-                        let workspace =
-                            cx.new(|cx| Workspace::new(client, trace_startup, window, cx));
-                        let weak = workspace.downgrade();
-                        window.on_window_should_close(cx, move |window, cx| {
-                            weak.update(cx, |workspace, cx| workspace.request_quit(window, cx))
-                                .is_err()
-                        });
-                        workspace
-                    },
-                )
-                .expect("No se pudo abrir la ventana de vSCP");
-            cx.on_action(move |_: &Quit, cx| {
-                if window
-                    .update(cx, |workspace, window, cx| {
-                        workspace.request_quit(window, cx)
-                    })
-                    .is_err()
-                {
-                    cx.quit();
-                }
-            });
-            cx.activate(true);
+            cx.set_global(appearance::Appearance::default());
+            let dir = dev::config_directory().ok();
+            let loading = cx
+                .background_executor()
+                .spawn(async move { dir.as_deref().map(appearance::Loaded::read) });
+            cx.spawn(async move |cx| {
+                let loaded = loading.await;
+                cx.update(move |cx| {
+                    let window = cx
+                        .open_window(
+                            WindowOptions {
+                                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                                    None,
+                                    size(px(dev::window_width().unwrap_or(1100.)), px(700.)),
+                                    cx,
+                                ))),
+                                kind: if dev::floating_window() {
+                                    WindowKind::Floating
+                                } else {
+                                    WindowKind::Normal
+                                },
+                                titlebar: Some(TitlebarOptions {
+                                    title: Some("vSCP".into()),
+                                    ..Default::default()
+                                }),
+                                window_min_size: Some(size(px(640.0), px(420.0))),
+                                window_background: WindowBackgroundAppearance::Opaque,
+                                app_id: Some("vscp".into()),
+                                ..Default::default()
+                            },
+                            |window, cx| {
+                                let workspace = cx.new(|cx| {
+                                    Workspace::new(client, trace_startup, loaded, window, cx)
+                                });
+                                let weak = workspace.downgrade();
+                                window.on_window_should_close(cx, move |window, cx| {
+                                    weak.update(cx, |workspace, cx| {
+                                        workspace.request_quit(window, cx)
+                                    })
+                                    .is_err()
+                                });
+                                workspace
+                            },
+                        )
+                        .expect("No se pudo abrir la ventana de vSCP");
+                    cx.on_action(move |_: &Quit, cx| {
+                        if window
+                            .update(cx, |workspace, window, cx| {
+                                workspace.request_quit(window, cx)
+                            })
+                            .is_err()
+                        {
+                            cx.quit();
+                        }
+                    });
+                    cx.activate(true);
+                });
+            })
+            .detach();
         });
 }

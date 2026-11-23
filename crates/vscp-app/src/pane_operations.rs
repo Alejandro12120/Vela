@@ -107,8 +107,8 @@ pub(super) struct DragChip {
 }
 
 impl Render for DragChip {
-    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
-        let theme = Theme::for_window(window);
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        let theme = Theme::current(window, cx);
         div()
             .pl(self.offset.x + px(8.))
             .pt(self.offset.y + px(8.))

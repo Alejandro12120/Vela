@@ -983,7 +983,7 @@ impl Transfers {
 
 impl Render for Transfers {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.strip(Theme::for_window(window), cx)
+        self.strip(Theme::current(window, cx), cx)
     }
 }
 
@@ -1000,7 +1000,7 @@ impl TransferOverlay {
 
 impl Render for TransferOverlay {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::for_window(window);
+        let theme = Theme::current(window, cx);
         self.transfers.update(cx, |queue, cx| {
             let Some(dialog) = queue.dialog(theme, cx) else {
                 return div().into_any_element();

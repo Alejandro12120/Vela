@@ -1,4 +1,7 @@
-use gpui::{Rgba, Window, WindowAppearance, rgb, rgba};
+use gpui::{App, Rgba, Window, rgba};
+use vscp_core::appearance::{Colors, TerminalColors, VSCP_DARK, VSCP_LIGHT};
+
+use crate::appearance::{Appearance, Variant, system_variant};
 
 #[derive(Clone, Copy)]
 
@@ -24,69 +27,45 @@ pub struct Theme {
     pub warning_bg: Rgba,
     pub danger: Rgba,
     pub danger_bg: Rgba,
+    pub terminal: TerminalColors,
 }
 
 impl Theme {
-    pub fn light() -> Self {
+    pub fn from_colors(colors: &Colors) -> Self {
         Self {
-            background: rgb(0xffffff),
-            sidebar: rgb(0xfafafa),
-            panel: rgb(0xffffff),
-            text: rgb(0x292929),
-            secondary_text: rgb(0x5d5d5d),
-            border: rgb(0xf2f2f2),
-            selection: rgb(0xf5f5f5),
-            accent: rgb(0x2563eb),
-            control_border: rgb(0x8a8a8a),
-            hover: rgb(0xf8f8f8),
-            primary: rgb(0x292929),
-            primary_text: rgb(0xffffff),
-            primary_hover: rgb(0x414141),
-            overlay: rgba(0x00000055).into(),
-            raised: rgb(0xffffff),
-            text_selection: rgba(0x2563eb40).into(),
-            success: rgb(0x166534),
-            warning: rgb(0x92400e),
-            warning_bg: rgb(0xfffbeb),
-            danger: rgb(0xb91c1c),
-            danger_bg: rgb(0xfef2f2),
+            background: rgba(colors.background),
+            sidebar: rgba(colors.sidebar),
+            panel: rgba(colors.panel),
+            text: rgba(colors.text),
+            secondary_text: rgba(colors.secondary_text),
+            border: rgba(colors.border),
+            selection: rgba(colors.selection),
+            accent: rgba(colors.accent),
+            control_border: rgba(colors.control_border),
+            hover: rgba(colors.hover),
+            primary: rgba(colors.primary),
+            primary_text: rgba(colors.primary_text),
+            primary_hover: rgba(colors.primary_hover),
+            overlay: rgba(colors.overlay).into(),
+            raised: rgba(colors.raised),
+            text_selection: rgba(colors.text_selection).into(),
+            success: rgba(colors.success),
+            warning: rgba(colors.warning),
+            warning_bg: rgba(colors.warning_bg),
+            danger: rgba(colors.danger),
+            danger_bg: rgba(colors.danger_bg),
+            terminal: colors.terminal,
         }
     }
 
-    pub fn dark() -> Self {
-        Self {
-            background: rgb(0x1c1c1c),
-            sidebar: rgb(0x202020),
-            panel: rgb(0x1c1c1c),
-            text: rgb(0xe5e5e5),
-            secondary_text: rgb(0xa1a1a1),
-            border: rgb(0x282828),
-            selection: rgb(0x2c2c2c),
-            accent: rgb(0x60a5fa),
-            control_border: rgb(0x747474),
-            hover: rgb(0x282828),
-            primary: rgb(0xe5e5e5),
-            primary_text: rgb(0x1c1c1c),
-            primary_hover: rgb(0xc9c9c9),
-            overlay: rgba(0x00000088).into(),
-            raised: rgb(0x252525),
-            text_selection: rgba(0x60a5fa55).into(),
-            success: rgb(0x86efac),
-            warning: rgb(0xfcd34d),
-            warning_bg: rgb(0x382d18),
-            danger: rgb(0xfca5a5),
-            danger_bg: rgb(0x3c2020),
-        }
-    }
-
-    pub fn for_window(window: &Window) -> Self {
-        Self::for_appearance(crate::dev::appearance().unwrap_or_else(|| window.appearance()))
-    }
-
-    fn for_appearance(appearance: WindowAppearance) -> Self {
-        match appearance {
-            WindowAppearance::Light | WindowAppearance::VibrantLight => Self::light(),
-            WindowAppearance::Dark | WindowAppearance::VibrantDark => Self::dark(),
+    pub fn current(window: &Window, cx: &App) -> Self {
+        if let Some(appearance) = cx.try_global::<Appearance>() {
+            appearance.current_theme(window)
+        } else {
+            Self::from_colors(match system_variant(window.appearance()) {
+                Variant::Light => &VSCP_LIGHT,
+                Variant::Dark => &VSCP_DARK,
+            })
         }
     }
 }

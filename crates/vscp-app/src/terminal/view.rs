@@ -23,6 +23,7 @@ use crate::{
 
 use super::{
     GridSize, Terminal,
+    colors::Palette,
     element::{Geometry, Surface},
     font_size, keys,
     kitty::{Kitty, OptionAsAlt},
@@ -82,6 +83,7 @@ pub(super) struct Marked {
 pub struct TerminalView {
     pub(super) terminal: Option<Terminal>,
     pub(super) settings: Kitty,
+    pub(super) palette: Palette,
     kitty_size: f32,
     pub(super) focus: FocusHandle,
     pub(super) fonts: [Font; 4],
@@ -113,6 +115,7 @@ impl TerminalView {
         let mut view = Self {
             terminal: None,
             settings: Kitty::default(),
+            palette: Palette::default(),
             kitty_size: Kitty::default().size,
             focus: cx.focus_handle(),
             fonts: std::array::from_fn(|_| font(crate::theme::monospace())),
@@ -245,7 +248,8 @@ impl TerminalView {
         let Some(args) = self.ready_to_spawn.take() else {
             return;
         };
-        let settings = self.settings.clone();
+        let mut settings = self.settings.clone();
+        settings.palette = self.palette;
         let task = cx
             .background_executor()
             .spawn(async move { Terminal::spawn("/usr/bin/ssh", args, &settings, size) });
@@ -259,6 +263,7 @@ impl TerminalView {
                         for command in view.pending.drain(..) {
                             terminal.send(command);
                         }
+                        terminal.set_palette(view.palette);
                         view.terminal = Some(terminal);
                         view.set_selected(view.selected, window);
                         view.redraw = Some(cx.spawn_in(window, async move |view, cx| {
@@ -360,6 +365,16 @@ impl TerminalView {
         self.settings.size = size;
         self.geometry = None;
         cx.notify();
+    }
+
+    pub fn set_palette(&mut self, colors: vscp_core::appearance::TerminalColors) {
+        let palette = self.settings.palette.with_theme(colors);
+        if self.palette != palette {
+            self.palette = palette;
+            if let Some(terminal) = &self.terminal {
+                terminal.set_palette(palette);
+            }
+        }
     }
 
     pub fn settings(&self) -> &Kitty {
@@ -517,7 +532,8 @@ impl TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::for_window(window);
+        let theme = Theme::current(window, cx);
+        self.set_palette(theme.terminal);
         let ended = self.terminal.as_ref().is_some_and(Terminal::ended) || self.error.is_some();
         let status = self
             .error

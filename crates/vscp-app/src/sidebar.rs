@@ -319,7 +319,11 @@ fn body(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -> Div {
                     "settings",
                     IconName::Settings,
                     "Ajustes",
-                    Variant::Secondary,
+                    if workspace.settings_open() {
+                        Variant::Selected
+                    } else {
+                        Variant::Secondary
+                    },
                     None,
                     theme,
                     cx.listener(|this, _, window, cx| this.open_settings(window, cx)),

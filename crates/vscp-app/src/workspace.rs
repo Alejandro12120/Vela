@@ -31,6 +31,7 @@ use vscp_core::{
 };
 
 use crate::{
+    appearance::{Appearance, Loaded},
     components::{
         button::{Variant, button, icon_text_button},
         modal, motion,
@@ -96,7 +97,7 @@ enum Dialog {
     Delete(String),
     Prompt(Prompt),
     Edit(EditDialog),
-    Settings,
+    DeleteTheme(String),
 }
 
 pub struct Workspace {
@@ -116,6 +117,7 @@ pub struct Workspace {
     settings: Settings,
     kitty_settings: Option<Kitty>,
     settings_error: Option<String>,
+    settings_page: settings_view::SettingsPage,
     loading: bool,
     sidebar_visible: Rc<Cell<bool>>,
     pane_memory: HashMap<String, PaneMemory>,
@@ -139,9 +141,16 @@ impl Workspace {
     pub fn new(
         client: Option<Client>,
         trace_startup: Option<Instant>,
+        loaded: Option<Loaded>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        if cx.try_global::<Appearance>().is_none() {
+            cx.set_global(Appearance::default());
+        }
+        let preloaded = loaded.is_some();
+        let (settings, settings_error) =
+            loaded.map_or_else(|| (Settings::default(), None), |loaded| loaded.install(cx));
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         let prompt_task = client.clone().map(|client| {
@@ -163,28 +172,23 @@ impl Workspace {
                 }
             })
         });
-        let load = cx.background_executor().spawn(async {
+        let load = cx.background_executor().spawn(async move {
             let dir = dev::config_directory()?;
             let servers = config::load(&dir)?;
             let agent = vscp_core::bitwarden_agent_sockets().into_iter().next();
             let index = dev::edit_root().and_then(|root| Index::load(dir.clone(), root));
-            let settings = Settings::load(&dir);
-            Ok::<_, std::io::Error>((dir, servers, agent, index, settings))
+            let loaded = (!preloaded).then(|| Loaded::read(&dir));
+            Ok::<_, std::io::Error>((dir, servers, agent, index, loaded))
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = load.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.loading = false;
                 match result {
-                    Ok((dir, servers, agent, index, settings)) => {
+                    Ok((dir, servers, agent, index, loaded)) => {
                         this.load_edits(index, window, cx);
-                        match settings {
-                            Ok(settings) => this.settings = settings,
-                            Err(error) => this.settings_error = Some(format!("No se pudo leer settings.toml. {error}")),
-                        }
-                        if dev::edit_view().as_deref() == Some("settings") {
-                            this.open_dialog(Dialog::Settings, window, cx);
-                            this.read_kitty(false, window, cx);
+                        if let Some(loaded) = loaded {
+                            (this.settings, this.settings_error) = loaded.install(cx);
                         }
                         this.selected = servers.first().map(|server| server.id.clone());
                         this.dir = Some(dir);
@@ -228,6 +232,7 @@ impl Workspace {
                             }
                             None => {}
                         }
+                        this.dev_open_settings(window, cx);
                     }
                     Err(err) => {
                         let message = if err.kind() == std::io::ErrorKind::InvalidData {
@@ -273,9 +278,10 @@ impl Workspace {
             settle: None,
             key_requests: 0,
             edits: Edits::default(),
-            settings: Settings::default(),
+            settings,
             kitty_settings: None,
-            settings_error: None,
+            settings_error,
+            settings_page: settings_view::SettingsPage::new(cx),
             loading: true,
             sidebar_visible: Rc::new(Cell::new(true)),
             pane_memory: HashMap::new(),
@@ -531,6 +537,7 @@ impl Workspace {
     }
 
     pub fn connect(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_settings(window, cx);
         if self.saving
             || self.quitting
             || matches!(
@@ -945,7 +952,7 @@ impl Workspace {
         let focus = match &dialog {
             Dialog::Form(form) => Some(form.input(Field::Name)),
             Dialog::Prompt(prompt) => prompt.input.as_ref(),
-            Dialog::Delete(_) | Dialog::Edit(_) | Dialog::Settings => None,
+            Dialog::Delete(_) | Dialog::Edit(_) | Dialog::DeleteTheme(_) => None,
         };
         let focus = focus
             .map(|input| input.read(cx).focus_handle(cx))
@@ -1043,7 +1050,10 @@ impl Workspace {
                 self.finish_dialog(window, cx);
             }
             Some(Dialog::Edit(_)) => self.confirm_edit(window, cx),
-            Some(Dialog::Settings) => self.cancel_dialog(window, cx),
+            Some(Dialog::DeleteTheme(id)) => {
+                let id = id.clone();
+                self.remove_theme(id, window, cx);
+            }
             Some(Dialog::Delete(id)) => {
                 let id = id.clone();
                 self.persist(None, Some(id), window, cx);
@@ -1185,7 +1195,22 @@ impl Workspace {
         let dialog = self.dialog.as_ref()?;
         let (title, lead, body, confirm): (gpui::SharedString, modal::Lead, _, _) = match dialog {
             Dialog::Edit(dialog) => return Some(self.edit_dialog(dialog, theme, cx)),
-            Dialog::Settings => return Some(self.settings_dialog(theme, cx)),
+            Dialog::DeleteTheme(id) => {
+                let theme_def = cx
+                    .global::<Appearance>()
+                    .themes
+                    .iter()
+                    .find(|theme| &theme.id == id)?;
+                (
+                    "Eliminar tema".into(),
+                    Some((IconName::Trash, theme.danger)),
+                    div().child(format!(
+                        "Se eliminará «{}». Esta acción no se puede deshacer.",
+                        theme_def.name
+                    )),
+                    "Eliminar",
+                )
+            }
             Dialog::Form(form) => (
                 if form.id.is_some() {
                     "Editar servidor".into()
@@ -1262,6 +1287,18 @@ impl Workspace {
                         Variant::Primary,
                         None,
                         theme,
+                        on_click,
+                    )
+                } else if matches!(dialog, Dialog::DeleteTheme(_)) {
+                    button(
+                        "confirm",
+                        label,
+                        Variant::Primary,
+                        Theme {
+                            primary: theme.danger,
+                            primary_hover: theme.danger,
+                            ..theme
+                        },
                         on_click,
                     )
                 } else {
@@ -1575,7 +1612,7 @@ impl Render for Workspace {
                 );
             });
         }
-        let theme = Theme::for_window(window);
+        let theme = Theme::current(window, cx);
         if self.reorder.as_ref().is_some_and(|reorder| !reorder.held) && !cx.has_active_drag() {
             // The drag ended without a drop over the list.
             self.finish_reorder(false, cx);
@@ -1585,12 +1622,17 @@ impl Render for Workspace {
                 && let Some(terminal) = &panes.terminal
             {
                 let visible = !self.quitting
+                    && !self.settings_page.is_open()
                     && self.selected.as_ref() == Some(id)
                     && panes.view == SessionView::Terminal;
-                terminal.update(cx, |terminal, _| terminal.set_selected(visible, window));
+                terminal.update(cx, |terminal, _| {
+                    terminal.set_palette(theme.terminal);
+                    terminal.set_selected(visible, window);
+                });
             }
         }
-        let transfer_overlay = if self.dialog.is_none() && !self.edits.popover {
+        let settings_open = self.settings_page.is_open();
+        let transfer_overlay = if !settings_open && self.dialog.is_none() && !self.edits.popover {
             match self
                 .selected
                 .as_ref()
@@ -1601,6 +1643,11 @@ impl Render for Workspace {
             }
         } else {
             None
+        };
+        let content = if settings_open {
+            self.render_settings(theme, window, cx).into_any_element()
+        } else {
+            self.content(theme, window, cx).into_any_element()
         };
         div()
             .relative()
@@ -1630,6 +1677,11 @@ impl Render for Workspace {
                     this.finish_reorder(false, cx);
                     return;
                 }
+                if this.settings_page.is_open() && this.dialog.is_none() && this.row_menu.is_none()
+                {
+                    this.close_settings(window, cx);
+                    return;
+                }
                 this.dismiss_row_menu(window, cx);
                 this.edits.popover = false;
                 cx.notify();
@@ -1650,7 +1702,7 @@ impl Render for Workspace {
             })
             .when(!self.quitting, |root| {
                 root.child(sidebar::render(self, theme, cx))
-                    .child(self.content(theme, window, cx))
+                    .child(content)
                     .children(transfer_overlay)
                     .children(self.edit_popover(theme, window, cx))
                     .children(self.render_dialog(theme, cx))
@@ -1698,7 +1750,7 @@ mod tests {
         write_legacy(dir);
         dev::TEST_CONFIG.with(|config| *config.borrow_mut() = Some(dir.to_path_buf()));
         let (workspace, cx) =
-            cx.add_window_view(|window, cx| Workspace::new(None, None, window, cx));
+            cx.add_window_view(|window, cx| Workspace::new(None, None, None, window, cx));
         cx.run_until_parked();
         (workspace, cx)
     }
@@ -1799,7 +1851,7 @@ mod tests {
         fs::write(dir.join("servers.toml"), text).unwrap();
         dev::TEST_CONFIG.with(|config| *config.borrow_mut() = Some(dir.to_path_buf()));
         let (workspace, cx) =
-            cx.add_window_view(|window, cx| Workspace::new(None, None, window, cx));
+            cx.add_window_view(|window, cx| Workspace::new(None, None, None, window, cx));
         cx.run_until_parked();
         (workspace, cx)
     }
@@ -2112,7 +2164,7 @@ mod tests {
         config::save(dir.path(), vec![original.clone()]).unwrap();
         dev::TEST_CONFIG.with(|config| *config.borrow_mut() = Some(dir.path().to_path_buf()));
         let (workspace, cx) =
-            cx.add_window_view(|window, cx| Workspace::new(None, None, window, cx));
+            cx.add_window_view(|window, cx| Workspace::new(None, None, None, window, cx));
         cx.run_until_parked();
 
         workspace.update_in(cx, |workspace, window, cx| {

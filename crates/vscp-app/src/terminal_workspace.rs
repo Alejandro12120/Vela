@@ -54,7 +54,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.dialog.is_some() || self.quitting {
+        if self.settings_page.is_open() || self.dialog.is_some() || self.quitting {
             return;
         }
         let Some(id) = self.selected.as_deref() else {
@@ -81,6 +81,7 @@ impl Workspace {
     }
 
     pub(crate) fn select_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_settings(window, cx);
         self.select(id);
         if let Some(Connection::Connected { panes, .. }) = self.connections.get(id) {
             panes.focus(window, cx);

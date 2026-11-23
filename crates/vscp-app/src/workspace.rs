@@ -654,6 +654,41 @@ impl Workspace {
             },
         )
         .detach();
+        let move_server = id.clone();
+        cx.subscribe_in(
+            panes.remote(),
+            window,
+            move |this, pane, event: &crate::pane::MoveFiles, window, cx| {
+                let blocked = event.sources.iter().find(|source| {
+                    this.edits.rows().iter().any(|row| {
+                        row.target.server_id == move_server
+                            && row.target.remote_path.starts_with(source)
+                    })
+                });
+                pane.update(cx, |pane, cx| {
+                    if let Some(path) = blocked {
+                        let name = path
+                            .file_name()
+                            .unwrap_or(path.as_os_str())
+                            .to_string_lossy();
+                        pane.report_error(
+                            format!("Cierra las ediciones de «{name}» antes de moverlo."),
+                            cx,
+                        );
+                    } else {
+                        pane.move_files(
+                            crate::pane::MoveFiles {
+                                sources: event.sources.clone(),
+                                folder: event.folder.clone(),
+                            },
+                            window,
+                            cx,
+                        );
+                    }
+                });
+            },
+        )
+        .detach();
         cx.subscribe_in(
             panes.local(),
             window,

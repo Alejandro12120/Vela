@@ -2,11 +2,13 @@ mod accessibility;
 mod components;
 mod context_menu;
 mod dev;
+mod drop_target;
 mod file_metadata;
 mod file_workspace;
 mod form;
 mod icons;
 mod keybindings;
+mod move_paths;
 mod pane;
 #[cfg(target_os = "macos")]
 mod pasteboard_macos;

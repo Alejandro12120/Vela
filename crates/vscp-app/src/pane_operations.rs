@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, io};
 
-use gpui::{AppContext, Point, WeakEntity};
+use gpui::{AppContext, DragMoveEvent, Point, WeakEntity};
 use vscp_core::transfer::{Direction, Spec};
 
 use super::*;
@@ -25,7 +25,7 @@ impl Source {
         }
     }
 
-    async fn rename(
+    pub(crate) async fn rename(
         &self,
         from: PathBuf,
         to: PathBuf,
@@ -132,16 +132,6 @@ impl Render for DragChip {
     }
 }
 
-fn resolve_drop(
-    same_server: bool,
-    from: Side,
-    to: Side,
-    root: &Path,
-    folder: Option<&Path>,
-) -> Option<PathBuf> {
-    (same_server && from != to).then(|| folder.unwrap_or(root).to_owned())
-}
-
 impl Pane {
     pub fn wire(
         &mut self,
@@ -196,80 +186,155 @@ impl Pane {
         })
     }
 
-    pub(super) fn drop_zone(
+    pub(super) fn external_drop_zone(
         &self,
         element: Stateful<Div>,
         target: Option<Arc<Path>>,
         theme: Theme,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
-        let Some(operations) = &self.operations else {
-            return element;
-        };
-        let server = operations.server.clone();
-        let side = self.source.side();
         let is_folder = target.is_some();
-        let external_target = target.clone();
-        element
-            .drag_over(move |style, drag: &Drag, _, _| {
-                if drag.side != side && drag.server == server {
-                    if is_folder {
-                        style.bg(theme.text_selection)
-                    } else {
-                        style.bg(theme.text_selection.opacity(0.35))
-                    }
-                } else {
-                    style
-                }
-            })
-            .on_drop(cx.listener(move |pane, drag: &Drag, window, cx| {
-                let Some(operations) = &pane.operations else {
-                    return;
-                };
-                if let Some(destination) = resolve_drop(
-                    drag.server == operations.server,
-                    drag.side,
-                    pane.source.side(),
-                    pane.root(),
-                    target.as_deref(),
-                ) {
-                    let direction = if drag.side == Side::Local {
-                        Direction::Upload
-                    } else {
-                        Direction::Download
-                    };
-                    let spec = Spec {
-                        direction,
-                        sources: drag.paths.to_vec(),
-                        destination,
-                    };
-                    let target = cx.entity().downgrade();
-                    operations
-                        .transfers
-                        .update(cx, |queue, cx| queue.enqueue(spec, target, window, cx));
-                }
-            }))
-            .when(
-                cfg!(target_os = "macos") && side == Side::Remote,
-                |element| {
-                    element
-                        .drag_over(move |style, paths: &gpui::ExternalPaths, _, _| {
-                            if !super::finder::valid_external_paths(paths) {
-                                return style;
-                            }
-                            style.bg(if is_folder {
-                                theme.text_selection
-                            } else {
-                                theme.text_selection.opacity(0.35)
-                            })
+        element.when(
+            cfg!(target_os = "macos")
+                && self.source.side() == Side::Remote
+                && self.operations.is_some(),
+            |element| {
+                element
+                    .drag_over(move |style, paths: &gpui::ExternalPaths, _, _| {
+                        if !super::finder::valid_external_paths(paths) {
+                            return style;
+                        }
+                        style.bg(if is_folder {
+                            theme.text_selection
+                        } else {
+                            theme.text_selection.opacity(0.35)
                         })
-                        .on_drop(cx.listener(
-                            move |pane, paths: &gpui::ExternalPaths, window, cx| {
-                                pane.finder_drop(paths, external_target.as_deref(), window, cx);
-                            },
-                        ))
-                },
+                    })
+                    .on_drop(
+                        cx.listener(move |pane, paths: &gpui::ExternalPaths, window, cx| {
+                            pane.finder_drop(paths, target.as_deref(), window, cx);
+                        }),
+                    )
+            },
+        )
+    }
+
+    fn accepts_drag(&self, drag: &Drag) -> bool {
+        self.operations
+            .as_ref()
+            .is_some_and(|operations| operations.server == drag.server)
+    }
+
+    pub(super) fn drag_move(
+        &mut self,
+        event: &DragMoveEvent<Drag>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let drag = event.drag(cx);
+        let next = if event.bounds.contains(&event.event.position) && self.accepts_drag(drag) {
+            // GPUI offsets rows upward by a negative Y as the list scrolls down.
+            let scroll_offset_y = self.scroll.0.borrow().base_handle.offset().y;
+            let y = event.event.position.y - event.bounds.top() - scroll_offset_y;
+            let index = (y / ROW_HEIGHT).floor() as usize;
+            let hovered = (index < self.tree.rows.len()).then_some(index);
+            drop_target::resolve(
+                &self.drop_rows(),
+                self.root(),
+                hovered,
+                &drag.paths,
+                drag.side == self.source.side(),
             )
+        } else {
+            None
+        };
+        if next == self.drop_target {
+            return;
+        }
+        self.drop_target = next;
+        self.spring = None;
+        if let Some(DropTarget {
+            folder,
+            target: Target::Folder {
+                expanded: false, ..
+            },
+        }) = &self.drop_target
+        {
+            let path: Arc<Path> = folder.as_path().into();
+            let spring_path = path.clone();
+            let timer = cx
+                .background_executor()
+                .timer(std::time::Duration::from_millis(1000));
+            let task = cx.spawn_in(window, async move |this, cx| {
+                timer.await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    if cx.has_active_drag()
+                        && this.drop_target.as_ref().is_some_and(|drop| {
+                            drop.folder == *spring_path
+                                && matches!(
+                                    drop.target,
+                                    Target::Folder {
+                                        expanded: false,
+                                        ..
+                                    }
+                                )
+                        })
+                    {
+                        this.set_expanded(spring_path, true, window, cx);
+                    }
+                });
+            });
+            self.spring = Some((path, task));
+        }
+        cx.notify();
+    }
+
+    pub(super) fn drop_files(&mut self, drag: &Drag, window: &mut Window, cx: &mut Context<Self>) {
+        let target = self.drop_target.take();
+        self.spring = None;
+        cx.notify();
+        let Some(target) = target.filter(|_| self.accepts_drag(drag)) else {
+            return;
+        };
+        let sources = drag.paths.to_vec();
+        let folder = target.folder;
+        if drag.side == self.source.side() {
+            let move_files = MoveFiles { sources, folder };
+            match self.source {
+                Source::Local => self.move_files(move_files, window, cx),
+                Source::Remote(_) => cx.emit(move_files),
+            }
+        } else if let Some(operations) = &self.operations {
+            let direction = match drag.side {
+                Side::Local => Direction::Upload,
+                Side::Remote => Direction::Download,
+            };
+            let pane = cx.entity().downgrade();
+            operations.transfers.update(cx, |queue, cx| {
+                queue.enqueue(
+                    Spec {
+                        direction,
+                        sources,
+                        destination: folder,
+                    },
+                    pane,
+                    window,
+                    cx,
+                );
+            });
+        }
+    }
+
+    pub fn move_files(&mut self, files: MoveFiles, window: &Window, cx: &mut Context<Self>) {
+        if let Some(operations) = &self.operations {
+            let pane = cx.entity().downgrade();
+            let source = self.source.clone();
+            self.path_error = None;
+            operations.transfers.update(cx, |queue, cx| {
+                queue.move_paths(source, files.sources, files.folder, pane, window, cx);
+            });
+            cx.notify();
+        }
     }
 
     pub(super) fn drag_chip(
@@ -604,6 +669,35 @@ impl Pane {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
+        self.refresh_changed_selecting(paths, rename, Vec::new(), window, cx);
+    }
+
+    pub fn refresh_after_move(
+        &mut self,
+        mut parents: BTreeSet<PathBuf>,
+        moved: Vec<(PathBuf, PathBuf)>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        // A replaced folder may have been listed already, including its open descendants.
+        parents.extend(
+            self.tree
+                .expanded
+                .iter()
+                .filter(|path| moved.iter().any(|(_, dest)| path.starts_with(dest)))
+                .map(|path| path.to_path_buf()),
+        );
+        self.refresh_changed_selecting(parents, None, moved, window, cx);
+    }
+
+    fn refresh_changed_selecting(
+        &mut self,
+        paths: impl IntoIterator<Item = PathBuf>,
+        rename: Option<PathBuf>,
+        moved: Vec<(PathBuf, PathBuf)>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
         self.invalidate_drag_cache();
         let paths: BTreeSet<_> = paths
             .into_iter()
@@ -631,9 +725,35 @@ impl Pane {
                 if this.tree_revision == revision {
                     listings
                         .retain(|(path, _)| this.branch_revisions.get(path) == Some(&generation));
+                    let moved_expansion: Vec<Arc<Path>> = this
+                        .tree
+                        .expanded
+                        .iter()
+                        .filter_map(|path| {
+                            moved.iter().find_map(|(from, to)| {
+                                path.strip_prefix(from).ok().map(|suffix| {
+                                    if suffix.as_os_str().is_empty() {
+                                        to.as_path().into()
+                                    } else {
+                                        to.join(suffix).into()
+                                    }
+                                })
+                            })
+                        })
+                        .collect();
+                    this.tree.expanded.extend(moved_expansion);
                     this.tree.refresh_branches(listings);
                     this.remember();
                     this.load_expanded(window, cx);
+                    if !moved.is_empty() {
+                        this.tree.selected = moved
+                            .into_iter()
+                            .filter_map(|(_, dest)| {
+                                dest.starts_with(this.root()).then(|| dest.into())
+                            })
+                            .collect();
+                        this.check_copy_selection();
+                    }
                     if let Some(path) = rename {
                         this.start_rename(path, window, cx);
                     }
@@ -702,27 +822,5 @@ mod tests {
         assert!(runnable(None, "deploy.sh"));
         assert!(!runnable(Some(0o100644), "notas.txt"));
         assert!(!runnable(None, "notas"));
-    }
-
-    #[test]
-    fn only_opposite_pane_on_same_server_is_a_drop_target() {
-        let root = Path::new("/root");
-        let folder = Path::new("/root/folder");
-        assert_eq!(
-            resolve_drop(true, Side::Local, Side::Remote, root, Some(folder)).as_deref(),
-            Some(folder)
-        );
-        assert_eq!(
-            resolve_drop(true, Side::Remote, Side::Local, root, None).as_deref(),
-            Some(root)
-        );
-        assert_eq!(
-            resolve_drop(true, Side::Remote, Side::Remote, root, None),
-            None
-        );
-        assert_eq!(
-            resolve_drop(false, Side::Remote, Side::Local, root, None),
-            None
-        );
     }
 }

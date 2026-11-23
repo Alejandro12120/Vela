@@ -136,6 +136,32 @@ pub fn file_state() -> Option<String> {
     value("VSCP_DEV_FILE_STATE")
 }
 
+pub fn file_drag(side: crate::pane::Side) -> Option<(PathBuf, PathBuf)> {
+    use crate::pane::Side;
+    use std::path::Component;
+
+    let value = value("VSCP_DEV_FILE_DRAG")?;
+    let mut fields = value.splitn(3, ':');
+    let preview_side = match fields.next()? {
+        "local" => Side::Local,
+        "remote" => Side::Remote,
+        _ => return None,
+    };
+    let source = PathBuf::from(fields.next()?);
+    let hover = PathBuf::from(fields.next()?);
+    (preview_side == side
+        && !source.as_os_str().is_empty()
+        && !hover.as_os_str().is_empty()
+        && source
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+        && (hover == std::path::Path::new(".")
+            || hover
+                .components()
+                .all(|part| matches!(part, Component::Normal(_)))))
+    .then_some((source, hover))
+}
+
 pub fn transfer_delay() -> std::time::Duration {
     value("VSCP_DEV_TRANSFER_DELAY_MS")
         .and_then(|value| value.parse().ok())

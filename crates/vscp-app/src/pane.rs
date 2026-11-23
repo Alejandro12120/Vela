@@ -10,14 +10,16 @@ use std::{
 use gpui::{
     AnyElement, App, BackgroundExecutor, ClickEvent, Context, Div, ElementId, Entity, FocusHandle,
     Focusable, FontFeatures, FontWeight, KeyBinding, MouseButton, MouseDownEvent, Pixels, Render,
-    Role, ScrollStrategy, Stateful, UniformListScrollHandle, Window, actions, div, prelude::*, px,
-    uniform_list,
+    Role, ScrollStrategy, Stateful, Task, UniformListScrollHandle, Window, actions, div,
+    prelude::*, px, uniform_list,
 };
 use vscp_core::{EntryKind, Error, Session, local};
 
 use crate::{
     components::{motion, text_input::TextInput},
-    dev, file_metadata,
+    dev,
+    drop_target::{self, DropTarget, RowInfo, Target},
+    file_metadata,
     icons::{IconName, icon},
     theme::Theme,
     tree::{self, Child, History, Listing, Navigation, PathSet, RowState, Selection, Tree},
@@ -34,6 +36,7 @@ use crate::{
     rename::InlineRename,
 };
 use operations::Operations;
+pub use operations::Side;
 
 actions!(
     file_pane,
@@ -210,6 +213,13 @@ struct LocationRequest {
 
 pub struct EditFile(pub PathBuf);
 
+pub struct MoveFiles {
+    pub sources: Vec<PathBuf>,
+    pub folder: PathBuf,
+}
+
+impl gpui::EventEmitter<MoveFiles> for Pane {}
+
 /// A double click on a file in the local pane.
 pub struct OpenLocalFile(pub PathBuf);
 
@@ -240,6 +250,9 @@ pub struct Pane {
     tree_revision: u64,
     location: Option<LocationRequest>,
     operations: Option<Operations>,
+    drop_target: Option<DropTarget>,
+    spring: Option<(Arc<Path>, Task<()>)>,
+    dev_file_drag: Option<(PathBuf, PathBuf)>,
     finder: finder::PaneFinder,
     rename: Option<InlineRename>,
     menu: Option<Menu>,
@@ -260,6 +273,7 @@ struct Expansion {
 
 /// How long after an expansion its rows may still fade in, which covers a slow listing.
 const FADE_WINDOW: std::time::Duration = std::time::Duration::from_millis(1500);
+const ROW_HEIGHT: Pixels = px(25.);
 
 impl Pane {
     pub fn new(
@@ -276,6 +290,7 @@ impl Pane {
             Source::Local => "Ruta local",
             Source::Remote(_) => "Ruta remota",
         };
+        let dev_file_drag = dev::file_drag(source.side());
         Self {
             input: cx.new(|cx| TextInput::new(&root.to_string_lossy(), label, label, false, cx)),
             source,
@@ -292,6 +307,9 @@ impl Pane {
             tree_revision: 0,
             location: None,
             operations: None,
+            drop_target: None,
+            spring: None,
+            dev_file_drag,
             finder: finder::PaneFinder::default(),
             rename: None,
             menu: None,
@@ -308,7 +326,7 @@ impl Pane {
     }
 
     pub fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(&self.source, Source::Remote(_)) {
+        if matches!(&self.source, Source::Remote(_)) || self.dev_file_drag.is_some() {
             for path in dev::expanded_paths() {
                 self.tree.expanded.extend(
                     path.ancestors()
@@ -589,7 +607,9 @@ impl Pane {
         self.check_copy_selection();
         self.remember();
         self.load_expanded(window, cx);
-        self.scroll_to_cursor();
+        if !cx.has_active_drag() {
+            self.scroll_to_cursor();
+        }
         self.report_rows(window);
         cx.notify();
     }
@@ -741,6 +761,11 @@ impl Pane {
     /// A row, fading in when it appeared because the user expanded a folder.
     fn row_with_fade(&self, index: usize, style: &RowStyle, cx: &Context<Self>) -> AnyElement {
         let row = self.row(index, style, cx);
+        if matches!(&self.drop_target, Some(DropTarget { target: Target::Folder { block, .. }, .. }) if block.contains(&index))
+        {
+            // Border slices must remain opaque while a spring-loaded branch appears.
+            return row.into_any_element();
+        }
         let path = &self.tree.rows[index].path;
         match &self.expansion {
             Some(expansion)
@@ -772,7 +797,33 @@ impl Pane {
         } = *style;
         let row = &self.tree.rows[index];
         let offset = px(row.depth.min(9) as f32 * 14.);
-        let base = row_layout().text_color(theme.text);
+        let base = row_layout().relative().text_color(theme.text);
+        let (decoration, target_folder) = match self.drop_target.as_ref().map(|drop| &drop.target) {
+            Some(Target::Folder {
+                row,
+                block,
+                expanded,
+            }) if block.contains(&index) => {
+                let accent = theme.accent;
+                let block_slice = div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(2.))
+                    .right(px(2.))
+                    .border_color(accent)
+                    .border_x_2()
+                    .when(*expanded, |slice| slice.bg(accent.opacity(0.2)))
+                    .when(index == *block.start(), |slice| {
+                        slice.border_t_2().rounded_t(px(6.))
+                    })
+                    .when(index == *block.end(), |slice| {
+                        slice.border_b_2().rounded_b(px(6.))
+                    });
+                (Some(block_slice), index == *row)
+            }
+            _ => (None, false),
+        };
         let Some(entry) = row.entry() else {
             let (text, color) = match &row.state {
                 RowState::Loading => ("Cargando…".into(), theme.secondary_text),
@@ -780,15 +831,18 @@ impl Pane {
                 RowState::Entry(_) => unreachable!(),
             };
             let inset = if columns.size { 18. } else { 4. };
-            return base.id(ElementId::named_usize("status", index)).child(
-                div()
-                    .min_w_0()
-                    .pl(offset + px(inset))
-                    .truncate()
-                    .text_size(px(12.))
-                    .text_color(color)
-                    .child(text),
-            );
+            return base
+                .id(ElementId::named_usize("status", index))
+                .children(decoration)
+                .child(
+                    div()
+                        .min_w_0()
+                        .pl(offset + px(inset))
+                        .truncate()
+                        .text_size(px(12.))
+                        .text_color(color)
+                        .child(text),
+                );
         };
 
         let expanded = row.expanded;
@@ -797,7 +851,7 @@ impl Pane {
         let path = row.path.clone();
         let name = entry.name.to_string_lossy().into_owned();
         let file_icon = match entry.kind {
-            EntryKind::Directory if expanded => IconName::FolderOpen,
+            EntryKind::Directory if expanded || target_folder => IconName::FolderOpen,
             EntryKind::Directory => IconName::Folder,
             EntryKind::Symlink => IconName::Symlink,
             _ if local::has_text_extension(Path::new(&entry.name)) => IconName::FileText,
@@ -859,6 +913,19 @@ impl Pane {
             })
             .when(!selected, |row| {
                 row.hover(move |style| style.bg(theme.hover))
+            })
+            .children(decoration)
+            .when(target_folder, |row| {
+                row.child(
+                    div()
+                        .absolute()
+                        .left(px(4.))
+                        .right(px(4.))
+                        .top(px(2.))
+                        .bottom(px(2.))
+                        .rounded(px(6.))
+                        .bg(theme.text_selection),
+                )
             })
             .child(
                 div()
@@ -936,15 +1003,85 @@ impl Pane {
                 self.wire_finder_drag(element, drag, cx)
             });
         if expandable {
-            self.drop_zone(element, Some(row.path.clone()), theme, cx)
+            self.external_drop_zone(element, Some(row.path.clone()), theme, cx)
         } else {
-            element.on_drop(|_: &operations::Drag, _, _| {})
+            element
+        }
+    }
+
+    fn drop_rows(&self) -> Vec<RowInfo<'_>> {
+        self.tree
+            .rows
+            .iter()
+            .map(|row| RowInfo {
+                path: &row.path,
+                depth: row.depth,
+                is_dir: row
+                    .entry()
+                    .is_some_and(|entry| entry.kind == EntryKind::Directory),
+                expanded: row.expanded,
+            })
+            .collect()
+    }
+
+    fn update_drop_decoration(&mut self, active_drag: bool) {
+        if !active_drag {
+            self.drop_target = None;
+            self.spring = None;
+            let Some((source, hover)) = &self.dev_file_drag else {
+                return;
+            };
+            let root = self.root();
+            let source = root.join(source);
+            if !self
+                .tree
+                .rows
+                .iter()
+                .any(|row| row.path.as_ref() == source && row.entry().is_some())
+            {
+                return;
+            }
+            let hovered = if hover == Path::new(".") {
+                None
+            } else {
+                let path = root.join(hover);
+                let Some(index) = self
+                    .tree
+                    .rows
+                    .iter()
+                    .position(|row| row.path.as_ref() == path)
+                else {
+                    return;
+                };
+                Some(index)
+            };
+            self.drop_target =
+                drop_target::resolve(&self.drop_rows(), root, hovered, &[source], true);
+        } else if let Some(drop) = &self.drop_target {
+            // An asynchronous listing or spring expansion can change the visible block
+            // while the pointer is stationary.
+            if matches!(drop.target, Target::Folder { .. }) {
+                if let Some(row) = self.tree.rows.iter().position(|row| {
+                    row.path.as_ref() == drop.folder
+                        && row.entry().is_some_and(|entry| entry.is_directory())
+                }) {
+                    let target = drop_target::folder_target(&self.drop_rows(), row);
+                    self.drop_target.as_mut().unwrap().target = target;
+                } else {
+                    self.drop_target = None;
+                    self.spring = None;
+                }
+            } else if drop.folder != self.tree.root {
+                self.drop_target = None;
+                self.spring = None;
+            }
         }
     }
 }
 
 impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.update_drop_decoration(cx.has_active_drag());
         self.check_copy_selection();
         let theme = Theme::for_window(window);
         let active = self.focus.contains_focused(window, cx);
@@ -1024,7 +1161,12 @@ impl Render for Pane {
                     this.list_focus.focus(window, cx);
                 }
             }))
-            .child(self.drop_zone(self.toolbar(theme, cx).id("pane-toolbar"), None, theme, cx))
+            .child(self.external_drop_zone(
+                self.toolbar(theme, cx).id("pane-toolbar"),
+                None,
+                theme,
+                cx,
+            ))
             .when_some(self.path_error.clone(), |pane, error| {
                 pane.child(motion::appear(
                     div()
@@ -1039,9 +1181,14 @@ impl Render for Pane {
                     motion::FAST,
                 ))
             })
-            .child(self.drop_zone(columns.header(theme).id("column-headers"), None, theme, cx))
+            .child(self.external_drop_zone(
+                columns.header(theme).id("column-headers"),
+                None,
+                theme,
+                cx,
+            ))
             .child(
-                self.drop_zone(
+                self.external_drop_zone(
                     div()
                         .id("file-tree")
                         .role(Role::Tree)
@@ -1122,6 +1269,8 @@ impl Render for Pane {
                             }
                         }))
                         .child(list)
+                        .on_drag_move(cx.listener(Self::drag_move))
+                        .on_drop(cx.listener(Self::drop_files))
                         .when(empty, |list| {
                             list.child(
                                 div()
@@ -1132,7 +1281,24 @@ impl Render for Pane {
                                     .text_color(theme.secondary_text)
                                     .child("Carpeta vacía"),
                             )
-                        }),
+                        })
+                        .when(
+                            self.drop_target
+                                .as_ref()
+                                .is_some_and(|drop| drop.target == Target::Root),
+                            |list| {
+                                // This decoration has no interaction handlers or hitbox.
+                                list.child(
+                                    div()
+                                        .absolute()
+                                        .inset(px(2.))
+                                        .rounded(px(6.))
+                                        .border_2()
+                                        .border_color(theme.accent)
+                                        .bg(theme.accent.opacity(0.2)),
+                                )
+                            },
+                        ),
                     None,
                     theme,
                     cx,
@@ -1209,7 +1375,7 @@ fn row_layout() -> Div {
         .flex()
         .items_center()
         .w_full()
-        .h(px(25.))
+        .h(ROW_HEIGHT)
         .px_2()
         .gap_2()
         .overflow_hidden()

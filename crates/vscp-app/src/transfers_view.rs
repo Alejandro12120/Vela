@@ -24,6 +24,7 @@ use crate::{
     },
     dev, file_metadata,
     icons::{IconName, icon},
+    move_paths,
     pane::{Pane, Source, finder::Purpose},
     theme::Theme,
 };
@@ -125,6 +126,12 @@ struct Deletion {
     pane: WeakEntity<Pane>,
 }
 
+struct PendingConflict {
+    job: Option<JobId>,
+    conflict: Conflict,
+    allow_overwrite: bool,
+}
+
 pub(crate) enum TransferOrigin {
     Pane,
     RemoteCopy(Session),
@@ -136,7 +143,7 @@ pub struct Transfers {
     server: String,
     rows: Vec<Row>,
     expanded: bool,
-    conflicts: Vec<(JobId, Conflict)>,
+    conflicts: Vec<PendingConflict>,
     deletion: Option<Deletion>,
     apply_all: bool,
     focus: FocusHandle,
@@ -242,12 +249,16 @@ impl Transfers {
                 if this
                     .update_in(cx, |this, window, cx| {
                         if let Event::Conflict(conflict) = event {
-                            this.conflicts.push((id, conflict));
+                            this.conflicts.push(PendingConflict {
+                                job: Some(id),
+                                conflict,
+                                allow_overwrite: true,
+                            });
                         } else if let Some(row) = this.rows.iter_mut().find(|row| row.id == id) {
                             row.update(event);
                         }
                         if finished {
-                            this.conflicts.retain(|(job, _)| *job != id);
+                            this.conflicts.retain(|pending| pending.job != Some(id));
                             this.restore_focus(window, cx);
                         }
                         cx.notify();
@@ -271,7 +282,7 @@ impl Transfers {
                     row.status = Status::Error;
                     row.details
                         .push("La sesión terminó durante la transferencia.".into());
-                    this.conflicts.retain(|(job, _)| *job != id);
+                    this.conflicts.retain(|pending| pending.job != Some(id));
                     this.restore_focus(window, cx);
                     cx.notify();
                 }
@@ -366,14 +377,56 @@ impl Transfers {
 
     fn answer(&mut self, choice: Choice, window: &mut Window, cx: &mut Context<Self>) {
         if !self.conflicts.is_empty() {
-            let (_, conflict) = self.conflicts.remove(0);
-            conflict.answer(Answer {
+            if choice == Choice::Overwrite && !self.conflicts[0].allow_overwrite {
+                return;
+            }
+            self.conflicts.remove(0).conflict.answer(Answer {
                 choice,
                 apply_to_all: std::mem::take(&mut self.apply_all),
             });
         }
         self.restore_focus(window, cx);
         cx.notify();
+    }
+
+    pub fn move_paths(
+        &mut self,
+        source: Source,
+        sources: Vec<PathBuf>,
+        folder: PathBuf,
+        pane: WeakEntity<Pane>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let executor = cx.background_executor().clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let outcome = move_paths::run(
+                source,
+                sources,
+                folder,
+                &executor,
+                |conflict, allow_overwrite| {
+                    this.update(cx, |this, cx| {
+                        this.conflicts.push(PendingConflict {
+                            job: None,
+                            conflict,
+                            allow_overwrite,
+                        });
+                        cx.notify();
+                    })
+                    .is_ok()
+                },
+            )
+            .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.error = (!outcome.errors.is_empty()).then(|| outcome.errors.join("\n"));
+                let _ = pane.update(cx, |pane, cx| {
+                    pane.refresh_after_move(outcome.parents, outcome.moved, window, cx);
+                });
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -448,7 +501,8 @@ impl Transfers {
     }
 
     fn dialog(&self, theme: Theme, cx: &Context<Self>) -> Option<gpui::Div> {
-        let (title, lead, body, footer) = if let Some((_, conflict)) = self.conflicts.first() {
+        let (title, lead, body, footer) = if let Some(pending) = self.conflicts.first() {
+            let conflict = &pending.conflict;
             let now = SystemTime::now();
             let metadata = |label, entry: &vscp_core::Entry| {
                 div()
@@ -524,6 +578,10 @@ impl Transfers {
                             ("Omitir", Choice::Skip),
                             ("Renombrar", Choice::Rename),
                         ]
+                        .into_iter()
+                        .filter(|(_, choice)| {
+                            *choice != Choice::Overwrite || pending.allow_overwrite
+                        })
                         .map(|(label, choice)| {
                             Self::dialog_button(label, label, theme, cx, move |this, window, cx| {
                                 this.answer(choice, window, cx)

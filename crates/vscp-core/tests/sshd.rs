@@ -1236,10 +1236,18 @@ async fn remote_file_operations_refuse_rename_collision_and_retain_link_target()
         .unwrap_err();
     assert!(matches!(error, Error::Io(error) if error.kind() == io::ErrorKind::AlreadyExists));
     assert!(renamed.join("file").exists());
+    let sibling = fixture.path("sibling");
+    within(session.mkdir(sibling.clone())).await;
+    let moved = sibling.join("renamed");
+    within(session.rename(renamed.clone(), moved.clone())).await;
+    assert!(!renamed.exists());
+    assert_eq!(fs::read(moved.join("file")).unwrap(), b"tree");
+    assert_eq!(fs::read_link(moved.join("link")).unwrap(), outside);
     symlink(&outside, folder.join("standalone")).unwrap();
     let trailing = PathBuf::from(format!("{}/", folder.join("standalone").display()));
     within(session.remove_tree(trailing)).await;
     within(session.remove_tree(folder.clone())).await;
+    within(session.remove_tree(sibling)).await;
     assert!(!folder.exists());
     assert_eq!(fs::read(outside.join("keep")).unwrap(), b"safe");
     disconnect(&session).await;

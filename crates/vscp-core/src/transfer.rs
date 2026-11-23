@@ -112,6 +112,23 @@ pub struct Conflict {
 }
 
 impl Conflict {
+    pub fn new(
+        destination: PathBuf,
+        source: Entry,
+        existing: Entry,
+    ) -> (Self, async_channel::Receiver<Answer>) {
+        let (reply, answer) = async_channel::bounded(1);
+        (
+            Self {
+                destination,
+                source,
+                existing,
+                reply,
+            },
+            answer,
+        )
+    }
+
     pub fn answer(self, answer: Answer) {
         let _ = self.reply.try_send(answer);
     }
@@ -563,13 +580,8 @@ impl Work {
             let choice = if let Some(choice) = *policy {
                 choice
             } else {
-                let (reply, answer) = async_channel::bounded(1);
-                self.emit(Event::Conflict(Conflict {
-                    destination: target.clone(),
-                    source: entry,
-                    existing,
-                    reply,
-                }));
+                let (conflict, answer) = Conflict::new(target.clone(), entry, existing);
+                self.emit(Event::Conflict(conflict));
                 let answer = tokio::select! {
                     _ = self.cancellation.recv() => return Err(Error::Cancelled),
                     answer = answer.recv() => answer,

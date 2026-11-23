@@ -61,7 +61,7 @@ impl Edits {
         self.index.take()
     }
 
-    fn rows(&self) -> &[Edit] {
+    pub(super) fn rows(&self) -> &[Edit] {
         self.index.as_ref().map_or(&[], Index::edits)
     }
 

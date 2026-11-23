@@ -256,10 +256,10 @@ impl Panes {
             .gap_1()
             .child(sidebar_button)
             .child(view_switch)
+            // The name keeps its natural width. `user@host` starts from zero
+            // width, takes what is left and shrinks to 80 px before the name.
             .child(
                 div()
-                    .flex_grow(1.)
-                    .flex_shrink(0.01)
                     .min_w_0()
                     .truncate()
                     .font_weight(FontWeight::MEDIUM)
@@ -267,7 +267,7 @@ impl Panes {
             )
             .child(
                 div()
-                    .flex_shrink(1.)
+                    .flex_1()
                     .min_w(px(80.))
                     .truncate()
                     .text_color(theme.secondary_text)

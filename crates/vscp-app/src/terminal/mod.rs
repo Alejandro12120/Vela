@@ -2,6 +2,7 @@
 
 mod colors;
 mod element;
+pub(crate) mod font_size;
 mod keys;
 pub(crate) mod kitty;
 mod mouse;

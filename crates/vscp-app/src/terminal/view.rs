@@ -24,12 +24,25 @@ use crate::{
 use super::{
     GridSize, Terminal,
     element::{Geometry, Surface},
-    keys,
+    font_size, keys,
     kitty::{Kitty, OptionAsAlt},
     mouse,
 };
 
-actions!(terminal, [Tab, BackTab, Escape, Copy, Paste, SelectAll]);
+actions!(
+    terminal,
+    [
+        Tab,
+        BackTab,
+        Escape,
+        Copy,
+        Paste,
+        SelectAll,
+        IncreaseFontSize,
+        DecreaseFontSize,
+        ResetFontSize,
+    ]
+);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -42,12 +55,20 @@ pub fn bind_keys(cx: &mut App) {
         crate::keybindings::binding(cx, "cmd-c", Copy, Some("Terminal")),
         crate::keybindings::binding(cx, "cmd-v", Paste, Some("Terminal")),
         crate::keybindings::binding(cx, "cmd-a", SelectAll, Some("Terminal")),
+        crate::keybindings::binding(cx, "cmd-+", IncreaseFontSize, Some("Terminal")),
+        crate::keybindings::binding(cx, "cmd--", DecreaseFontSize, Some("Terminal")),
+        crate::keybindings::binding(cx, "cmd-0", ResetFontSize, Some("Terminal")),
+        crate::keybindings::binding(cx, "cmd-=", IncreaseFontSize, Some("Terminal")),
     ]);
     #[cfg(not(target_os = "macos"))]
     cx.bind_keys([
         crate::keybindings::binding(cx, "ctrl-shift-c", Copy, Some("Terminal")),
         crate::keybindings::binding(cx, "ctrl-shift-v", Paste, Some("Terminal")),
         crate::keybindings::binding(cx, "ctrl-shift-a", SelectAll, Some("Terminal")),
+        crate::keybindings::binding(cx, "ctrl-*", IncreaseFontSize, Some("Terminal")),
+        crate::keybindings::binding(cx, "ctrl-+", IncreaseFontSize, Some("Terminal")),
+        crate::keybindings::binding(cx, "ctrl-_", DecreaseFontSize, Some("Terminal")),
+        crate::keybindings::binding(cx, "ctrl-=", ResetFontSize, Some("Terminal")),
     ]);
 }
 
@@ -61,6 +82,7 @@ pub(super) struct Marked {
 pub struct TerminalView {
     pub(super) terminal: Option<Terminal>,
     pub(super) settings: Kitty,
+    kitty_size: f32,
     pub(super) focus: FocusHandle,
     pub(super) fonts: [Font; 4],
     pub(super) geometry: Option<Geometry>,
@@ -85,9 +107,13 @@ impl EventEmitter<Restart> for TerminalView {}
 
 impl TerminalView {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        font_size::ensure(cx);
+        cx.observe_global::<font_size::FontSize>(|view, cx| view.apply_font_size(cx))
+            .detach();
         let mut view = Self {
             terminal: None,
             settings: Kitty::default(),
+            kitty_size: Kitty::default().size,
             focus: cx.focus_handle(),
             fonts: std::array::from_fn(|_| font(crate::theme::monospace())),
             geometry: None,
@@ -317,11 +343,23 @@ impl TerminalView {
             }
             face
         });
+        self.kitty_size = settings.size;
+        settings.size = font_size::effective(self.kitty_size, cx);
         if let Some(terminal) = &self.terminal {
             terminal.reconfigure(&settings);
         }
         self.settings = settings;
         self.geometry = None;
+    }
+
+    fn apply_font_size(&mut self, cx: &mut Context<Self>) {
+        let size = font_size::effective(self.kitty_size, cx);
+        if self.settings.size == size {
+            return;
+        }
+        self.settings.size = size;
+        self.geometry = None;
+        cx.notify();
     }
 
     pub fn settings(&self) -> &Kitty {
@@ -529,6 +567,15 @@ impl Render for TerminalView {
                     grid.selection = Some(selection);
                     cx.notify();
                 }
+            }))
+            .on_action(cx.listener(|view, _: &IncreaseFontSize, _, cx| {
+                font_size::increase(cx, view.kitty_size);
+            }))
+            .on_action(cx.listener(|view, _: &DecreaseFontSize, _, cx| {
+                font_size::decrease(cx, view.kitty_size);
+            }))
+            .on_action(cx.listener(|view, _: &ResetFontSize, _, cx| {
+                font_size::reset(cx, view.kitty_size);
             }))
             .child(
                 div()
@@ -773,5 +820,157 @@ mod tests {
             view.replace_text_in_range(None, "é", window, cx);
         });
         assert_eq!(*sink.lock().unwrap(), "é".as_bytes());
+    }
+
+    #[cfg(target_os = "macos")]
+    const GROW_SPANISH: &str = "cmd-+";
+    #[cfg(not(target_os = "macos"))]
+    const GROW_SPANISH: &str = "ctrl-*";
+    #[cfg(target_os = "macos")]
+    const GROW_US: &str = "cmd-=";
+    #[cfg(not(target_os = "macos"))]
+    const GROW_US: &str = "ctrl-+";
+    #[cfg(target_os = "macos")]
+    const SHRINK: &str = "cmd--";
+    #[cfg(not(target_os = "macos"))]
+    const SHRINK: &str = "ctrl-_";
+    #[cfg(target_os = "macos")]
+    const RESET: &str = "cmd-0";
+    #[cfg(not(target_os = "macos"))]
+    const RESET: &str = "ctrl-=";
+
+    fn size(cx: &mut VisualTestContext, terminal: &Entity<TerminalView>) -> f32 {
+        terminal.read_with(cx, |view, _| view.settings.size)
+    }
+
+    #[gpui::test]
+    fn font_size_shortcuts_grow_shrink_and_reset(cx: &mut TestAppContext) {
+        let (_, terminal, sink, cx) = open(cx);
+        let base = size(cx, &terminal);
+        cx.simulate_keystrokes(GROW_SPANISH);
+        assert_eq!(size(cx, &terminal), base + 1.);
+        cx.simulate_keystrokes(SHRINK);
+        assert_eq!(size(cx, &terminal), base);
+        cx.simulate_keystrokes(GROW_US);
+        assert_eq!(size(cx, &terminal), base + 1.);
+        cx.simulate_keystrokes(RESET);
+        assert_eq!(size(cx, &terminal), base);
+        assert!(sink.lock().unwrap().is_empty());
+    }
+
+    #[gpui::test]
+    fn font_size_clamps_at_both_ends(cx: &mut TestAppContext) {
+        let (_, terminal, _, cx) = open(cx);
+        cx.simulate_keystrokes(&vec![GROW_SPANISH; 60].join(" "));
+        assert_eq!(size(cx, &terminal), 48.);
+        cx.simulate_keystrokes(&vec![SHRINK; 60].join(" "));
+        assert_eq!(size(cx, &terminal), 6.);
+        cx.simulate_keystrokes(RESET);
+        assert_eq!(size(cx, &terminal), 11.);
+    }
+
+    #[gpui::test]
+    fn font_size_reset_uses_kitty_size_outside_clamp(cx: &mut TestAppContext) {
+        let (_, terminal, _, cx) = open(cx);
+        for base in [4.5, 60.] {
+            terminal.update_in(cx, |view, _, cx| {
+                view.kitty_size = base;
+                view.apply_font_size(cx);
+                assert_eq!(view.settings.size, base);
+            });
+            cx.simulate_keystrokes(GROW_SPANISH);
+            assert_eq!(size(cx, &terminal), base.clamp(6., 48.));
+            cx.simulate_keystrokes(RESET);
+            assert_eq!(size(cx, &terminal), base);
+        }
+    }
+
+    struct PairHost {
+        terminals: [Entity<TerminalView>; 2],
+    }
+
+    impl Render for PairHost {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .flex()
+                .key_context("Workspace")
+                .child(self.terminals[0].clone())
+                .child(self.terminals[1].clone())
+        }
+    }
+
+    #[gpui::test]
+    fn font_size_applies_to_all_terminals_and_new_ones(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            crate::workspace::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let sink = Sink::default();
+        let (host, cx) = cx.add_window_view({
+            let sink = sink.clone();
+            move |window, cx| {
+                let second = cx.new(|cx| {
+                    let mut view = TerminalView::new(cx);
+                    let mut terminal = Terminal::new(&view.settings, GridSize::INITIAL);
+                    terminal.sink = Some(sink.clone());
+                    view.terminal = Some(terminal);
+                    view
+                });
+                let first = cx.new(|cx| {
+                    let mut view = TerminalView::new(cx);
+                    let mut terminal = Terminal::new(&view.settings, GridSize::INITIAL);
+                    terminal.sink = Some(sink.clone());
+                    view.terminal = Some(terminal);
+                    view.focus(window, cx);
+                    view
+                });
+                PairHost {
+                    terminals: [first, second],
+                }
+            }
+        });
+        cx.run_until_parked();
+        let terminals = host.read_with(cx, |host, _| host.terminals.clone());
+        cx.simulate_keystrokes(GROW_SPANISH);
+        assert_eq!(size(cx, &terminals[0]), 12.);
+        assert_eq!(size(cx, &terminals[1]), 12.);
+        let later = cx.update(|_, cx| cx.new(TerminalView::new));
+        assert_eq!(later.read_with(cx, |view, _| view.settings.size), 12.);
+        cx.simulate_keystrokes(RESET);
+        assert_eq!(size(cx, &terminals[0]), 11.);
+        assert_eq!(size(cx, &terminals[1]), 11.);
+    }
+
+    #[gpui::test]
+    fn unshifted_ctrl_minus_and_zero_are_not_bound(cx: &mut TestAppContext) {
+        let (_, terminal, sink, cx) = open(cx);
+        cx.simulate_keystrokes("ctrl-- ctrl-0");
+        assert_eq!(size(cx, &terminal), 11.);
+        assert!(sink.lock().unwrap().is_empty());
+    }
+
+    #[gpui::test]
+    fn larger_font_shrinks_grid(cx: &mut TestAppContext) {
+        let (_, terminal, _, cx) = open(cx);
+        let before = terminal.read_with(cx, |view, _| {
+            let terminal = view.terminal.as_ref().unwrap();
+            (terminal.size.cols, terminal.size.rows)
+        });
+        cx.simulate_keystrokes(GROW_SPANISH);
+        cx.run_until_parked();
+        let after = terminal.read_with(cx, |view, _| {
+            let terminal = view.terminal.as_ref().unwrap();
+            (terminal.size.cols, terminal.size.rows)
+        });
+        assert!(after.0 < before.0, "cols {before:?} -> {after:?}");
+        assert!(after.1 < before.1, "rows {before:?} -> {after:?}");
+        let grid = terminal.read_with(cx, |view, _| {
+            let terminal = view.terminal.as_ref().unwrap();
+            let grid = terminal.grid.lock();
+            (grid.columns(), grid.screen_lines())
+        });
+        assert_eq!(grid.0, usize::from(after.0));
+        assert_eq!(grid.1, usize::from(after.1));
     }
 }

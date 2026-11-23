@@ -55,6 +55,7 @@ fn main() {
             }
             cx.set_reduce_motion(accessibility::reduce_motion());
             dev::trace_keystrokes(cx);
+            terminal::font_size::initialize(cx);
             pane::finder::initialize(cx);
             workspace::bind_keys(cx);
             pane::bind_keys(cx);

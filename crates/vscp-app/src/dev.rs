@@ -256,6 +256,13 @@ pub fn kitty_conf() -> Option<PathBuf> {
     value("VSCP_DEV_KITTY_CONF").map(PathBuf::from)
 }
 
+/// Initial terminal font size in points, for captures without physical keys.
+pub fn terminal_font_size() -> Option<f32> {
+    value("VSCP_DEV_TERMINAL_FONT_SIZE")
+        .and_then(|value| value.parse::<f32>().ok())
+        .filter(|size| size.is_finite() && *size > 0.)
+}
+
 pub fn open_file(path: &std::path::Path, editor: Option<&std::path::Path>) -> io::Result<()> {
     if launches_suppressed() {
         return Ok(());

@@ -7,6 +7,18 @@ use std::{
     path::Path,
 };
 
+#[cfg(not(target_os = "macos"))]
+use std::{
+    ffi::{OsStr, OsString},
+    fs::{OpenOptions, Permissions},
+    io::Write,
+    os::unix::{
+        ffi::{OsStrExt, OsStringExt},
+        fs::PermissionsExt,
+    },
+    path::PathBuf,
+};
+
 use crate::{Entry, EntryKind};
 
 /// Read a directory, skipping individual entries that disappeared or cannot be read.
@@ -154,10 +166,269 @@ pub fn trash(path: &Path) -> io::Result<Option<std::path::PathBuf>> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn trash(_: &Path) -> io::Result<Option<std::path::PathBuf>> {
-    Err(io::Error::new(
+pub fn trash(path: &Path) -> io::Result<Option<PathBuf>> {
+    trash_in(path, &home_trash_dir()?, unsafe { libc::getuid() })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn home_trash_dir() -> io::Result<PathBuf> {
+    if let Some(base) = std::env::var_os("XDG_DATA_HOME")
+        && !base.is_empty()
+    {
+        let base = PathBuf::from(base);
+        if base.is_absolute() {
+            return Ok(base.join("Trash"));
+        }
+    }
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME no definido"))?;
+    Ok(PathBuf::from(home).join(".local/share/Trash"))
+}
+
+#[cfg(not(target_os = "macos"))]
+struct TrashLocation {
+    root: PathBuf,
+    relative_to: Option<PathBuf>,
+}
+
+#[cfg(not(target_os = "macos"))]
+fn trash_in(path: &Path, home_trash: &Path, uid: u32) -> io::Result<Option<PathBuf>> {
+    if !path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Se necesita una ruta absoluta",
+        ));
+    }
+    let dev = fs::symlink_metadata(path)?.dev();
+
+    let home_existed = home_trash.is_dir();
+    fs::create_dir_all(home_trash.join("files"))?;
+    fs::create_dir_all(home_trash.join("info"))?;
+    if !home_existed {
+        fs::set_permissions(home_trash, Permissions::from_mode(0o700))?;
+    }
+
+    let location = if fs::metadata(home_trash)?.dev() == dev {
+        TrashLocation {
+            root: home_trash.to_owned(),
+            relative_to: None,
+        }
+    } else {
+        volume_trash(&mount_topdir(path, dev)?, uid)?
+    };
+
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Se necesita un nombre"))?
+        .to_owned();
+    let files = location.root.join("files");
+    let info = location.root.join("info");
+
+    let stored_path = match &location.relative_to {
+        None => path.as_os_str().as_bytes().to_vec(),
+        Some(base) => path
+            .strip_prefix(base)
+            .map(|relative| relative.as_os_str().as_bytes().to_vec())
+            .unwrap_or_else(|_| path.as_os_str().as_bytes().to_vec()),
+    };
+    let contents = format!(
+        "[Trash Info]\nPath={}\nDeletionDate={}\n",
+        percent_encode(&stored_path),
+        deletion_date()?
+    );
+
+    let mut number = 1u32;
+    let (chosen, info_path, mut info_file) = loop {
+        let candidate = if number == 1 {
+            name.clone()
+        } else {
+            numbered_name(&name, number)
+        };
+        let mut info_name = candidate.clone();
+        info_name.push(".trashinfo");
+        let info_path = info.join(info_name);
+        let file = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&info_path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                number = number
+                    .checked_add(1)
+                    .ok_or_else(|| io::Error::other("Demasiados nombres en la Papelera"))?;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        match fs::symlink_metadata(files.join(&candidate)) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                drop(file);
+                let _ = fs::remove_file(&info_path);
+                number = number
+                    .checked_add(1)
+                    .ok_or_else(|| io::Error::other("Demasiados nombres en la Papelera"))?;
+                continue;
+            }
+            Err(error) => {
+                drop(file);
+                let _ = fs::remove_file(&info_path);
+                return Err(error);
+            }
+        }
+        break (candidate, info_path, file);
+    };
+
+    let written = (|| -> io::Result<()> {
+        info_file.write_all(contents.as_bytes())?;
+        info_file.flush()?;
+        info_file.sync_all()
+    })();
+    if let Err(error) = written {
+        drop(info_file);
+        let _ = fs::remove_file(&info_path);
+        return Err(error);
+    }
+    drop(info_file);
+
+    let destination = files.join(&chosen);
+    if let Err(error) = fs::rename(path, &destination) {
+        let _ = fs::remove_file(&info_path);
+        return Err(error);
+    }
+    Ok(Some(destination))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn mount_topdir(path: &Path, dev: u64) -> io::Result<PathBuf> {
+    let mut top = path.parent().unwrap_or(path).to_owned();
+    while let Some(parent) = top.parent() {
+        if fs::metadata(parent)?.dev() != dev {
+            break;
+        }
+        top = parent.to_owned();
+    }
+    Ok(top)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn volume_trash(topdir: &Path, uid: u32) -> io::Result<TrashLocation> {
+    let dot_trash = topdir.join(".Trash");
+    if let Ok(meta) = fs::symlink_metadata(&dot_trash)
+        && meta.is_dir()
+        && meta.mode() & 0o1000 != 0
+    {
+        let user_dir = dot_trash.join(uid.to_string());
+        if prepare_trash_root(&user_dir) {
+            return Ok(TrashLocation {
+                root: user_dir,
+                relative_to: Some(topdir.to_owned()),
+            });
+        }
+    }
+
+    let user_dir = topdir.join(format!(".Trash-{uid}"));
+    match fs::symlink_metadata(&user_dir) {
+        Ok(meta) if meta.is_dir() && meta.uid() == uid => {}
+        Ok(_) => return Err(trash_unavailable()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir(&user_dir)?;
+            fs::set_permissions(&user_dir, Permissions::from_mode(0o700))?;
+        }
+        Err(error) => return Err(error),
+    }
+    fs::create_dir_all(user_dir.join("files"))?;
+    fs::create_dir_all(user_dir.join("info"))?;
+    Ok(TrashLocation {
+        root: user_dir,
+        relative_to: Some(topdir.to_owned()),
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn prepare_trash_root(root: &Path) -> bool {
+    match fs::create_dir(root) {
+        Ok(()) => {
+            if fs::set_permissions(root, Permissions::from_mode(0o700)).is_err() {
+                return false;
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            if !fs::symlink_metadata(root).is_ok_and(|meta| meta.is_dir()) {
+                return false;
+            }
+        }
+        Err(_) => return false,
+    }
+    fs::create_dir_all(root.join("files")).is_ok() && fs::create_dir_all(root.join("info")).is_ok()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn trash_unavailable() -> io::Error {
+    io::Error::new(
         io::ErrorKind::Unsupported,
-        "Papelera no disponible en este sistema",
+        "No se puede mover a la Papelera en este disco",
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+fn numbered_name(original: &OsStr, number: u32) -> OsString {
+    let bytes = original.as_bytes();
+    let split = bytes
+        .iter()
+        .rposition(|&byte| byte == b'.')
+        .filter(|&dot| dot > 0);
+    let mut result = match split {
+        Some(dot) => bytes[..dot].to_vec(),
+        None => bytes.to_vec(),
+    };
+    result.push(b'.');
+    result.extend_from_slice(number.to_string().as_bytes());
+    if let Some(dot) = split {
+        result.push(b'.');
+        result.extend_from_slice(&bytes[dot + 1..]);
+    }
+    OsString::from_vec(result)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn percent_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    const KEEP: &[u8] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~/!$&'()*+,;=:@";
+    let mut encoded = String::with_capacity(bytes.len());
+    for &byte in bytes {
+        if KEEP.contains(&byte) {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push(HEX[(byte >> 4) as usize] as char);
+            encoded.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+    }
+    encoded
+}
+
+#[cfg(not(target_os = "macos"))]
+fn deletion_date() -> io::Result<String> {
+    let mut seconds: libc::time_t = 0;
+    if unsafe { libc::time(&mut seconds) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut broken_down = std::mem::MaybeUninit::<libc::tm>::uninit();
+    if unsafe { libc::localtime_r(&seconds, broken_down.as_mut_ptr()) }.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let time = unsafe { broken_down.assume_init() };
+    Ok(format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        time.tm_year + 1900,
+        time.tm_mon + 1,
+        time.tm_mday,
+        time.tm_hour,
+        time.tm_min,
+        time.tm_sec
     ))
 }
 
@@ -247,5 +518,156 @@ mod tests {
             link.symlink_target_kind
         );
         assert!(list_dir(&path.join("broken")).is_err());
+    }
+}
+
+#[cfg(all(test, not(target_os = "macos")))]
+mod trash_tests {
+    use super::*;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    fn uid() -> u32 {
+        unsafe { libc::getuid() }
+    }
+
+    fn assert_date(value: &str) {
+        assert_eq!(value.len(), 19, "{value}");
+        for (position, byte) in value.bytes().enumerate() {
+            match position {
+                4 | 7 => assert_eq!(byte, b'-'),
+                10 => assert_eq!(byte, b'T'),
+                13 | 16 => assert_eq!(byte, b':'),
+                _ => assert!(byte.is_ascii_digit(), "{value}"),
+            }
+        }
+    }
+
+    #[test]
+    fn moves_a_file_and_writes_trashinfo() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("trash");
+        let file = dir.path().join("notas.txt");
+        fs::write(&file, b"contenido").unwrap();
+
+        let trashed = trash_in(&file, &home, uid()).unwrap().unwrap();
+
+        assert_eq!(trashed, home.join("files/notas.txt"));
+        assert!(!file.exists());
+        assert_eq!(fs::read(&trashed).unwrap(), b"contenido");
+        let info = fs::read_to_string(home.join("info/notas.txt.trashinfo")).unwrap();
+        let lines: Vec<&str> = info.lines().collect();
+        assert_eq!(lines.len(), 3, "{info:?}");
+        assert_eq!(lines[0], "[Trash Info]");
+        assert_eq!(
+            lines[1],
+            format!("Path={}", percent_encode(file.as_os_str().as_bytes()))
+        );
+        assert_date(lines[2].strip_prefix("DeletionDate=").unwrap());
+    }
+
+    #[test]
+    fn moves_a_directory_with_its_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("trash");
+        let source = dir.path().join("carpeta");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("hijo.txt"), b"dentro").unwrap();
+
+        let trashed = trash_in(&source, &home, uid()).unwrap().unwrap();
+
+        assert_eq!(trashed, home.join("files/carpeta"));
+        assert!(!source.exists());
+        assert_eq!(fs::read(trashed.join("hijo.txt")).unwrap(), b"dentro");
+    }
+
+    #[test]
+    fn numbered_names_keep_the_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("trash");
+        let mut trashed = Vec::new();
+        for _ in 0..3 {
+            let file = dir.path().join("notas.txt");
+            fs::write(&file, b"x").unwrap();
+            trashed.push(trash_in(&file, &home, uid()).unwrap().unwrap());
+        }
+        let names: Vec<_> = trashed
+            .iter()
+            .map(|path| path.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(names, ["notas.txt", "notas.2.txt", "notas.3.txt"]);
+        assert!(home.join("info/notas.3.txt.trashinfo").is_file());
+
+        for name in ["name", "name"] {
+            let file = dir.path().join(name);
+            fs::write(&file, b"x").unwrap();
+            trashed.push(trash_in(&file, &home, uid()).unwrap().unwrap());
+        }
+        assert_eq!(trashed[4].file_name().unwrap(), "name.2");
+        assert!(home.join("info/name.2.trashinfo").is_file());
+    }
+
+    #[test]
+    fn encodes_the_original_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("trash");
+        let file = dir.path().join("espacio ñ%#.txt");
+        fs::write(&file, b"x").unwrap();
+
+        trash_in(&file, &home, uid()).unwrap().unwrap();
+
+        let info = fs::read_to_string(home.join("info/espacio ñ%#.txt.trashinfo")).unwrap();
+        let expected = format!(
+            "Path={}/espacio%20%C3%B1%25%23.txt",
+            percent_encode(dir.path().as_os_str().as_bytes())
+        );
+        assert!(info.contains(&expected), "{info:?}");
+    }
+
+    #[test]
+    fn trashes_a_symlink_without_following_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("trash");
+        let target = dir.path().join("target");
+        fs::write(&target, b"seguir").unwrap();
+        let link = dir.path().join("link");
+        symlink("target", &link).unwrap();
+
+        let trashed = trash_in(&link, &home, uid()).unwrap().unwrap();
+
+        assert_eq!(fs::read_link(&trashed).unwrap(), Path::new("target"));
+        assert!(!link.exists());
+        assert_eq!(fs::read(&target).unwrap(), b"seguir");
+    }
+
+    #[test]
+    fn rejects_relative_and_missing_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("trash");
+
+        let error = trash_in(Path::new("relativo.txt"), &home, uid()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+
+        let missing = dir.path().join("fantasma.txt");
+        let error = trash_in(&missing, &home, uid()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(!home.join("info/fantasma.txt.trashinfo").exists());
+    }
+
+    #[test]
+    fn a_failed_move_leaves_no_info_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("trash");
+        fs::create_dir_all(home.join("files")).unwrap();
+        fs::create_dir_all(home.join("info")).unwrap();
+        let file = dir.path().join("notas.txt");
+        fs::write(&file, b"x").unwrap();
+
+        fs::set_permissions(home.join("files"), Permissions::from_mode(0o500)).unwrap();
+        let result = trash_in(&file, &home, uid());
+        fs::set_permissions(home.join("files"), Permissions::from_mode(0o700)).unwrap();
+
+        assert!(result.is_err());
+        assert_eq!(fs::read_dir(home.join("info")).unwrap().count(), 0);
+        assert!(file.exists());
     }
 }

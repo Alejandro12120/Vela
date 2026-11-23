@@ -182,19 +182,7 @@ async fn remove_destination(
     path: PathBuf,
     executor: &BackgroundExecutor,
 ) -> Result<(), Error> {
-    if cfg!(target_os = "macos") || matches!(source, Source::Remote(_)) {
-        return source.delete(path, executor).await;
-    }
-    executor
-        .spawn(async move {
-            if std::fs::symlink_metadata(&path)?.is_dir() {
-                std::fs::remove_dir_all(&path)?;
-            } else {
-                std::fs::remove_file(&path)?;
-            }
-            Ok(())
-        })
-        .await
+    source.delete(path, executor).await
 }
 
 #[cfg(test)]
@@ -301,6 +289,9 @@ mod tests {
     async fn overwrites_a_local_directory(cx: &mut TestAppContext) {
         let fixture = tempfile::tempdir().unwrap();
         let root = fixture.path();
+        let data_home = root.join("data-home");
+        let previous = std::env::var_os("XDG_DATA_HOME");
+        unsafe { std::env::set_var("XDG_DATA_HOME", &data_home) };
         fs::create_dir_all(root.join("dest/a")).unwrap();
         fs::write(root.join("dest/a/old.txt"), "old").unwrap();
         fs::create_dir(root.join("a")).unwrap();
@@ -320,10 +311,17 @@ mod tests {
             },
         )
         .await;
+        match previous {
+            Some(value) => unsafe { std::env::set_var("XDG_DATA_HOME", value) },
+            None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+        }
         assert!(result.errors.is_empty());
         assert!(!root.join("dest/a/old.txt").exists());
         assert!(root.join("dest/a/new.txt").is_file());
         assert!(!root.join("a").exists());
+        let trash = data_home.join("Trash");
+        assert!(trash.join("files/a/old.txt").is_file());
+        assert!(trash.join("info/a.trashinfo").is_file());
     }
 
     #[gpui::test]

@@ -87,7 +87,12 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", CancelRename, Some("FileRename > TextInput")),
         KeyBinding::new("escape", DismissFileMenu, Some("FilePane")),
         crate::keybindings::binding(cx, "secondary-shift-n", NewFolder, Some("FileList")),
-        crate::keybindings::binding(cx, "secondary-backspace", DeleteFiles, Some("FileList")),
+        crate::keybindings::binding(
+            cx,
+            crate::keybindings::shortcut("cmd-backspace", "delete"),
+            DeleteFiles,
+            Some("FileList"),
+        ),
         KeyBinding::new("up", MoveUp, Some("FileList")),
         KeyBinding::new("down", MoveDown, Some("FileList")),
         KeyBinding::new("shift-up", ExtendUp, Some("FileList")),

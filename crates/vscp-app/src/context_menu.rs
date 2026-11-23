@@ -115,7 +115,7 @@ impl Menu {
                 Action::Delete,
                 IconName::Trash,
                 "Eliminar…",
-                crate::keybindings::shortcut("⌘⌫", "Ctrl+⌫"),
+                crate::keybindings::shortcut("⌘⌫", "Supr"),
                 self.on_row && selected > 0,
             )
             .danger(),

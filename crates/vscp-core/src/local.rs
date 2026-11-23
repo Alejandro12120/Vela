@@ -208,13 +208,20 @@ fn trash_in(path: &Path, home_trash: &Path, uid: u32) -> io::Result<Option<PathB
         fs::set_permissions(home_trash, Permissions::from_mode(0o700))?;
     }
 
+    let home = || TrashLocation {
+        root: home_trash.to_owned(),
+        relative_to: None,
+    };
+    // Like KIO, a disk other than the home one keeps its own trash only when
+    // it is a block device. Memory and virtual filesystems such as tmpfs, and
+    // a trash that cannot be prepared, fall back to the home trash, which
+    // file managers always list.
     let location = if fs::metadata(home_trash)?.dev() == dev {
-        TrashLocation {
-            root: home_trash.to_owned(),
-            relative_to: None,
-        }
+        home()
+    } else if mount_source_is_block_device(dev) {
+        volume_trash(&mount_topdir(path, dev)?, uid).unwrap_or_else(|_| home())
     } else {
-        volume_trash(&mount_topdir(path, dev)?, uid)?
+        home()
     };
 
     let name = path
@@ -293,11 +300,87 @@ fn trash_in(path: &Path, home_trash: &Path, uid: u32) -> io::Result<Option<PathB
     drop(info_file);
 
     let destination = files.join(&chosen);
-    if let Err(error) = fs::rename(path, &destination) {
-        let _ = fs::remove_file(&info_path);
-        return Err(error);
+    match fs::rename(path, &destination) {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {
+            if let Err(error) = copy_tree(path, &destination) {
+                let _ = remove_tree(&destination);
+                let _ = fs::remove_file(&info_path);
+                return Err(error);
+            }
+            // The copy is safe in the trash, so a failed removal keeps both.
+            remove_tree(path)?;
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&info_path);
+            return Err(error);
+        }
     }
     Ok(Some(destination))
+}
+
+/// Copy a file, folder or symlink across disks, keeping permissions and
+/// never following symlinks.
+#[cfg(not(target_os = "macos"))]
+fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
+    let meta = fs::symlink_metadata(from)?;
+    let kind = meta.file_type();
+    if kind.is_symlink() {
+        std::os::unix::fs::symlink(fs::read_link(from)?, to)
+    } else if kind.is_dir() {
+        fs::create_dir(to)?;
+        for entry in fs::read_dir(from)? {
+            let entry = entry?;
+            copy_tree(&entry.path(), &to.join(entry.file_name()))?;
+        }
+        // Set last, so a read-only folder still receives its children.
+        fs::set_permissions(to, meta.permissions())
+    } else if kind.is_file() {
+        fs::copy(from, to).map(drop)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "No se puede mover este tipo de elemento a la Papelera",
+        ))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn remove_tree(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => fs::remove_dir_all(path),
+        Ok(_) => fs::remove_file(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Whether the filesystem with device number `dev` is mounted from a block
+/// device (`/dev/...`), read from `/proc/self/mountinfo`. Unknown devices,
+/// such as tmpfs, overlays or btrfs subvolumes that are not mount points,
+/// count as not being one.
+#[cfg(not(target_os = "macos"))]
+fn mount_source_is_block_device(dev: u64) -> bool {
+    fs::read_to_string("/proc/self/mountinfo")
+        .is_ok_and(|mountinfo| mountinfo_source_is_block_device(&mountinfo, dev))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn mountinfo_source_is_block_device(mountinfo: &str, dev: u64) -> bool {
+    // glibc's encoding of `major:minor` in `st_dev`.
+    let major = ((dev >> 32) & 0xffff_f000) | ((dev >> 8) & 0x0fff);
+    let minor = ((dev >> 12) & 0xffff_ff00) | (dev & 0xff);
+    let wanted = format!("{major}:{minor}");
+    // Later lines win: they are mounted over earlier ones.
+    mountinfo
+        .lines()
+        .filter(|line| line.split(' ').nth(2) == Some(wanted.as_str()))
+        .filter_map(|line| {
+            let (_, after) = line.split_once(" - ")?;
+            after.split(' ').nth(1)
+        })
+        .last()
+        .is_some_and(|source| source.starts_with("/dev/"))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -669,5 +752,62 @@ mod trash_tests {
         assert!(result.is_err());
         assert_eq!(fs::read_dir(home.join("info")).unwrap().count(), 0);
         assert!(file.exists());
+    }
+
+    #[test]
+    fn only_block_devices_keep_their_own_trash() {
+        let mountinfo = "\
+22 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw
+30 22 0:35 / /tmp rw,nosuid,nodev shared:5 - tmpfs tmpfs rw
+31 22 8:17 / /run/media/usb rw,relatime shared:9 - vfat /dev/sdb1 rw
+40 30 8:17 / /tmp/usb rw,relatime shared:9 - vfat /dev/sdb1 rw
+41 22 0:50 / /mnt/over rw - overlay overlay rw
+";
+        assert!(mountinfo_source_is_block_device(mountinfo, (259 << 8) | 2));
+        assert!(mountinfo_source_is_block_device(mountinfo, (8 << 8) | 17));
+        assert!(!mountinfo_source_is_block_device(mountinfo, 35));
+        assert!(!mountinfo_source_is_block_device(mountinfo, 50));
+        assert!(!mountinfo_source_is_block_device(mountinfo, 99));
+    }
+
+    /// `/dev/shm` and the temporary directory are usually separate memory
+    /// disks, so the item goes to the home trash by copying.
+    #[test]
+    fn a_memory_disk_falls_back_to_the_home_trash() {
+        let shm = Path::new("/dev/shm");
+        let dir = tempfile::tempdir().unwrap();
+        if !shm.is_dir()
+            || fs::metadata(shm).unwrap().dev() == fs::metadata(dir.path()).unwrap().dev()
+        {
+            eprintln!("skipped: /dev/shm is missing or on the same disk");
+            return;
+        }
+        let home = dir.path().join("trash");
+        let outside = tempfile::tempdir_in(shm).unwrap();
+        let source = outside.path().join("carpeta");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("hijo.txt"), b"dentro").unwrap();
+        fs::set_permissions(source.join("hijo.txt"), Permissions::from_mode(0o640)).unwrap();
+        symlink("hijo.txt", source.join("enlace")).unwrap();
+
+        let trashed = trash_in(&source, &home, uid()).unwrap().unwrap();
+
+        assert_eq!(trashed, home.join("files/carpeta"));
+        assert!(!source.exists());
+        assert_eq!(fs::read(trashed.join("hijo.txt")).unwrap(), b"dentro");
+        let mode = fs::metadata(trashed.join("hijo.txt")).unwrap().mode();
+        assert_eq!(mode & 0o777, 0o640);
+        assert_eq!(
+            fs::read_link(trashed.join("enlace")).unwrap(),
+            Path::new("hijo.txt")
+        );
+        let info = fs::read_to_string(home.join("info/carpeta.trashinfo")).unwrap();
+        assert!(
+            info.contains(&format!(
+                "Path={}",
+                percent_encode(source.as_os_str().as_bytes())
+            )),
+            "{info:?}"
+        );
     }
 }

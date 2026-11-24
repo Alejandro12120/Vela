@@ -65,6 +65,12 @@ impl Edits {
         self.index.as_ref().map_or(&[], Index::edits)
     }
 
+    pub(super) fn has_active_session(&self, target: &Target) -> bool {
+        self.activity
+            .get(target)
+            .is_some_and(|activity| activity.schedule.busy() || activity.timer.is_some())
+    }
+
     pub fn has_server(&self, id: &str) -> bool {
         self.rows().iter().any(|row| row.target.server_id == id)
             || self
@@ -1214,7 +1220,7 @@ fn name(target: &Target) -> String {
         .into_owned()
 }
 
-fn reveal(path: &Path) -> io::Result<()> {
+pub(super) fn reveal(path: &Path) -> io::Result<()> {
     #[cfg(target_os = "macos")]
     {
         if std::process::Command::new("/usr/bin/open")

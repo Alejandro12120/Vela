@@ -100,6 +100,7 @@ enum Dialog {
     Prompt(Prompt),
     Edit(EditDialog),
     DeleteTheme(String),
+    EmptyEdits,
 }
 
 pub struct Workspace {
@@ -846,7 +847,10 @@ impl Workspace {
         self.show_form(form, window, cx);
     }
 
-    fn show_form(&mut self, form: Form, window: &mut Window, cx: &mut Context<Self>) {
+    fn show_form(&mut self, mut form: Form, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(path) = dev::form_file() {
+            form.pick_file(path);
+        }
         let socket = form.input(Field::Socket).read(cx).focus_handle(cx);
         self.open_dialog(Dialog::Form(Box::new(form)), window, cx);
         let blur = cx.on_blur(&socket, window, |this, window, cx| {
@@ -1031,7 +1035,9 @@ impl Workspace {
         let focus = match &dialog {
             Dialog::Form(form) => Some(form.input(Field::Name)),
             Dialog::Prompt(prompt) => prompt.input.as_ref(),
-            Dialog::Delete(_) | Dialog::Edit(_) | Dialog::DeleteTheme(_) => None,
+            Dialog::Delete(_) | Dialog::Edit(_) | Dialog::DeleteTheme(_) | Dialog::EmptyEdits => {
+                None
+            }
         };
         let focus = focus
             .map(|input| input.read(cx).focus_handle(cx))
@@ -1138,6 +1144,7 @@ impl Workspace {
                 let id = id.clone();
                 self.persist(None, Some(id), window, cx);
             }
+            Some(Dialog::EmptyEdits) => self.empty_edit_copies(window, cx),
             _ => {}
         }
     }
@@ -1315,6 +1322,14 @@ impl Workspace {
                     "Eliminar",
                 )
             }
+            Dialog::EmptyEdits => (
+                "¿Vaciar las copias de edición?".into(),
+                Some((IconName::Trash, theme.danger)),
+                div().child(
+                    "Se borran las copias ya subidas. Las que tienen cambios sin subir o están abiertas en el editor se conservan.",
+                ),
+                "Vaciar",
+            ),
             Dialog::Prompt(prompt) => {
                 let destination = &prompt.request.destination;
                 let body = div().flex().flex_col().gap_2().child(
@@ -1371,7 +1386,7 @@ impl Workspace {
                         theme,
                         on_click,
                     )
-                } else if matches!(dialog, Dialog::DeleteTheme(_)) {
+                } else if matches!(dialog, Dialog::DeleteTheme(_) | Dialog::EmptyEdits) {
                     let mut danger = theme;
                     danger.primary = theme.danger;
                     danger.primary_hover = theme.danger;

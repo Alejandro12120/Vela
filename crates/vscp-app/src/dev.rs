@@ -284,6 +284,35 @@ pub fn edit_view() -> Option<String> {
     value("VSCP_DEV_EDIT_VIEW")
 }
 
+pub fn form_file() -> Option<PathBuf> {
+    value("VSCP_DEV_FORM_FILE").map(PathBuf::from)
+}
+
+/// The editor picker is always shown on macOS. On Linux it is a capture hook.
+pub fn editor_picker() -> bool {
+    cfg!(target_os = "macos") || value("VSCP_DEV_EDITOR_PICKER").as_deref() == Some("1")
+}
+
+/// Roots searched for editor bundles, in order.
+pub fn editor_roots() -> Vec<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::home_dir();
+        let mut roots = vec![PathBuf::from("/Applications")];
+        if let Some(home) = home {
+            roots.push(home.join("Applications"));
+        }
+        roots.push(PathBuf::from("/System/Applications"));
+        roots
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        value("VSCP_DEV_EDITOR_ROOT")
+            .map(|root| vec![PathBuf::from(root)])
+            .unwrap_or_default()
+    }
+}
+
 /// Opens `path` the way a double click should. Text goes to the editor chosen
 /// in Ajustes or, without one, to the default text editor (`open -t`). Anything
 /// else opens with its default application. The real path, with symbolic links

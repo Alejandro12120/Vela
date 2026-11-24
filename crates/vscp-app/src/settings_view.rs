@@ -12,9 +12,9 @@ use std::{
 };
 
 use gpui::{
-    Bounds, Div, ElementId, Entity, FocusHandle, Focusable, FontWeight, KeyDownEvent,
-    PathPromptOptions, Pixels, ScrollHandle, Stateful, canvas, linear_color_stop, linear_gradient,
-    point, prelude::*, px, rgba,
+    AnyElement, Bounds, ClickEvent, Div, ElementId, Entity, FocusHandle, Focusable, FontWeight,
+    KeyDownEvent, PathPromptOptions, Pixels, Role, ScrollHandle, SharedString, Stateful, anchored,
+    canvas, deferred, linear_color_stop, linear_gradient, point, prelude::*, px, rgba,
 };
 use vscp_core::{
     agent::AgentError,
@@ -56,6 +56,42 @@ impl ThemeCardFocus {
 
 type AgentProbe = Result<usize, AgentError>;
 
+const EDITORS: [(&str, &str); 7] = [
+    ("Visual Studio Code", "Visual Studio Code.app"),
+    ("Cursor", "Cursor.app"),
+    ("Zed", "Zed.app"),
+    ("Sublime Text", "Sublime Text.app"),
+    ("BBEdit", "BBEdit.app"),
+    ("Nova", "Nova.app"),
+    ("TextEdit", "TextEdit.app"),
+];
+
+fn format_copies_size(bytes: u64) -> String {
+    let (value, unit) = if bytes >= 1_000_000_000 {
+        (bytes as f64 / 1_000_000_000., "GB")
+    } else if bytes >= 1_000_000 {
+        (bytes as f64 / 1_000_000., "MB")
+    } else {
+        (bytes as f64 / 1_000., "KB")
+    };
+    format!("{value:.1} {unit}").replace('.', ",")
+}
+
+/// Installed editor bundles, in menu order. Only paths that exist are returned.
+pub(crate) fn installed_editors(roots: &[PathBuf]) -> Vec<(&'static str, PathBuf)> {
+    let mut found = Vec::new();
+    for (name, bundle) in EDITORS {
+        for root in roots {
+            let path = root.join(bundle);
+            if path.is_dir() {
+                found.push((name, path));
+                break;
+            }
+        }
+    }
+    found
+}
+
 pub(super) struct SettingsPage {
     previous_focus: Option<FocusHandle>,
     focus: FocusHandle,
@@ -69,6 +105,8 @@ pub(super) struct SettingsPage {
     agent_probe: Option<AgentProbe>,
     agent_editing: bool,
     agent_input: Option<Entity<TextInput>>,
+    editor_menu: Option<(gpui::Point<Pixels>, Vec<FocusHandle>)>,
+    edit_copies: Option<(usize, u64)>,
 }
 
 impl SettingsPage {
@@ -86,6 +124,8 @@ impl SettingsPage {
             agent_probe: None,
             agent_editing: false,
             agent_input: None,
+            editor_menu: None,
+            edit_copies: None,
         }
     }
 
@@ -117,7 +157,88 @@ impl Workspace {
             self.read_kitty(false, window, cx);
         }
         self.probe_agent(window, cx);
+        self.scan_edit_copies(window, cx);
         cx.notify();
+    }
+
+    fn scan_edit_copies(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Ok(root) = crate::dev::edit_root() else {
+            self.settings_page.edit_copies = Some((0, 0));
+            return;
+        };
+        let scan = cx.background_executor().spawn(async move {
+            fn walk(dir: &std::path::Path, count: &mut usize, bytes: &mut u64) {
+                let Ok(entries) = std::fs::read_dir(dir) else {
+                    return;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let Ok(metadata) = entry.metadata() else {
+                        continue;
+                    };
+                    if metadata.is_dir() {
+                        walk(&path, count, bytes);
+                    } else if metadata.is_file()
+                        && path
+                            .file_name()
+                            .is_some_and(|name| name != "edits.toml" && name != ".lock")
+                    {
+                        *count += 1;
+                        *bytes += metadata.len();
+                    }
+                }
+            }
+            let (mut count, mut bytes) = (0, 0);
+            walk(&root, &mut count, &mut bytes);
+            (count, bytes)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = scan.await;
+            let _ = this.update_in(cx, |this, _, cx| {
+                this.settings_page.edit_copies = Some(result);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn empty_edit_copies(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_dialog(window, cx);
+        let Some(mut index) = self.edits.index.take() else {
+            return;
+        };
+        let targets: Vec<_> = index
+            .edits()
+            .iter()
+            .filter(|edit| {
+                edit.state == vscp_core::edit::State::Synced
+                    && !self.edits.has_active_session(&edit.target)
+            })
+            .map(|edit| edit.target.clone())
+            .collect();
+        for target in targets {
+            let _ = index.remove(&target, false);
+        }
+        self.edits.index = Some(index);
+        self.scan_edit_copies(window, cx);
+    }
+
+    fn reveal_edit_copies(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = crate::dev::edit_root().ok() else {
+            return;
+        };
+        let reveal = cx
+            .background_executor()
+            .spawn(async move { super::edits_view::reveal(&root) });
+        cx.spawn_in(window, async move |this, cx| {
+            if let Err(error) = reveal.await {
+                let _ = this.update_in(cx, |this, _, cx| {
+                    this.settings_error = Some(format!("No se pudo mostrar la carpeta. {error}"));
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     pub(super) fn probe_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -237,8 +358,16 @@ impl Workspace {
                 .dark
                 .focus(window, cx);
         }
-        if request.as_deref() == Some("interface") {
-            self.settings_page.scroll.scroll_to_top_of_item(1);
+        let section = match request.as_deref() {
+            Some("appearance") => Some(0),
+            Some("interface") => Some(1),
+            Some("agent") => Some(2),
+            Some("editor") => Some(3),
+            Some("terminal") => Some(4),
+            _ => None,
+        };
+        if let Some(section) = section {
+            self.settings_page.scroll.scroll_to_top_of_item(section);
         }
         if let Some(id) = request
             .as_deref()
@@ -1046,7 +1175,7 @@ impl Workspace {
             vec![
                 settings_row(
                     "Agente",
-                    Some("Lo usan todos los servidores con clave SSH."),
+                    Some("Lo usan todos los servidores con clave SSH.".into()),
                     controls,
                     theme,
                 ),
@@ -1055,65 +1184,281 @@ impl Workspace {
         ))
     }
 
-    fn editor_section(&self, theme: Theme, cx: &Context<Self>) -> Div {
-        #[cfg(not(target_os = "macos"))]
-        let _ = cx;
-        let mut body = div().flex().flex_col().gap_2().items_start();
-        #[cfg(target_os = "macos")]
+    fn select_editor(
+        &mut self,
+        editor: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut next = self.settings.clone();
+        next.editor = editor;
+        self.save_settings(next, window, cx);
+    }
+
+    fn open_editor_menu(&mut self, position: gpui::Point<Pixels>, cx: &mut Context<Self>) {
+        let count = 1 + installed_editors(&crate::dev::editor_roots()).len() + 1;
+        let handles = (0..count).map(|_| cx.focus_handle()).collect();
+        self.settings_page.editor_menu = Some((position, handles));
+        cx.notify();
+    }
+
+    fn close_editor_menu(&mut self, cx: &mut Context<Self>) {
+        self.settings_page.editor_menu = None;
+        cx.notify();
+    }
+
+    fn render_editor_menu(&self, theme: Theme, cx: &Context<Self>) -> Option<AnyElement> {
+        let (position, handles) = self.settings_page.editor_menu.as_ref()?;
+        let chosen = self.settings.editor.as_deref();
+        let mut items: Vec<(FocusHandle, &'static str, String, bool)> = Vec::new();
+        items.push((
+            handles[0].clone(),
+            "Predeterminada del sistema",
+            String::new(),
+            chosen.is_none(),
+        ));
+        for (index, (name, path)) in installed_editors(&crate::dev::editor_roots())
+            .into_iter()
+            .enumerate()
         {
-            let editor = self.settings.editor.as_ref();
-            body = body
-                .child("Editor para archivos remotos")
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_2()
-                        .child(button(
-                            "settings-default",
-                            "Aplicación predeterminada",
-                            if editor.is_none() {
-                                Variant::Selected
-                            } else {
-                                Variant::Secondary
-                            },
-                            theme,
-                            cx.listener(|this, _, window, cx| this.save_editor(None, window, cx)),
-                        ))
-                        .child(button(
-                            "settings-choose",
-                            "Elegir aplicación…",
-                            if editor.is_some() {
-                                Variant::Selected
-                            } else {
-                                Variant::Secondary
-                            },
-                            theme,
-                            cx.listener(|this, _, window, cx| {
-                                if !this.settings_page.busy {
-                                    this.choose_editor(window, cx);
-                                }
-                            }),
-                        )),
-                )
-                .when_some(editor, |body, editor| {
-                    body.child(
-                        div()
-                            .text_color(theme.secondary_text)
-                            .child(editor.display().to_string()),
-                    )
-                });
+            items.push((
+                handles[index + 1].clone(),
+                name,
+                path.to_string_lossy().into_owned(),
+                chosen == Some(path.as_path()),
+            ));
         }
-        #[cfg(not(target_os = "macos"))]
+        let _ = chosen;
+        let mut rows = Vec::new();
+        for (label, detail, checked) in items
+            .into_iter()
+            .map(|(_, label, detail, checked)| (label, detail, checked))
         {
-            body = body.child(
+            let handle = rows.len();
+            let focus = handles[handle].clone();
+            rows.push(
                 div()
-                    .text_color(theme.secondary_text)
-                    .child("Los archivos se abren con la aplicación predeterminada (xdg-open)."),
+                    .id(("editor-menu-item", handle))
+                    .role(Role::MenuItem)
+                    .tab_index(0)
+                    .track_focus(&focus)
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .h(px(28.))
+                    .px(px(8.))
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .text_size(px(13.))
+                    .hover(move |style| style.bg(theme.hover))
+                    .focus(move |style| style.bg(theme.selection))
+                    .child(div().flex_1().min_w_0().truncate().child(label.to_owned()))
+                    .when(checked, |row| {
+                        row.child(icon(IconName::Check).size(px(14.)).text_color(theme.accent))
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let editor = if detail.is_empty() {
+                            None
+                        } else {
+                            Some(PathBuf::from(&detail))
+                        };
+                        this.close_editor_menu(cx);
+                        this.select_editor(editor, window, cx);
+                    })),
             );
         }
+        #[cfg(target_os = "macos")]
+        rows.push(div().h(px(1.)).my(px(4.)).bg(theme.border));
+        #[cfg(target_os = "macos")]
+        rows.push(
+            div()
+                .id("editor-menu-other")
+                .role(Role::MenuItem)
+                .tab_index(0)
+                .flex()
+                .items_center()
+                .h(px(28.))
+                .px(px(8.))
+                .rounded(px(6.))
+                .cursor_pointer()
+                .text_size(px(13.))
+                .hover(move |style| style.bg(theme.hover))
+                .child("Otra aplicación…")
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.close_editor_menu(cx);
+                    this.choose_editor(window, cx);
+                })),
+        );
+        let panel = div()
+            .id("editor-menu")
+            .role(Role::Menu)
+            .key_context("EditorMenu")
+            .flex()
+            .flex_col()
+            .min_w(px(220.))
+            .max_h(px(320.))
+            .overflow_y_scroll()
+            .p(px(4.))
+            .rounded(px(8.))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.raised)
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                match event.keystroke.key.as_str() {
+                    "escape" => {
+                        cx.stop_propagation();
+                        this.close_editor_menu(cx);
+                    }
+                    "down" | "up" => {
+                        cx.stop_propagation();
+                        let handles = this
+                            .settings_page
+                            .editor_menu
+                            .as_ref()
+                            .map(|(_, h)| h.clone());
+                        if let Some(handles) = handles {
+                            let current =
+                                handles.iter().position(|handle| handle.is_focused(window));
+                            let delta = if event.keystroke.key == "down" {
+                                1isize
+                            } else {
+                                -1
+                            };
+                            let next = match current {
+                                Some(index) => (index as isize + delta)
+                                    .rem_euclid(handles.len() as isize)
+                                    as usize,
+                                None => 0,
+                            };
+                            handles[next].focus(window, cx);
+                        }
+                    }
+                    _ => {}
+                }
+            }))
+            .children(rows);
+        Some(
+            deferred(
+                anchored()
+                    .position(*position)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(crate::components::motion::appear(
+                        panel,
+                        "editor-menu-appear",
+                        3.,
+                        crate::components::motion::FAST,
+                    )),
+            )
+            .with_priority(1)
+            .into_any_element(),
+        )
+    }
+
+    fn editor_section(&self, theme: Theme, cx: &Context<Self>) -> Div {
+        let picker = crate::dev::editor_picker();
+        let editor_control: AnyElement = if picker {
+            let label = self
+                .settings
+                .editor
+                .as_deref()
+                .and_then(|path| path.file_stem())
+                .map_or_else(
+                    || "Predeterminada del sistema".to_owned(),
+                    |name| name.to_string_lossy().into_owned(),
+                );
+            div()
+                .id("editor-picker")
+                .role(Role::Button)
+                .tab_index(0)
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(10.))
+                .h(px(28.))
+                .min_w(px(190.))
+                .px(px(10.))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(theme.control_border)
+                .bg(theme.panel)
+                .text_size(px(13.))
+                .cursor_pointer()
+                .hover(move |style| style.bg(theme.hover))
+                .focus(move |style| style.border_color(theme.accent))
+                .child(label)
+                .child(
+                    icon(IconName::ChevronsUpDown)
+                        .size(px(14.))
+                        .text_color(theme.secondary_text),
+                )
+                .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
+                    this.open_editor_menu(event.position(), cx);
+                }))
+                .into_any_element()
+        } else {
+            div()
+                .text_size(px(13.))
+                .text_color(theme.secondary_text)
+                .child("Aplicación predeterminada (xdg-open)")
+                .into_any_element()
+        };
+
+        let copies = self.settings_page.edit_copies;
+        let caption = match copies {
+            None => "Calculando…".to_owned(),
+            Some((0, _)) => "Sin copias.".to_owned(),
+            Some((count, bytes)) => format!(
+                "{} {} · {}. Las que tienen cambios sin subir no se borran.",
+                count,
+                if count == 1 { "archivo" } else { "archivos" },
+                format_copies_size(bytes)
+            ),
+        };
+        let folder = crate::dev::edit_root().is_ok_and(|path| path.is_dir());
+        let copies_control = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .children(folder.then(|| {
+                small_button(
+                    "show-copies",
+                    "Mostrar",
+                    Variant::Secondary,
+                    theme,
+                    cx.listener(|this, _, window, cx| this.reveal_edit_copies(window, cx)),
+                )
+            }))
+            .child(small_button(
+                "empty-copies",
+                "Vaciar…",
+                Variant::Secondary,
+                theme,
+                cx.listener(|this, _, window, cx| {
+                    if !this.settings_page.busy {
+                        this.open_dialog(Dialog::EmptyEdits, window, cx);
+                    }
+                }),
+            ));
+
         section("Editor")
-            .child(body)
+            .children(self.render_editor_menu(theme, cx))
+            .child(settings_group(
+                theme,
+                vec![
+                    settings_row(
+                        "Abrir archivos remotos con",
+                        Some("Al guardar en el editor, vSCP sube el cambio al servidor.".into()),
+                        editor_control,
+                        theme,
+                    ),
+                    settings_row(
+                        "Copias de edición",
+                        Some(caption.into()),
+                        copies_control,
+                        theme,
+                    ),
+                ],
+            ))
             .when_some(self.settings_error.clone(), |section, error| {
                 section.child(div().text_color(theme.danger).child(error))
             })
@@ -1218,7 +1563,7 @@ fn settings_group(theme: Theme, rows: Vec<Div>) -> Div {
 
 fn settings_row(
     label: &'static str,
-    description: Option<&'static str>,
+    description: Option<SharedString>,
     control: impl gpui::IntoElement,
     theme: Theme,
 ) -> Div {
@@ -1457,6 +1802,28 @@ mod tests {
             keystroke: gpui::Keystroke::parse(key).unwrap(),
         });
         cx.run_until_parked();
+    }
+
+    #[test]
+    fn detects_only_installed_editor_bundles_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for bundle in ["Zed.app", "Visual Studio Code.app", "Otro.app"] {
+            std::fs::create_dir(root.join(bundle)).unwrap();
+        }
+        let found = installed_editors(&[root.to_path_buf()]);
+        assert_eq!(
+            found.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            ["Visual Studio Code", "Zed"]
+        );
+        assert_eq!(found[0].1, root.join("Visual Studio Code.app"));
+        assert!(installed_editors(&[]).is_empty());
+    }
+
+    #[test]
+    fn copy_sizes_use_a_spanish_decimal_comma() {
+        assert_eq!(format_copies_size(1_200_000), "1,2 MB");
+        assert_eq!(format_copies_size(999), "1,0 KB");
     }
 
     #[gpui::test]

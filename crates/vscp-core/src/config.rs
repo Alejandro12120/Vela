@@ -50,6 +50,27 @@ impl Server {
     }
 }
 
+/// Removes the global agent socket from servers that stored the very same
+/// socket, so a single change in Ajustes applies to them. Returns whether any
+/// server changed.
+pub fn clear_default_sockets(servers: &mut [Server], default: &Path) -> bool {
+    let mut changed = false;
+    for server in servers {
+        if let Auth::Agent {
+            agent_socket: Some(socket),
+            ..
+        } = &server.auth
+            && socket == default
+        {
+            if let Auth::Agent { agent_socket, .. } = &mut server.auth {
+                *agent_socket = None;
+            }
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// The list order is the order of `servers` in the file. Files older than this
 /// version were sorted by the application and are sorted once when loaded.
 const FILE_VERSION: u32 = 2;
@@ -203,6 +224,55 @@ mod tests {
         server.name = "   ".into();
         assert_eq!(server.display_name(), "test.example");
         assert_eq!(server.connection_spec().destination(), "test.example");
+    }
+
+    #[test]
+    fn clearing_the_default_socket_only_touches_matching_servers() {
+        let mut servers = vec![
+            Server {
+                auth: Auth::Agent {
+                    identity_pub: "/tmp/a.pub".into(),
+                    agent_socket: Some("/tmp/global.sock".into()),
+                },
+                ..server(Auth::Password)
+            },
+            Server {
+                auth: Auth::Agent {
+                    identity_pub: "/tmp/b.pub".into(),
+                    agent_socket: Some("/tmp/own.sock".into()),
+                },
+                ..server(Auth::Password)
+            },
+            Server {
+                auth: Auth::Agent {
+                    identity_pub: "/tmp/c.pub".into(),
+                    agent_socket: None,
+                },
+                ..server(Auth::Password)
+            },
+        ];
+        assert!(clear_default_sockets(
+            &mut servers,
+            Path::new("/tmp/global.sock")
+        ));
+        assert!(matches!(
+            &servers[0].auth,
+            Auth::Agent {
+                agent_socket: None,
+                ..
+            }
+        ));
+        assert_eq!(
+            servers[1].auth,
+            Auth::Agent {
+                identity_pub: "/tmp/b.pub".into(),
+                agent_socket: Some("/tmp/own.sock".into()),
+            }
+        );
+        assert!(!clear_default_sockets(
+            &mut servers,
+            Path::new("/tmp/global.sock")
+        ));
     }
 
     #[test]

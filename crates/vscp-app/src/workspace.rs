@@ -14,7 +14,7 @@ use vscp_core::{
 use std::{
     cell::Cell,
     collections::{HashMap, VecDeque},
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -24,7 +24,7 @@ use gpui::{
     PathPromptOptions, Render, Window, WindowBackgroundAppearance, actions, div, prelude::*, px,
 };
 use vscp_core::{
-    Auth, Client, Error, Session,
+    Auth, Client, ConnectionSpec, Error, Session,
     agent::{self, AgentError, AgentKey},
     askpass,
     config::{self, Server},
@@ -140,6 +140,28 @@ pub struct Workspace {
     trace_startup: Option<Instant>,
 }
 
+/// The socket used when a server does not set its own: the global setting
+/// first, then the Bitwarden socket detected at startup.
+fn spec_with_socket(
+    server: &Server,
+    global: Option<&Path>,
+    detected: Option<&Path>,
+) -> ConnectionSpec {
+    let mut spec = server.connection_spec();
+    if matches!(
+        server.auth,
+        Auth::Agent {
+            agent_socket: None,
+            ..
+        }
+    ) && let Some(socket) = global.or(detected)
+        && let Auth::Agent { agent_socket, .. } = &mut spec.auth
+    {
+        *agent_socket = Some(socket.to_owned());
+    }
+    spec
+}
+
 impl Workspace {
     pub fn new(
         client: Option<Client>,
@@ -197,6 +219,7 @@ impl Workspace {
                         this.dir = Some(dir);
                         this.servers = servers;
                         this.agent_socket = agent.map_or_else(String::new, |path| path.to_string_lossy().into_owned());
+                        this.migrate_default_socket(window, cx);
                         if let Some(name) = dev::autoconnect()
                             && let Some(server) = this.servers.iter().find(|server| server.display_name() == name)
                         {
@@ -546,6 +569,41 @@ impl Workspace {
         }
     }
 
+    pub(crate) fn spec_for(&self, server: &Server) -> ConnectionSpec {
+        let detected = (!self.agent_socket.is_empty()).then(|| Path::new(&self.agent_socket));
+        spec_with_socket(server, self.settings.agent_socket.as_deref(), detected)
+    }
+
+    pub(crate) fn effective_socket(&self) -> Option<&Path> {
+        self.settings
+            .agent_socket
+            .as_deref()
+            .or_else(|| (!self.agent_socket.is_empty()).then(|| Path::new(&self.agent_socket)))
+    }
+
+    fn migrate_default_socket(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(default) = self.effective_socket().map(Path::to_owned) else {
+            return;
+        };
+        let Some(dir) = self.dir.clone() else { return };
+        let mut servers = std::mem::take(&mut self.servers);
+        if !config::clear_default_sockets(&mut servers, &default) {
+            self.servers = servers;
+            return;
+        }
+        let to_save = servers.clone();
+        self.servers = servers;
+        let save = cx
+            .background_executor()
+            .spawn(async move { config::save(&dir, to_save) });
+        cx.spawn_in(window, async move |_, _| {
+            if let Err(error) = save.await {
+                dev::log(format_args!("no se pudo migrar servers.toml: {error}"));
+            }
+        })
+        .detach();
+    }
+
     pub fn connect(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.close_settings(window, cx);
         if self.saving
@@ -570,9 +628,9 @@ impl Workspace {
         self.connections.insert(id.into(), Connection::Connecting);
         self.show_stderr = false;
         cx.notify();
+        let mut spec = self.spec_for(&server);
+        dev::isolate_known_hosts(&mut spec);
         cx.spawn_in(window, async move |this, cx| {
-            let mut spec = server.connection_spec();
-            dev::isolate_known_hosts(&mut spec);
             let result = async {
                 let session = client.connect(spec).await?;
                 dev::log(format_args!("connected {}", server.display_name()));
@@ -813,6 +871,7 @@ impl Workspace {
         let Some(socket) = form.begin_listing(request, cx) else {
             return;
         };
+        let global = self.settings.agent_socket.clone();
         cx.notify();
         let hint = executor.clone();
         cx.spawn_in(window, async move |this, cx| {
@@ -822,9 +881,13 @@ impl Workspace {
         .detach();
         cx.spawn_in(window, async move |this, cx| {
             let path = if socket.is_empty() {
-                executor
-                    .spawn(async { vscp_core::bitwarden_agent_sockets().into_iter().next() })
-                    .await
+                if global.is_some() {
+                    global
+                } else {
+                    executor
+                        .spawn(async { vscp_core::bitwarden_agent_sockets().into_iter().next() })
+                        .await
+                }
             } else {
                 Some(PathBuf::from(socket))
             };
@@ -1192,7 +1255,9 @@ impl Workspace {
                 }
             });
             if let (Ok(Some(server)), Some(client)) = (check, client) {
-                let mut spec = server.connection_spec();
+                let Ok(mut spec) = this.update(cx, |this, _| this.spec_for(&server)) else {
+                    return;
+                };
                 dev::isolate_known_hosts(&mut spec);
                 let warning = identity_warning(&client, spec).await;
                 let _ = this.update_in(cx, |this, _, cx| {
@@ -1844,6 +1909,51 @@ mod tests {
     use gpui::{Modifiers, MouseButton, TestAppContext, VisualTestContext, point, px};
 
     use super::*;
+
+    #[test]
+    fn spec_fills_a_missing_socket_from_settings_or_detection() {
+        let mut server = Server {
+            id: "id".into(),
+            name: "Nombre".into(),
+            host: "host".into(),
+            port: 22,
+            user: "u".into(),
+            auth: Auth::Agent {
+                identity_pub: "/tmp/key.pub".into(),
+                agent_socket: None,
+            },
+            initial_remote_path: None,
+            pinned: false,
+        };
+        let spec = spec_with_socket(&server, Some(Path::new("/tmp/global.sock")), None);
+        assert_eq!(
+            spec.auth,
+            Auth::Agent {
+                identity_pub: "/tmp/key.pub".into(),
+                agent_socket: Some("/tmp/global.sock".into()),
+            }
+        );
+        let spec = spec_with_socket(&server, None, Some(Path::new("/tmp/detected.sock")));
+        assert_eq!(
+            spec.auth,
+            Auth::Agent {
+                identity_pub: "/tmp/key.pub".into(),
+                agent_socket: Some("/tmp/detected.sock".into()),
+            }
+        );
+        server.auth = Auth::Agent {
+            identity_pub: "/tmp/key.pub".into(),
+            agent_socket: Some("/tmp/own.sock".into()),
+        };
+        let spec = spec_with_socket(&server, Some(Path::new("/tmp/global.sock")), None);
+        assert_eq!(
+            spec.auth,
+            Auth::Agent {
+                identity_pub: "/tmp/key.pub".into(),
+                agent_socket: Some("/tmp/own.sock".into()),
+            }
+        );
+    }
 
     fn write_legacy(dir: &std::path::Path) {
         let mut text = String::new();

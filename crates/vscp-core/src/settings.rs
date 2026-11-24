@@ -12,6 +12,10 @@ use crate::appearance::AppearanceSettings;
 #[derive(Clone, Default, Deserialize, Serialize)]
 pub struct Settings {
     pub editor: Option<PathBuf>,
+    /// Global SSH agent socket. When absent, the first detected Bitwarden
+    /// socket is used, if any.
+    #[serde(default)]
+    pub agent_socket: Option<PathBuf>,
     #[serde(default)]
     pub appearance: AppearanceSettings,
 }
@@ -56,15 +60,43 @@ mod tests {
         settings.appearance.light_theme = "oceano".into();
         settings.appearance.dark_theme = "bosque".into();
         settings.appearance.glass.enabled = true;
+        settings.agent_socket = Some("/tmp/agente-global.sock".into());
         settings.save(dir).unwrap();
         let mut settings = Settings::load(dir).unwrap();
         assert_eq!(settings.editor, Some("/Applications/First.app".into()));
         let appearance = settings.appearance.clone();
+        assert_eq!(
+            settings.agent_socket,
+            Some(PathBuf::from("/tmp/agente-global.sock"))
+        );
         settings.editor = Some("/Applications/Second.app".into());
         settings.save(dir).unwrap();
         let settings = Settings::load(dir).unwrap();
         assert_eq!(settings.appearance, appearance);
         assert_eq!(settings.editor, Some("/Applications/Second.app".into()));
+        assert_eq!(
+            settings.agent_socket,
+            Some(PathBuf::from("/tmp/agente-global.sock"))
+        );
+    }
+
+    #[test]
+    fn agent_socket_round_trips_and_defaults_to_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        assert!(Settings::load(path).unwrap().agent_socket.is_none());
+        Settings {
+            agent_socket: Some("/tmp/bitwarden.sock".into()),
+            ..Settings::default()
+        }
+        .save(path)
+        .unwrap();
+        assert_eq!(
+            Settings::load(path).unwrap().agent_socket,
+            Some(PathBuf::from("/tmp/bitwarden.sock"))
+        );
+        Settings::default().save(path).unwrap();
+        assert!(Settings::load(path).unwrap().agent_socket.is_none());
     }
 
     #[test]

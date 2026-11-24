@@ -3,27 +3,37 @@ mod glass_settings;
 #[path = "theme_editor.rs"]
 mod theme_editor;
 
-use std::{cell::Cell, collections::HashMap, io, path::Path, rc::Rc};
-
-#[cfg(target_os = "macos")]
-use std::path::PathBuf;
+use std::{
+    cell::Cell,
+    collections::HashMap,
+    io,
+    path::{Path, PathBuf},
+    rc::Rc,
+};
 
 use gpui::{
-    Bounds, Div, ElementId, FocusHandle, FontWeight, PathPromptOptions, Pixels, ScrollHandle,
-    Stateful, canvas, linear_color_stop, linear_gradient, point, prelude::*, px, rgba,
+    Bounds, Div, ElementId, Entity, FocusHandle, Focusable, FontWeight, KeyDownEvent,
+    PathPromptOptions, Pixels, ScrollHandle, Stateful, canvas, linear_color_stop, linear_gradient,
+    point, prelude::*, px, rgba,
 };
 use vscp_core::{
+    agent::AgentError,
     appearance::{
         Colors, Scheme, ThemeDef, delete_user_theme, import_theme, load_user_themes,
         save_user_theme, unused_theme_id,
     },
+    path::abbreviate_path,
     settings::Settings,
 };
 
 use super::{Context, Dialog, Theme, Variant, Window, Workspace, button, div};
 use crate::{
     appearance::{Appearance, Variant as ColorVariant},
-    components::button::{icon_button, icon_text_button},
+    components::{
+        button::{icon_button, icon_text_button, small_button},
+        status_dot::status_dot,
+        text_input::TextInput,
+    },
     context_menu::Tooltip,
     icons::{IconName, icon},
 };
@@ -44,6 +54,8 @@ impl ThemeCardFocus {
     }
 }
 
+type AgentProbe = Result<usize, AgentError>;
+
 pub(super) struct SettingsPage {
     previous_focus: Option<FocusHandle>,
     focus: FocusHandle,
@@ -54,6 +66,9 @@ pub(super) struct SettingsPage {
     theme_error: Option<String>,
     editor: Option<theme_editor::ThemeEditor>,
     glass_drag: Option<glass_settings::GlassDrag>,
+    agent_probe: Option<AgentProbe>,
+    agent_editing: bool,
+    agent_input: Option<Entity<TextInput>>,
 }
 
 impl SettingsPage {
@@ -68,6 +83,9 @@ impl SettingsPage {
             theme_error: None,
             editor: None,
             glass_drag: None,
+            agent_probe: None,
+            agent_editing: false,
+            agent_input: None,
         }
     }
 
@@ -98,7 +116,100 @@ impl Workspace {
         if self.active_terminal_settings(cx).is_none() && self.kitty_settings.is_none() {
             self.read_kitty(false, window, cx);
         }
+        self.probe_agent(window, cx);
         cx.notify();
+    }
+
+    pub(super) fn probe_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.effective_socket().map(Path::to_owned) else {
+            self.settings_page.agent_probe = Some(Err(AgentError::Unavailable));
+            return;
+        };
+        self.settings_page.agent_probe = None;
+        let client = self.client.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = match client {
+                Some(client) => client.list_agent_keys(path).await.map(|keys| keys.len()),
+                None => Err(AgentError::Unavailable),
+            };
+            let _ = this.update_in(cx, |this, _, cx| {
+                this.settings_page.agent_probe = Some(result);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn edit_agent_socket(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self
+            .effective_socket()
+            .map_or_else(String::new, |path| path.to_string_lossy().into_owned());
+        let input = cx.new(|cx| {
+            TextInput::new(
+                &current,
+                "Socket del agente",
+                "/ruta/al/agente.sock",
+                false,
+                cx,
+            )
+        });
+        self.settings_page.agent_input = Some(input.clone());
+        self.settings_page.agent_editing = true;
+        input.read(cx).focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    fn commit_agent_socket(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(input) = self.settings_page.agent_input.clone() else {
+            return;
+        };
+        let value = input.read(cx).value().trim().to_owned();
+        self.settings_page.agent_editing = false;
+        self.settings_page.agent_input = None;
+        let mut next = self.settings.clone();
+        next.agent_socket = if value.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(value))
+        };
+        self.probe_agent(window, cx);
+        self.save_settings(next, window, cx);
+    }
+
+    fn cancel_agent_socket(&mut self, cx: &mut Context<Self>) {
+        self.settings_page.agent_editing = false;
+        self.settings_page.agent_input = None;
+        cx.notify();
+    }
+
+    fn use_bitwarden_socket(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut next = self.settings.clone();
+        next.agent_socket = None;
+        self.probe_agent(window, cx);
+        self.save_settings(next, window, cx);
+    }
+
+    fn agent_status(&self, theme: Theme) -> (&'static str, gpui::Rgba) {
+        match &self.settings_page.agent_probe {
+            None => ("consultando…", theme.secondary_text),
+            Some(Ok(count)) if *count == 0 => ("bloqueado", theme.warning),
+            Some(Ok(_)) => ("disponible", theme.success),
+            Some(Err(AgentError::Unavailable)) => ("no encontrado", theme.secondary_text),
+            Some(Err(AgentError::Refused | AgentError::Timeout)) => ("bloqueado", theme.warning),
+            Some(Err(AgentError::Protocol(_))) => ("error", theme.danger),
+        }
+    }
+
+    fn agent_name(&self) -> &'static str {
+        let socket = self.effective_socket().unwrap_or(Path::new(""));
+        if vscp_core::bitwarden_agent_sockets()
+            .iter()
+            .any(|path| path == socket)
+        {
+            "Bitwarden"
+        } else {
+            "Agente SSH"
+        }
     }
 
     pub(super) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -607,6 +718,7 @@ impl Workspace {
                     })
                     .child(appearance_section)
                     .child(self.render_interface(theme, cx))
+                    .child(self.agent_section(theme, cx))
                     .child(self.editor_section(theme, cx))
                     .child(self.terminal_section(theme, cx).pb_6()),
             )
@@ -836,6 +948,113 @@ impl Workspace {
             )
     }
 
+    fn agent_section(&self, theme: Theme, cx: &Context<Self>) -> Div {
+        let (word, color) = self.agent_status(theme);
+        let editing = self.settings_page.agent_editing;
+        let status = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .text_size(px(12.))
+            .text_color(theme.secondary_text)
+            .child(self.agent_name())
+            .when(self.settings_page.agent_probe.is_none(), |row| {
+                row.child(crate::components::motion::spin(
+                    icon(IconName::Spinner)
+                        .size(px(12.))
+                        .text_color(theme.secondary_text),
+                    "settings-agent-spinner",
+                ))
+            })
+            .when(!self.settings_page.agent_probe.is_none(), |row| {
+                row.child(status_dot(color, None))
+            })
+            .child(div().text_color(color).child(word));
+
+        let controls = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(status)
+            .child(small_button(
+                "change-agent",
+                "Cambiar…",
+                Variant::Secondary,
+                theme,
+                cx.listener(|this, _, window, cx| this.edit_agent_socket(window, cx)),
+            ))
+            .when(self.settings.agent_socket.is_some(), |row| {
+                row.child(small_button(
+                    "use-bitwarden",
+                    "Usar el de Bitwarden",
+                    Variant::Secondary,
+                    theme,
+                    cx.listener(|this, _, window, cx| this.use_bitwarden_socket(window, cx)),
+                ))
+            });
+
+        let socket_control = if editing {
+            let input = self.settings_page.agent_input.clone();
+            div()
+                .id("agent-socket-editor")
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    match event.keystroke.key.as_str() {
+                        "enter" => {
+                            cx.stop_propagation();
+                            this.commit_agent_socket(window, cx);
+                        }
+                        "escape" => {
+                            cx.stop_propagation();
+                            this.cancel_agent_socket(cx);
+                        }
+                        _ => {}
+                    }
+                }))
+                .children(input)
+                .child(small_button(
+                    "save-agent-socket",
+                    "Guardar",
+                    Variant::Primary,
+                    theme,
+                    cx.listener(|this, _, window, cx| this.commit_agent_socket(window, cx)),
+                ))
+                .child(small_button(
+                    "cancel-agent-socket",
+                    "Cancelar",
+                    Variant::Secondary,
+                    theme,
+                    cx.listener(|this, _, _, cx| this.cancel_agent_socket(cx)),
+                ))
+                .into_any_element()
+        } else {
+            div()
+                .font_family(crate::theme::monospace())
+                .text_size(px(12.))
+                .text_color(theme.secondary_text)
+                .child(
+                    self.effective_socket()
+                        .map_or_else(|| "Ninguno".to_owned(), |path| abbreviate_path(path, 52)),
+                )
+                .into_any_element()
+        };
+
+        section("Agente SSH").child(settings_group(
+            theme,
+            vec![
+                settings_row(
+                    "Agente",
+                    Some("Lo usan todos los servidores con clave SSH."),
+                    controls,
+                    theme,
+                ),
+                settings_row("Socket", None, socket_control, theme),
+            ],
+        ))
+    }
+
     fn editor_section(&self, theme: Theme, cx: &Context<Self>) -> Div {
         #[cfg(not(target_os = "macos"))]
         let _ = cx;
@@ -976,6 +1195,55 @@ fn section(label: &'static str) -> Div {
                 .font_weight(FontWeight::MEDIUM)
                 .child(label),
         )
+}
+
+fn settings_group(theme: Theme, rows: Vec<Div>) -> Div {
+    let mut group = div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .overflow_hidden()
+        .rounded(px(10.))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.content(theme.sidebar));
+    for (index, row) in rows.into_iter().enumerate() {
+        if index > 0 {
+            group = group.child(div().h(px(1.)).bg(theme.border));
+        }
+        group = group.child(row);
+    }
+    group
+}
+
+fn settings_row(
+    label: &'static str,
+    description: Option<&'static str>,
+    control: impl gpui::IntoElement,
+    theme: Theme,
+) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(16.))
+        .px(px(14.))
+        .py(px(11.))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .min_w_0()
+                .child(div().text_size(px(13.)).child(label))
+                .children(description.map(|description| {
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme.secondary_text)
+                        .child(description)
+                })),
+        )
+        .child(div().flex_none().child(control.into_any_element()))
 }
 
 fn subtitle(label: &'static str) -> Div {

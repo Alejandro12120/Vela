@@ -1,3 +1,6 @@
+#[path = "theme_editor.rs"]
+mod theme_editor;
+
 use std::{
     collections::HashMap,
     io,
@@ -31,6 +34,7 @@ pub(super) struct SettingsPage {
     themes: HashMap<String, FocusHandle>,
     busy: bool,
     theme_error: Option<String>,
+    editor: Option<theme_editor::ThemeEditor>,
 }
 
 impl SettingsPage {
@@ -43,6 +47,7 @@ impl SettingsPage {
             themes: HashMap::new(),
             busy: false,
             theme_error: None,
+            editor: None,
         }
     }
 
@@ -77,6 +82,7 @@ impl Workspace {
     }
 
     pub(super) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_theme_editor(window, cx);
         if let Some(previous) = self.settings_page.previous_focus.take() {
             previous.focus(window, cx);
             cx.notify();
@@ -87,6 +93,9 @@ impl Workspace {
         let request = crate::dev::settings_page();
         if request.is_some() || crate::dev::edit_view().as_deref() == Some("settings") {
             self.open_settings(window, cx);
+        }
+        if let Some(request) = request.as_deref() {
+            self.dev_theme_editor(request, window, cx);
         }
         if request.as_deref() == Some("interface") {
             self.settings_page.scroll.scroll_to_top_of_item(1);
@@ -199,8 +208,10 @@ impl Workspace {
                 this.settings_page.busy = false;
                 match result {
                     Ok(settings) => {
-                        cx.global_mut::<Appearance>().settings = settings.appearance.clone();
+                        cx.global_mut::<Appearance>()
+                            .set_settings(settings.appearance.clone());
                         this.settings = settings;
+                        Appearance::update_native_appearance(cx);
                         cx.refresh_windows();
                     }
                     Err(error) => {
@@ -215,6 +226,9 @@ impl Workspace {
     }
 
     fn set_scheme(&mut self, scheme: Scheme, window: &Window, cx: &mut Context<Self>) {
+        if self.settings_page.editor.is_some() {
+            return;
+        }
         let mut next = self.settings.clone();
         next.appearance.scheme = scheme;
         self.save_settings(next, window, cx);
@@ -226,12 +240,12 @@ impl Workspace {
         self.save_settings(next, window, cx);
     }
 
-    fn change_themes(
+    fn change_themes<R: Send + 'static>(
         &mut self,
         window: &Window,
         cx: &mut Context<Self>,
-        operation: impl FnOnce(&Path) -> io::Result<()> + Send + 'static,
-        on_success: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        operation: impl FnOnce(&Path) -> io::Result<R> + Send + 'static,
+        on_success: impl FnOnce(&mut Self, R, &mut Window, &mut Context<Self>) + 'static,
     ) {
         let Some(dir) = self.dir.clone() else { return };
         if self.settings_page.busy {
@@ -241,17 +255,17 @@ impl Workspace {
         self.settings_page.theme_error = None;
         cx.notify();
         let work = cx.background_executor().spawn(async move {
-            operation(&dir)?;
-            Ok::<_, io::Error>(load_user_themes(&dir))
+            let result = operation(&dir)?;
+            Ok::<_, io::Error>((result, load_user_themes(&dir)))
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = work.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.settings_page.busy = false;
                 match result {
-                    Ok((users, errors)) => {
+                    Ok((result, (users, errors))) => {
                         cx.global_mut::<Appearance>().replace_users(users, errors);
-                        on_success(this, window, cx);
+                        on_success(this, result, window, cx);
                         cx.refresh_windows();
                     }
                     Err(error) => this.settings_page.theme_error = Some(error.to_string()),
@@ -290,9 +304,10 @@ impl Workspace {
             cx,
             move |dir| {
                 copy.id = unused_theme_id(dir, &copy.name)?;
-                save_user_theme(dir, &copy)
+                save_user_theme(dir, &copy)?;
+                Ok(copy.id)
             },
-            |_, _, _| {},
+            |this, id, window, cx| this.open_theme_editor(Some(&id), window, cx),
         );
     }
 
@@ -303,7 +318,7 @@ impl Workspace {
             window,
             cx,
             move |dir| delete_user_theme(dir, &deleted),
-            move |this, window, cx| {
+            move |this, _, window, cx| {
                 if this.settings.appearance.theme == id {
                     this.activate_theme("vscp", window, cx);
                 }
@@ -312,7 +327,7 @@ impl Workspace {
     }
 
     fn add_theme(&mut self, window: &Window, cx: &mut Context<Self>) {
-        if self.settings_page.busy {
+        if self.settings_page.busy || self.settings_page.editor.is_some() {
             return;
         }
         let paths = cx.prompt_for_paths(PathPromptOptions {
@@ -334,7 +349,7 @@ impl Workspace {
                                 window,
                                 cx,
                                 move |dir| import_theme(dir, &path).map(|_| ()),
-                                |_, _, _| {},
+                                |_, _, _, _| {},
                             );
                         }
                     }
@@ -373,7 +388,10 @@ impl Workspace {
                 0.
             };
         let columns = if available < 608. { 2 } else { 3 };
-        let active = appearance.active();
+        let active = appearance
+            .preview
+            .as_ref()
+            .map_or_else(|| appearance.active(), |(draft, _)| draft);
         let schemes = [
             ("Sistema", IconName::Monitor, Scheme::System),
             ("Claro", IconName::Sun, Scheme::Light),
@@ -399,16 +417,35 @@ impl Workspace {
                     .justify_between()
                     .child(subtitle("Temas"))
                     .child(
-                        icon_text_button(
-                            "add-theme",
-                            IconName::Plus,
-                            "Añadir tema",
-                            Variant::Secondary,
-                            None,
-                            theme,
-                            cx.listener(|this, _, window, cx| this.add_theme(window, cx)),
-                        )
-                        .h(px(26.)),
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                icon_text_button(
+                                    "create-theme",
+                                    IconName::Palette,
+                                    "Crear tema",
+                                    Variant::Secondary,
+                                    None,
+                                    theme,
+                                    cx.listener(|this, _, window, cx| {
+                                        this.open_theme_editor(None, window, cx)
+                                    }),
+                                )
+                                .h(px(26.)),
+                            )
+                            .child(
+                                icon_text_button(
+                                    "add-theme",
+                                    IconName::Plus,
+                                    "Añadir tema",
+                                    Variant::Secondary,
+                                    None,
+                                    theme,
+                                    cx.listener(|this, _, window, cx| this.add_theme(window, cx)),
+                                )
+                                .h(px(26.)),
+                            ),
                     ),
             )
             .when_some(self.settings_page.theme_error.clone(), |section, error| {
@@ -443,6 +480,7 @@ impl Workspace {
                     .child(error)
             }));
         div()
+            .relative()
             .flex()
             .flex_1()
             .min_w_0()
@@ -508,6 +546,8 @@ impl Workspace {
                     .child(self.editor_section(theme, cx))
                     .child(self.terminal_section(theme, cx).pb_6()),
             )
+            .children(self.render_theme_editor(theme, window, cx))
+            .children(self.render_picker(theme, cx))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -582,6 +622,7 @@ impl Workspace {
         let activate = def.id.clone();
         let duplicate = def.id.clone();
         let delete = def.id.clone();
+        let edit = def.id.clone();
         let focus = self.settings_page.themes[&def.id].clone();
         let key_focus = focus.clone();
         card(&focus, &focus, theme)
@@ -628,6 +669,18 @@ impl Workspace {
                             .flex()
                             .gap_1()
                             .flex_none()
+                            .when(!def.builtin, |row| {
+                                row.child(theme_action(
+                                    "edit",
+                                    "Editar",
+                                    IconName::Pencil,
+                                    theme,
+                                    cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.open_theme_editor(Some(&edit), window, cx);
+                                    }),
+                                ))
+                            })
                             .child(theme_action(
                                 "duplicate",
                                 "Duplicar",
@@ -658,9 +711,11 @@ impl Workspace {
                             }),
                     ),
             )
-            .on_click(
-                cx.listener(move |this, _, window, cx| this.activate_theme(&activate, window, cx)),
-            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if this.settings_page.editor.is_none() {
+                    this.activate_theme(&activate, window, cx);
+                }
+            }))
             .on_key_down(
                 cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
                     if !key_focus.is_focused(window) {

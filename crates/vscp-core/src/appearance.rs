@@ -250,7 +250,12 @@ fn read_theme(path: &Path, id: String) -> io::Result<ThemeDef> {
 const BUILTIN_IDS: [&str; 6] = ["vscp", "frambuesa", "bosque", "oceano", "ambar", "lavanda"];
 
 fn valid_user_id(id: &str) -> bool {
-    !id.is_empty() && slug(id) == id && !BUILTIN_IDS.contains(&id)
+    !id.is_empty()
+        && !matches!(id, "." | "..")
+        && !id.contains(['/', '\0'])
+        && !BUILTIN_IDS
+            .iter()
+            .any(|builtin| builtin.eq_ignore_ascii_case(id))
 }
 
 fn theme_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
@@ -378,7 +383,8 @@ fn slug(name: &str) -> String {
 pub fn new_theme_id<'a>(name: &str, existing: impl IntoIterator<Item = &'a str>) -> String {
     let slug = slug(name);
     let base = if slug.is_empty() { "tema" } else { &slug };
-    let existing: std::collections::HashSet<&str> = existing.into_iter().collect();
+    let existing: std::collections::HashSet<String> =
+        existing.into_iter().map(str::to_ascii_lowercase).collect();
     let mut id = base.to_owned();
     for suffix in 2.. {
         if !BUILTIN_IDS.contains(&id.as_str()) && !existing.contains(id.as_str()) {
@@ -423,6 +429,55 @@ pub fn contrast(foreground: u32, background: u32) -> f32 {
     let b = luminance([br, bg, bb]);
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
+/// HSV with hue in degrees and saturation and value between 0 and 1.
+#[derive(Clone, Copy, Debug)]
+pub struct Hsv {
+    pub hue: f32,
+    pub saturation: f32,
+    pub value: f32,
+}
+
+impl Hsv {
+    pub fn from_rgba(color: u32) -> Self {
+        let [r, g, b, _] = color
+            .to_be_bytes()
+            .map(|component| f32::from(component) / 255.);
+        let value = r.max(g).max(b);
+        let delta = value - r.min(g).min(b);
+        let hue = if delta == 0. {
+            0.
+        } else if value == r {
+            (g - b) / delta
+        } else if value == g {
+            2. + (b - r) / delta
+        } else {
+            4. + (r - g) / delta
+        };
+        Self {
+            hue: (hue * 60.).rem_euclid(360.),
+            saturation: if value == 0. { 0. } else { delta / value },
+            value,
+        }
+    }
+
+    pub fn rgba(self, alpha: u8) -> u32 {
+        let sector = self.hue.rem_euclid(360.) / 60.;
+        let chroma = self.saturation.clamp(0., 1.) * self.value.clamp(0., 1.);
+        let x = chroma * (1. - (sector.rem_euclid(2.) - 1.).abs());
+        let minimum = self.value.clamp(0., 1.) - chroma;
+        let [r, g, b] = match sector as u8 {
+            0 => [chroma, x, 0.],
+            1 => [x, chroma, 0.],
+            2 => [0., chroma, x],
+            3 => [0., x, chroma],
+            4 => [x, 0., chroma],
+            _ => [chroma, 0., x],
+        }
+        .map(|channel| ((channel + minimum) * 255.).round() as u8);
+        u32::from_be_bytes([r, g, b, alpha])
+    }
+}
+
 pub const VSCP_LIGHT: Colors = Colors {
     background: 0xffffffff,
     sidebar: 0xfafafaff,
@@ -560,6 +615,15 @@ fn mix(a: u32, b: u32, weight: f32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hsv_preserves_rgb_and_alpha() {
+        for color in [
+            0xff0000ff, 0xaa009988, 0x00000000, 0xffffffff, 0x11223344, 0xf4a390ff, 0x1dcfe1ff,
+        ] {
+            assert_eq!(Hsv::from_rgba(color).rgba(color as u8), color);
+        }
+    }
 
     #[test]
     fn scheme_and_legacy_colors() {

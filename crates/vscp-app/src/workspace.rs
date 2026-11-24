@@ -73,6 +73,8 @@ pub fn bind_keys(cx: &mut gpui::App) {
         KeyBinding::new("down", modal::Next, Some("RowMenu")),
         KeyBinding::new("shift-tab", modal::Previous, Some("RowMenu")),
         KeyBinding::new("up", modal::Previous, Some("RowMenu")),
+        KeyBinding::new("tab", modal::Next, Some("ThemeEditor")),
+        KeyBinding::new("shift-tab", modal::Previous, Some("ThemeEditor")),
         KeyBinding::new("tab", modal::Next, Some("Dialog")),
         KeyBinding::new("shift-tab", modal::Previous, Some("Dialog")),
         KeyBinding::new("enter", modal::Confirm, Some("Dialog")),
@@ -1669,8 +1671,16 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
             )
-            .on_action(cx.listener(|_, _: &Next, window, cx| window.focus_next(cx)))
-            .on_action(cx.listener(|_, _: &Previous, window, cx| window.focus_prev(cx)))
+            .on_action(cx.listener(|this, _: &Next, window, cx| {
+                if !this.theme_editor_tab(false, window, cx) {
+                    window.focus_next(cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Previous, window, cx| {
+                if !this.theme_editor_tab(true, window, cx) {
+                    window.focus_prev(cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &DismissMenu, window, cx| {
                 if this.reorder.is_some() {
                     cx.stop_active_drag(window);
@@ -1679,7 +1689,9 @@ impl Render for Workspace {
                 }
                 if this.settings_page.is_open() && this.dialog.is_none() && this.row_menu.is_none()
                 {
-                    this.close_settings(window, cx);
+                    if !this.dismiss_theme_editor(window, cx) {
+                        this.close_settings(window, cx);
+                    }
                     return;
                 }
                 this.dismiss_row_menu(window, cx);

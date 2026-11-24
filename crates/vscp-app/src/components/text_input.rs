@@ -35,6 +35,8 @@ pub struct TextInput {
     content: String,
     secure: bool,
     compact: bool,
+    monospace: bool,
+    invalid: bool,
     label: &'static str,
     placeholder: SharedString,
     selected_range: Range<usize>,
@@ -59,6 +61,8 @@ impl TextInput {
             placeholder: placeholder.into(),
             secure,
             compact: false,
+            monospace: false,
+            invalid: false,
             label,
             focus_handle: cx.focus_handle().tab_stop(true),
             selected_range: content.len()..content.len(),
@@ -74,6 +78,18 @@ impl TextInput {
     pub fn compact(mut self) -> Self {
         self.compact = true;
         self
+    }
+
+    pub fn monospace(mut self) -> Self {
+        self.monospace = true;
+        self
+    }
+
+    pub fn set_invalid(&mut self, invalid: bool, cx: &mut Context<Self>) {
+        if self.invalid != invalid {
+            self.invalid = invalid;
+            cx.notify();
+        }
     }
 
     pub fn select_bytes(&mut self, range: Range<usize>) {
@@ -767,8 +783,22 @@ impl Render for TextInput {
             .bg(theme.panel)
             .rounded(px(6.))
             .border_1()
-            .border_color(theme.control_border)
-            .focus(move |style| style.border_color(theme.accent))
+            .border_color(if self.invalid {
+                theme.danger
+            } else {
+                theme.control_border
+            })
+            .focus({
+                let focus_color = if self.invalid {
+                    theme.danger
+                } else {
+                    theme.accent
+                };
+                move |style| style.border_color(focus_color)
+            })
+            .when(self.monospace, |input| {
+                input.font_family(crate::theme::monospace())
+            })
             .line_height(px(18.))
             .child(
                 div()

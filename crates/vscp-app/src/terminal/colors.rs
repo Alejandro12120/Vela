@@ -33,6 +33,19 @@ impl Default for Palette {
 }
 
 impl Palette {
+    pub fn as_theme(self) -> vscp_core::appearance::TerminalColors {
+        let rgba = |color: u32| (color << 8) | 255;
+        vscp_core::appearance::TerminalColors {
+            foreground: Some(rgba(self.foreground)),
+            background: Some(rgba(self.background)),
+            cursor: self.cursor.map(rgba),
+            cursor_text: self.cursor_text.map(rgba),
+            selection_foreground: self.selection_foreground.map(rgba),
+            selection_background: self.selection_background.map(rgba),
+            ansi: self.ansi.map(|color| Some(rgba(color))),
+        }
+    }
+
     pub fn with_theme(self, theme: vscp_core::appearance::TerminalColors) -> Self {
         let rgb = |rgba: u32| rgba >> 8;
         Self {

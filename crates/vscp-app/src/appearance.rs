@@ -27,9 +27,12 @@ pub struct Appearance {
     pub settings: AppearanceSettings,
     pub themes: Vec<ThemeDef>,
     pub errors: Vec<String>,
+    pub preview: Option<(ThemeDef, Variant)>,
     dev_appearance: Option<WindowAppearance>,
     dev_theme: Option<String>,
     builtin_count: usize,
+    render_light: Theme,
+    render_dark: Theme,
 }
 
 impl Global for Appearance {}
@@ -37,14 +40,19 @@ impl Global for Appearance {}
 impl Default for Appearance {
     fn default() -> Self {
         let themes = builtin_themes();
-        Self {
+        let mut appearance = Self {
             settings: AppearanceSettings::default(),
             builtin_count: themes.len(),
+            render_light: Theme::from_colors(&themes[0].light),
+            render_dark: Theme::from_colors(&themes[0].dark),
             themes,
             errors: Vec::new(),
+            preview: None,
             dev_appearance: dev::appearance(),
             dev_theme: dev::theme_id(),
-        }
+        };
+        appearance.rebuild();
+        appearance
     }
 }
 
@@ -61,6 +69,7 @@ impl Appearance {
         self.themes.truncate(self.builtin_count);
         self.themes.extend(themes);
         self.errors = errors;
+        self.rebuild();
     }
 
     pub fn variant_for(&self, window: &Window) -> Variant {
@@ -73,8 +82,53 @@ impl Appearance {
         }
     }
 
+    pub fn update_native_appearance(cx: &mut App) {
+        let appearance = cx.global::<Self>();
+        let variant =
+            appearance.preview.as_ref().map(|(_, variant)| *variant).or(
+                match appearance.settings.scheme {
+                    Scheme::System => None,
+                    Scheme::Light => Some(Variant::Light),
+                    Scheme::Dark => Some(Variant::Dark),
+                },
+            );
+        cx.set_window_appearance(
+            variant
+                .map(|variant| match variant {
+                    Variant::Light => WindowAppearance::Light,
+                    Variant::Dark => WindowAppearance::Dark,
+                })
+                .or(appearance.dev_appearance),
+        );
+    }
+
+    pub fn set_settings(&mut self, settings: AppearanceSettings) {
+        self.settings = settings;
+        self.rebuild();
+    }
+
+    pub fn set_preview(&mut self, preview: Option<(ThemeDef, Variant)>) {
+        self.preview = preview;
+        self.rebuild();
+    }
+
+    fn rebuild(&mut self) {
+        let (light, dark) = if let Some((draft, variant)) = &self.preview {
+            let colors = variant.colors(draft);
+            (colors, colors)
+        } else {
+            let active = self.active();
+            (&active.light, &active.dark)
+        };
+        (self.render_light, self.render_dark) =
+            (Theme::from_colors(light), Theme::from_colors(dark));
+    }
+
     pub fn current_theme(&self, window: &Window) -> Theme {
-        Theme::from_colors(self.variant_for(window).colors(self.active()))
+        match self.variant_for(window) {
+            Variant::Light => self.render_light,
+            Variant::Dark => self.render_dark,
+        }
     }
 }
 
@@ -115,6 +169,7 @@ impl Loaded {
         let appearance = cx.global_mut::<Appearance>();
         appearance.settings = settings.appearance.clone();
         appearance.replace_users(self.users, self.errors);
+        Appearance::update_native_appearance(cx);
         cx.refresh_windows();
         (settings, error)
     }

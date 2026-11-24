@@ -1,6 +1,6 @@
 // Adapted from Zed crates/terminal/src/terminal.rs (v1.27.0), GPL-3.0-or-later.
 
-mod colors;
+pub(crate) mod colors;
 mod element;
 pub(crate) mod font_size;
 mod keys;

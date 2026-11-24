@@ -57,6 +57,7 @@ Use an isolated configuration directory for development runs. The `dev` Cargo fe
 - `VSCP_DEV_THEME=light|dark` overrides system appearance as seen by vSCP in Sistema mode.
 - `VSCP_DEV_THEME_ID=<id>` overrides the active theme for the run without saving.
 - `VSCP_DEV_SETTINGS=appearance|interface` opens Ajustes on startup and scrolls to Apariencia or Interfaz. `VSCP_DEV_SETTINGS=delete:<id>` opens the confirmation for a user theme.
+- `VSCP_DEV_SETTINGS=create|editor:<id>|picker:<token>` opens the theme editor or opens a color picker for a new theme, for example `picker:accent`. `create:terminal`, `create:contrast` and `create:dark` show the advanced terminal group, a low-contrast text warning and the dark draft preview.
 - `VSCP_DEV_LOCAL_ROOT=<absolute path>` overrides the local pane's starting folder.
 - `VSCP_DEV_REMOTE_DELAY_MS=<milliseconds>` delays each remote listing asynchronously.
 - `VSCP_DEV_EXPAND=<relative path>[,...]` opens the named folders and their ancestors in the initial remote tree.

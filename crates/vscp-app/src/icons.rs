@@ -46,6 +46,8 @@ pub enum IconName {
     Unplug,
     Spinner,
     Edits,
+    Search,
+    Palette,
     Monitor,
     Moon,
     Sun,
@@ -94,6 +96,8 @@ impl IconName {
         IconName::Unplug,
         IconName::Spinner,
         IconName::Edits,
+        IconName::Search,
+        IconName::Palette,
         IconName::Monitor,
         IconName::Moon,
         IconName::Sun,
@@ -143,12 +147,22 @@ impl IconName {
             Self::Sun => "icons/sun.svg",
             Self::Moon => "icons/moon.svg",
             Self::Monitor => "icons/monitor.svg",
+            Self::Palette => "icons/palette.svg",
+            Self::Search => "icons/search.svg",
             Self::Edits => "icons/file-pen.svg",
         }
     }
 }
 
 const ICONS: &[(&str, &[u8])] = &[
+    (
+        "icons/search.svg",
+        include_bytes!("../assets/icons/search.svg"),
+    ),
+    (
+        "icons/palette.svg",
+        include_bytes!("../assets/icons/palette.svg"),
+    ),
     (
         "icons/monitor.svg",
         include_bytes!("../assets/icons/monitor.svg"),

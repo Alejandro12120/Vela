@@ -63,6 +63,7 @@ Use an isolated configuration directory for development runs. The `dev` Cargo fe
 - `VSCP_DEV_EXPAND=<relative path>[,...]` opens the named folders and their ancestors in the initial remote tree.
 - `VSCP_DEV_WINDOW_WIDTH=<pixels>` requests an initial width of at least 640 logical pixels for layout checks. The window manager may override it.
 - `VSCP_DEV_WINDOW_FLOAT=1` uses a floating test window to keep the requested width when checking layouts under a tiling window manager.
+- `VSCP_DEV_HIDE_SIDEBAR=1` starts with the sidebar hidden for layout checks.
 
 - `VSCP_DEV_TRANSFER=<upload|download>:<absolute source>:<absolute destination>` enqueues one transfer after autoconnect. Conflicts use the usual dialog.
 - `VSCP_DEV_TRANSFER_DELAY_MS=<milliseconds>` waits after autoconnect before enqueueing that transfer.

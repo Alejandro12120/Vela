@@ -796,6 +796,7 @@ impl Workspace {
     pub(super) fn edit_popover(
         &self,
         theme: Theme,
+        titlebar_height: gpui::Pixels,
         window: &Window,
         cx: &Context<Self>,
     ) -> Option<AnyElement> {
@@ -867,7 +868,10 @@ impl Workspace {
                 .child(
                     deferred(
                         anchored()
-                            .position(point(window.viewport_size().width - px(388.), px(40.)))
+                            .position(point(
+                                window.viewport_size().width - px(388.),
+                                titlebar_height + px(40.),
+                            ))
                             .snap_to_window_with_margin(px(8.))
                             .child(panel),
                     )

@@ -62,6 +62,10 @@ pub fn settings_page() -> Option<String> {
     value("VSCP_DEV_SETTINGS")
 }
 
+pub fn hide_sidebar() -> bool {
+    value("VSCP_DEV_HIDE_SIDEBAR").as_deref() == Some("1")
+}
+
 pub fn reduce_transparency() -> Option<bool> {
     match value("VSCP_DEV_REDUCE_TRANSPARENCY")?.as_str() {
         "1" => Some(true),

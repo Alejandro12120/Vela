@@ -209,7 +209,8 @@ impl Workspace {
                         {
                             let id = server.id.clone();
                             this.select(&id);
-                            if let Some(position) = sidebar::row_centre(&this.servers, &id) {
+                            if let Some(mut position) = sidebar::row_centre(&this.servers, &id) {
+                                position.y += titlebar_height(window);
                                 this.open_row_menu(&id, position, window, cx);
                             }
                         }
@@ -292,7 +293,7 @@ impl Workspace {
             settings_page: settings_view::SettingsPage::new(cx),
             window_background: None,
             loading: true,
-            sidebar_visible: Rc::new(Cell::new(true)),
+            sidebar_visible: Rc::new(Cell::new(!dev::hide_sidebar())),
             pane_memory: HashMap::new(),
             quitting: false,
             config_error: None,
@@ -1608,6 +1609,47 @@ async fn identity_warning(client: &Client, spec: vscp_core::ConnectionSpec) -> O
     }
 }
 
+#[cfg(target_os = "macos")]
+fn titlebar_height(window: &Window) -> gpui::Pixels {
+    if window.is_fullscreen() {
+        px(0.)
+    } else {
+        px(crate::MACOS_TITLEBAR_HEIGHT)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn titlebar_height(_: &Window) -> gpui::Pixels {
+    px(0.)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_titlebar(height: gpui::Pixels, theme: Theme) -> gpui::Div {
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .h(height)
+        .px(px(80.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(theme.secondary_text)
+        .font_weight(FontWeight::MEDIUM)
+        .child(div().min_w_0().truncate().child("vSCP"))
+        .on_mouse_down(gpui::MouseButton::Left, |event, window, cx| {
+            // The macOS backend handles native controls above this view and
+            // leaves drag handling to apps with a transparent title bar.
+            if event.click_count == 2 {
+                window.titlebar_double_click();
+            } else {
+                window.start_window_move();
+            }
+            cx.stop_propagation();
+        })
+}
+
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(started_at) = self.trace_startup.take() {
@@ -1660,7 +1702,31 @@ impl Render for Workspace {
         } else {
             self.content(theme, window, cx).into_any_element()
         };
-        div()
+        let titlebar_height = titlebar_height(window);
+        // Each column paints its own portion of the strip. The sidebar's
+        // background and divider follow its animated width.
+        let content = if titlebar_height > px(0.) {
+            let connected = self.selected.as_ref().is_some_and(|id| {
+                matches!(self.connections.get(id), Some(Connection::Connected { .. }))
+            });
+            let color = if settings_open || (theme.glassy && !connected) {
+                theme.background
+            } else {
+                theme.panel
+            };
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .child(div().h(titlebar_height).flex_none().bg(theme.chrome(color)))
+                .child(content)
+                .into_any_element()
+        } else {
+            content
+        };
+        let root = div()
             .relative()
             .flex()
             .size_full()
@@ -1725,27 +1791,42 @@ impl Render for Workspace {
                     div()
                         .flex_1()
                         .p_4()
+                        .when(titlebar_height > px(0.), |panel| {
+                            panel.pt(px(16.) + titlebar_height)
+                        })
                         .bg(theme.chrome(theme.background))
                         .child("Cerrando conexiones…"),
                 )
             })
             .when(!self.quitting, |root| {
-                root.child(sidebar::render(self, theme, cx))
+                root.child(sidebar::render(self, theme, titlebar_height, cx))
                     .child(content)
-                    .children(transfer_overlay)
-                    .children(self.edit_popover(theme, window, cx))
-                    .children(self.render_dialog(theme, cx))
-                    .children(self.row_menu.as_ref().and_then(|menu| {
-                        let server = self.servers.iter().find(|server| server.id == menu.id)?;
-                        Some(sidebar::row_menu(
-                            menu,
-                            server,
-                            self.connections.get(&menu.id),
-                            theme,
-                            cx,
-                        ))
-                    }))
-            })
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .top(titlebar_height)
+                            .children(transfer_overlay)
+                            .children(self.edit_popover(theme, titlebar_height, window, cx))
+                            .children(self.render_dialog(theme, cx))
+                            .children(self.row_menu.as_ref().and_then(|menu| {
+                                let server =
+                                    self.servers.iter().find(|server| server.id == menu.id)?;
+                                Some(sidebar::row_menu(
+                                    menu,
+                                    server,
+                                    self.connections.get(&menu.id),
+                                    theme,
+                                    cx,
+                                ))
+                            })),
+                    )
+            });
+        #[cfg(target_os = "macos")]
+        let root = root.when(titlebar_height > px(0.), |root| {
+            root.child(macos_titlebar(titlebar_height, theme))
+        });
+        root
     }
 }
 
@@ -2102,10 +2183,11 @@ mod tests {
         // Everything is unpinned now. Dragging above the list targets the pinned group.
         let first = order(&workspace, cx)[0].0.clone();
         assert!(!order(&workspace, cx)[0].1);
-        let start = grab(cx, &first);
-        carry(cx, point(start.x, px(40.)));
+        let heading = cx.debug_bounds("sidebar-heading").unwrap().center();
+        grab(cx, &first);
+        carry(cx, heading);
         assert_eq!(target(&workspace, cx), slot(true, 0));
-        release(cx, point(start.x, px(40.)));
+        release(cx, heading);
         assert!(order(&workspace, cx)[0].1);
         assert_eq!(order(&workspace, cx)[0].0, first);
     }

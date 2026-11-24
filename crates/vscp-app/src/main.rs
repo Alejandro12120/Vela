@@ -33,6 +33,10 @@ use workspace::Workspace;
 
 actions!(vscp, [Quit]);
 
+// AppKit's standard title bar on the reference Mac is 32 points high.
+#[cfg(target_os = "macos")]
+const MACOS_TITLEBAR_HEIGHT: f32 = 32.;
+
 fn main() {
     if std::env::args_os()
         .nth(1)
@@ -78,12 +82,21 @@ fn main() {
                     let background = cx
                         .global::<appearance::Appearance>()
                         .initial_window_background(loaded.as_ref());
+                    // FullSizeContentView includes the title bar in the requested height.
+                    #[cfg(target_os = "macos")]
+                    let (titlebar_height, traffic_lights) =
+                        (MACOS_TITLEBAR_HEIGHT, Some(gpui::point(px(9.), px(9.))));
+                    #[cfg(not(target_os = "macos"))]
+                    let (titlebar_height, traffic_lights) = (0., None);
                     let window = cx
                         .open_window(
                             WindowOptions {
                                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                                     None,
-                                    size(px(dev::window_width().unwrap_or(1100.)), px(700.)),
+                                    size(
+                                        px(dev::window_width().unwrap_or(1100.)),
+                                        px(700. + titlebar_height),
+                                    ),
                                     cx,
                                 ))),
                                 kind: if dev::floating_window() {
@@ -93,9 +106,10 @@ fn main() {
                                 },
                                 titlebar: Some(TitlebarOptions {
                                     title: Some("vSCP".into()),
-                                    ..Default::default()
+                                    appears_transparent: cfg!(target_os = "macos"),
+                                    traffic_light_position: traffic_lights,
                                 }),
-                                window_min_size: Some(size(px(640.0), px(420.0))),
+                                window_min_size: Some(size(px(640.0), px(420. + titlebar_height))),
                                 window_background: background,
                                 app_id: Some("vscp".into()),
                                 ..Default::default()

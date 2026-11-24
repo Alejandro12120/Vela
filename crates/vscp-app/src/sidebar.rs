@@ -238,13 +238,18 @@ pub enum RowAction {
     Delete,
 }
 
-pub fn render(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -> impl IntoElement {
+pub fn render(
+    workspace: &Workspace,
+    theme: Theme,
+    titlebar_height: Pixels,
+    cx: &Context<Workspace>,
+) -> impl IntoElement {
     let target = if workspace.sidebar_visible() {
         WIDTH
     } else {
         0.
     };
-    let body = body(workspace, theme, cx);
+    let body = body(workspace, theme, titlebar_height, cx);
     // The width springs and the content is clipped, so the panes reflow with it.
     // Nothing is rendered while closed, which keeps it out of the tab order.
     div()
@@ -265,12 +270,22 @@ pub fn render(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -> i
         )
 }
 
-fn body(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -> Div {
+fn body(
+    workspace: &Workspace,
+    theme: Theme,
+    titlebar_height: Pixels,
+    cx: &Context<Workspace>,
+) -> Div {
     let (pinned, unpinned) = split(&workspace.servers);
     let reorder = workspace.reorder.as_ref();
     // Without pinned servers the heading becomes the pinned drop zone while dragging.
     let heading_zone = reorder.filter(|_| pinned.is_empty());
-    let mut heading = div().flex().items_center().justify_between().h(px(32.));
+    let mut heading = div()
+        .debug_selector(|| "sidebar-heading".into())
+        .flex()
+        .items_center()
+        .justify_between()
+        .h(px(32.));
     heading = match heading_zone {
         Some(reorder) => heading.child(
             drop_zone("Suelta aquí para fijar", reorder.target.pinned, theme)
@@ -305,6 +320,9 @@ fn body(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -> Div {
         .border_color(theme.border)
         .bg(theme.chrome(theme.sidebar))
         .p_3()
+        .when(titlebar_height > px(0.), |sidebar| {
+            sidebar.pt(px(12.) + titlebar_height)
+        })
         .gap_2()
         .child(heading);
     let footer = || {

@@ -198,14 +198,14 @@ impl Workspace {
                         this.servers = servers;
                         this.agent_socket = agent.map_or_else(String::new, |path| path.to_string_lossy().into_owned());
                         if let Some(name) = dev::autoconnect()
-                            && let Some(server) = this.servers.iter().find(|server| server.name == name)
+                            && let Some(server) = this.servers.iter().find(|server| server.display_name() == name)
                         {
                             let id = server.id.clone();
                             this.select(&id);
                             this.connect(&id, window, cx);
                         }
                         if let Some(name) = dev::row_menu()
-                            && let Some(server) = this.servers.iter().find(|server| server.name == name)
+                            && let Some(server) = this.servers.iter().find(|server| server.display_name() == name)
                         {
                             let id = server.id.clone();
                             this.select(&id);
@@ -215,7 +215,7 @@ impl Workspace {
                             }
                         }
                         if let Some((name, dy)) = dev::drag()
-                            && let Some(server) = this.servers.iter().find(|server| server.name == name)
+                            && let Some(server) = this.servers.iter().find(|server| server.display_name() == name)
                         {
                             let id = server.id.clone();
                             this.hold_reorder(&id, dy, cx);
@@ -223,13 +223,13 @@ impl Workspace {
                         match dev::form() {
                             Some(dev::FormRequest::New) => this.open_form(None, window, cx),
                             Some(dev::FormRequest::Edit(name)) => {
-                                let id = this.servers.iter().find(|server| server.name == name).map(|server| server.id.clone());
+                                let id = this.servers.iter().find(|server| server.display_name() == name).map(|server| server.id.clone());
                                 if let Some(id) = id {
                                     this.open_form(Some(&id), window, cx);
                                 }
                             }
                             Some(dev::FormRequest::Duplicate(name)) => {
-                                let id = this.servers.iter().find(|server| server.name == name).map(|server| server.id.clone());
+                                let id = this.servers.iter().find(|server| server.display_name() == name).map(|server| server.id.clone());
                                 if let Some(id) = id {
                                     this.open_duplicate_form(&id, window, cx);
                                 }
@@ -575,7 +575,7 @@ impl Workspace {
             dev::isolate_known_hosts(&mut spec);
             let result = async {
                 let session = client.connect(spec).await?;
-                dev::log(format_args!("connected {}", server.name));
+                dev::log(format_args!("connected {}", server.display_name()));
                 let path = match server.initial_remote_path.clone() {
                     Some(path) if path.is_absolute() => Ok(path),
                     Some(path) => session.home_dir().await.map(|home| home.join(path)),
@@ -596,7 +596,7 @@ impl Workspace {
                 let state = match result {
                     Ok((session, path)) => this.connected(&server, session, path, window, cx),
                     Err(error) => {
-                        dev::log(format_args!("connection failed for {}", server.name));
+                        dev::log(format_args!("connection failed for {}", server.display_name()));
                         Connection::Error(error)
                     }
                 };
@@ -828,6 +828,9 @@ impl Workspace {
             } else {
                 Some(PathBuf::from(socket))
             };
+            let noted = path
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned());
             let result = match (client, path) {
                 (Some(client), Some(path)) => client.list_agent_keys(path).await,
                 _ => Err(AgentError::Unavailable),
@@ -837,6 +840,9 @@ impl Workspace {
                     .map(|_| cx.focus_handle())
                     .collect();
                 if let Some(Dialog::Form(form)) = &mut this.dialog {
+                    if let Some(noted) = &noted {
+                        form.note_socket(noted);
+                    }
                     form.finish_listing(request, result, handles);
                     cx.notify();
                 }
@@ -1038,6 +1044,7 @@ impl Workspace {
                     Ok(submission) => submission,
                     Err(Errors { fields, key }) => {
                         if let Some((field, _)) = fields.first() {
+                            form.reveal_field(*field);
                             form.input(*field)
                                 .read(cx)
                                 .focus_handle(cx)
@@ -1238,7 +1245,7 @@ impl Workspace {
                     Some((IconName::Trash, theme.danger)),
                     div().child(format!(
                         "¿Eliminar «{}» de la lista de servidores?",
-                        server.name
+                        server.display_name()
                     )),
                     "Eliminar",
                 )
@@ -1448,7 +1455,7 @@ impl Workspace {
                 div()
                     .text_size(px(18.))
                     .font_weight(FontWeight::MEDIUM)
-                    .child(server.name.clone()),
+                    .child(server.display_name().to_owned()),
             )
             .child(
                 div()

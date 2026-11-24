@@ -31,6 +31,13 @@ impl Server {
         random_hex::<16>()
     }
 
+    /// The name shown in the sidebar, the session header and dialogs. An empty
+    /// name falls back to the host.
+    pub fn display_name(&self) -> &str {
+        let name = self.name.trim();
+        if name.is_empty() { &self.host } else { name }
+    }
+
     pub fn connection_spec(&self) -> ConnectionSpec {
         let mut spec = ConnectionSpec::new(
             self.host.clone(),
@@ -38,7 +45,7 @@ impl Server {
             self.user.clone(),
             self.auth.clone(),
         );
-        spec.display_name = Some(self.name.clone());
+        spec.display_name = Some(self.display_name().to_owned());
         spec
     }
 }
@@ -187,6 +194,15 @@ mod tests {
             initial_remote_path: None,
             pinned: false,
         }
+    }
+
+    #[test]
+    fn display_name_falls_back_to_the_host() {
+        let mut server = server(Auth::Password);
+        assert_eq!(server.display_name(), "Pruebas");
+        server.name = "   ".into();
+        assert_eq!(server.display_name(), "test.example");
+        assert_eq!(server.connection_spec().destination(), "test.example");
     }
 
     #[test]

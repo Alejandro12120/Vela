@@ -51,6 +51,10 @@ pub enum IconName {
     Monitor,
     Moon,
     Sun,
+    #[allow(dead_code)]
+    ChevronsUpDown,
+    #[allow(dead_code)]
+    RotateCcw,
 }
 
 impl IconName {
@@ -101,6 +105,8 @@ impl IconName {
         IconName::Monitor,
         IconName::Moon,
         IconName::Sun,
+        IconName::ChevronsUpDown,
+        IconName::RotateCcw,
     ];
 
     pub fn path(self) -> &'static str {
@@ -150,6 +156,8 @@ impl IconName {
             Self::Palette => "icons/palette.svg",
             Self::Search => "icons/search.svg",
             Self::Edits => "icons/file-pen.svg",
+            Self::ChevronsUpDown => "icons/chevrons-up-down.svg",
+            Self::RotateCcw => "icons/rotate-ccw.svg",
         }
     }
 }
@@ -188,6 +196,14 @@ const ICONS: &[(&str, &[u8])] = &[
     (
         "icons/rotate-cw.svg",
         include_bytes!("../assets/icons/rotate-cw.svg"),
+    ),
+    (
+        "icons/rotate-ccw.svg",
+        include_bytes!("../assets/icons/rotate-ccw.svg"),
+    ),
+    (
+        "icons/chevrons-up-down.svg",
+        include_bytes!("../assets/icons/chevrons-up-down.svg"),
     ),
     ("icons/eye.svg", include_bytes!("../assets/icons/eye.svg")),
     (

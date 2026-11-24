@@ -14,10 +14,7 @@ use vscp_core::{
 };
 
 use crate::{
-    components::{
-        button::{Variant, button},
-        text_input::TextInput,
-    },
+    components::{button::Variant, radio::radio_dot, segmented::segmented, text_input::TextInput},
     icons::{IconName, icon},
     theme::Theme,
     workspace::Workspace,
@@ -34,14 +31,14 @@ pub enum Field {
 }
 
 const FIELDS: [(Field, &str, &str); 6] = [
-    (Field::Name, "Nombre", "Mi servidor"),
+    (Field::Name, "Nombre (opcional)", "Igual que el host"),
     (Field::Host, "Host", "servidor.ejemplo"),
     (Field::Port, "Puerto", "22"),
     (Field::User, "Usuario", ""),
-    (Field::Socket, "Socket del agente", "Opcional"),
+    (Field::Socket, "Socket del agente", "El de Ajustes"),
     (
         Field::RemotePath,
-        "Ruta remota inicial",
+        "Carpeta inicial",
         "Carpeta personal del servidor",
     ),
 ];
@@ -101,8 +98,10 @@ pub struct Form {
     keys: Keys,
     request: u64,
     listed_socket: String,
+    effective_socket: String,
     row_focus: Vec<FocusHandle>,
     blur: Option<Subscription>,
+    advanced: bool,
 }
 
 impl Form {
@@ -135,7 +134,7 @@ impl Form {
     ) -> Self {
         let mut values = [""; FIELDS.len()];
         values[Field::Port as usize] = "22";
-        values[Field::Socket as usize] = default_socket;
+        let _ = default_socket;
         let mut port = String::new();
         let mut agent = true;
         let mut identity = Identity::None;
@@ -143,7 +142,7 @@ impl Form {
         let mut duplicate_name = None;
         if let Some(server) = server {
             if duplicate {
-                duplicate_name = Some(format!("{} duplicate", server.name));
+                duplicate_name = Some(format!("{} duplicate", server.display_name()));
             }
             port.push_str(&server.port.to_string());
             values[Field::Name as usize] = duplicate_name.as_deref().unwrap_or(&server.name);
@@ -182,6 +181,16 @@ impl Form {
                 Auth::Password => agent = false,
             }
         }
+        let advanced = server.is_some_and(|server| {
+            server.initial_remote_path.is_some()
+                || matches!(
+                    &server.auth,
+                    Auth::Agent {
+                        agent_socket: Some(_),
+                        ..
+                    }
+                )
+        });
         let inputs = FIELDS.map(|(field, label, placeholder)| {
             cx.new(|cx| TextInput::new(values[field as usize], label, placeholder, false, cx))
         });
@@ -201,8 +210,10 @@ impl Form {
             keys: Keys::Loading(Instant::now()),
             request: 0,
             listed_socket: String::new(),
+            effective_socket: String::new(),
             row_focus: Vec::new(),
             blur: None,
+            advanced,
         }
     }
 
@@ -229,19 +240,14 @@ impl Form {
         )
     }
 
-    /// Whether the key comes from a chosen file instead of the agent list.
-    fn file_mode(&self) -> bool {
-        matches!(self.identity, Identity::File { .. })
-    }
-
     fn socket(&self, cx: &App) -> String {
         self.input(Field::Socket).read(cx).value().trim().to_owned()
     }
 
-    /// Starts a listing for `request` and returns the socket to ask. Nothing is
-    /// listed outside agent mode or while a file is chosen.
+    /// Starts a listing for `request` and returns the socket to ask. The list
+    /// stays live in file mode so an agent row can switch back to it.
     pub fn begin_listing(&mut self, request: u64, cx: &App) -> Option<String> {
-        if !self.agent || self.file_mode() {
+        if !self.agent {
             return None;
         }
         self.request = request;
@@ -251,9 +257,14 @@ impl Form {
         Some(self.listed_socket.clone())
     }
 
+    /// Records the socket actually used, so the header can name the agent.
+    pub fn note_socket(&mut self, socket: &str) {
+        self.effective_socket = socket.to_owned();
+    }
+
     /// Whether the Socket field now differs from the one last listed.
     pub fn socket_changed(&self, cx: &App) -> bool {
-        self.agent && !self.file_mode() && self.socket(cx) != self.listed_socket
+        self.agent && self.socket(cx) != self.listed_socket
     }
 
     /// Applies a listing unless a newer one was started since. `handles` has one
@@ -264,7 +275,7 @@ impl Form {
         result: Result<Vec<AgentKey>, AgentError>,
         handles: Vec<FocusHandle>,
     ) {
-        if request != self.request || self.file_mode() {
+        if request != self.request {
             return;
         }
         self.keys = match result {
@@ -294,9 +305,40 @@ impl Form {
         self.message = None;
     }
 
-    pub fn use_agent(&mut self) {
-        self.identity = Identity::None;
-        self.key_error = None;
+    pub fn toggle_advanced(&mut self) {
+        self.advanced = !self.advanced;
+    }
+
+    /// Opens the advanced block so a field with an error can be focused.
+    pub fn reveal_field(&mut self, field: Field) {
+        if matches!(field, Field::Socket | Field::RemotePath) {
+            self.advanced = true;
+        }
+    }
+
+    fn agent_name(&self) -> &'static str {
+        let socket = Path::new(&self.effective_socket);
+        if vscp_core::bitwarden_agent_sockets()
+            .iter()
+            .any(|path| path == socket)
+        {
+            "Bitwarden"
+        } else {
+            "Agente SSH"
+        }
+    }
+
+    fn status(&self, theme: Theme) -> (&'static str, gpui::Rgba) {
+        match &self.keys {
+            Keys::Loading(_) => ("consultando…", theme.secondary_text),
+            Keys::Ready(keys) if keys.is_empty() => ("bloqueado", theme.warning),
+            Keys::Ready(_) => ("disponible", theme.success),
+            Keys::Failed(error) => match error {
+                AgentError::Unavailable => ("no encontrado", theme.secondary_text),
+                AgentError::Refused | AgentError::Timeout => ("bloqueado", theme.warning),
+                AgentError::Protocol(_) => ("error", theme.danger),
+            },
+        }
     }
 
     pub fn focus_key(&self, window: &mut Window, cx: &mut App) {
@@ -333,14 +375,22 @@ impl Form {
         rows
     }
 
-    fn select(&mut self, row: usize, window: &mut Window, cx: &mut App) {
+    fn pick_row(&mut self, row: usize) -> bool {
         let rows = self.rows();
         if let Some(row_data) = rows.get(row) {
             self.identity = row_data.pick.clone();
             self.key_error = None;
-            if let Some(handle) = self.row_focus.get(row) {
-                handle.focus(window, cx);
-            }
+            true
+        } else {
+            false
+        }
+    }
+
+    fn select(&mut self, row: usize, window: &mut Window, cx: &mut App) {
+        if self.pick_row(row)
+            && let Some(handle) = self.row_focus.get(row)
+        {
+            handle.focus(window, cx);
         }
     }
 
@@ -358,10 +408,7 @@ impl Form {
     pub fn render(&self, theme: Theme, cx: &Context<Workspace>) -> Div {
         let mut fields = div().flex().flex_col().gap_2();
         for (field, _, _) in FIELDS {
-            if field == Field::Port {
-                continue;
-            }
-            if field == Field::Socket && !self.agent {
+            if matches!(field, Field::Port | Field::Socket | Field::RemotePath) {
                 continue;
             }
             fields = match field {
@@ -378,22 +425,9 @@ impl Form {
                         .child(div().w(px(76.)).child(self.field(Field::Port, theme, cx))),
                 ),
                 Field::User => {
-                    let fields = fields.child(self.field(field, theme, cx)).child(
-                        labeled("Autenticación").child(
-                            div()
-                                .flex()
-                                .gap_1()
-                                .flex_wrap()
-                                .child(auth_choice(
-                                    true,
-                                    self.agent,
-                                    "Agente (Bitwarden)",
-                                    theme,
-                                    cx,
-                                ))
-                                .child(auth_choice(false, self.agent, "Contraseña", theme, cx)),
-                        ),
-                    );
+                    let fields = fields
+                        .child(self.field(field, theme, cx))
+                        .child(self.auth(theme, cx));
                     if self.agent {
                         fields.child(self.key_section(theme, cx))
                     } else {
@@ -403,125 +437,268 @@ impl Form {
                 _ => fields.child(self.field(field, theme, cx)),
             };
         }
-        fields.when_some(self.message, |form, message| {
-            form.child(div().text_color(theme.danger).child(message))
-        })
+        fields
+            .child(self.advanced_options(theme, cx))
+            .when_some(self.message, |form, message| {
+                form.child(div().text_color(theme.danger).child(message))
+            })
     }
 
     fn field(&self, field: Field, theme: Theme, _: &Context<Workspace>) -> Div {
         let (_, label, _) = FIELDS[field as usize];
-        labeled(label)
-            .child(div().child(self.input(field).clone()))
-            .when_some(
-                self.errors.iter().find(|(key, _)| *key == field),
-                |label, (_, message)| label.child(error_text(message, theme)),
-            )
-    }
-
-    fn key_section(&self, theme: Theme, cx: &Context<Workspace>) -> Div {
-        let section = div().flex().flex_col().gap_1().child(
+        let label = if field == Field::Name {
             div()
                 .flex()
                 .items_center()
                 .gap_1()
-                .font_weight(FontWeight::MEDIUM)
-                .child(icon(IconName::Key).text_color(theme.secondary_text))
-                .child("Clave"),
-        );
-        let section = match &self.identity {
-            Identity::File { path, key, .. } => section
-                .child(file_card(path, key.as_ref(), theme))
-                .child(div().flex().child(link(
-                    "use-agent",
-                    "Usar una clave de Bitwarden",
-                    theme,
-                    cx.listener(|this, _, window, cx| {
-                        if let Some(form) = this.editing() {
-                            form.use_agent();
-                        }
-                        this.refresh_keys(window, cx);
-                    }),
-                ))),
-            _ => section
-                .child(self.agent_keys(theme, cx))
-                .child(div().flex().child(link(
-                    "from-file",
-                    "Desde archivo…",
-                    theme,
-                    cx.listener(|this, _, window, cx| this.choose_identity(window, cx)),
-                ))),
-        };
-        section.when_some(self.key_error, |section, message| {
-            section.child(error_text(message, theme))
-        })
-    }
-
-    fn agent_keys(&self, theme: Theme, cx: &Context<Workspace>) -> Div {
-        let message = |text: &'static str| {
-            div()
-                .flex()
-                .flex_col()
-                .items_start()
-                .gap_2()
+                .child(div().font_weight(FontWeight::MEDIUM).child("Nombre"))
                 .child(
                     div()
+                        .text_size(px(13.))
+                        .text_color(theme.secondary_text)
+                        .child("(opcional)"),
+                )
+        } else {
+            div().font_weight(FontWeight::MEDIUM).child(label)
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(label)
+            .child(div().child(self.input(field).clone()))
+            .when_some(
+                self.errors.iter().find(|(key, _)| *key == field),
+                |field, (_, message)| field.child(error_text(message, theme)),
+            )
+    }
+
+    fn auth(&self, theme: Theme, cx: &Context<Workspace>) -> Div {
+        let listener = cx.listener(|this: &mut Workspace, index: &usize, window, cx| {
+            let agent = *index == 0;
+            let Some(form) = this.editing() else { return };
+            let changed = form.agent != agent;
+            form.agent = agent;
+            cx.notify();
+            if changed && agent {
+                this.refresh_keys(window, cx);
+            }
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(icon_label(IconName::Lock, "Autenticación", theme))
+            .child(segmented(
+                "form-auth",
+                &["Clave SSH", "Contraseña"],
+                if self.agent { 0 } else { 1 },
+                theme,
+                move |index, window, cx| listener(&index, window, cx),
+            ))
+    }
+
+    fn advanced_options(&self, theme: Theme, cx: &Context<Workspace>) -> Div {
+        let open = self.advanced;
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .id("advanced-toggle")
+                    .role(gpui::Role::Button)
+                    .tab_index(0)
+                    .aria_expanded(open)
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .h(px(24.))
+                    .text_size(px(13.))
+                    .text_color(theme.secondary_text)
+                    .cursor_pointer()
+                    .hover(move |style| style.text_color(theme.text))
+                    .focus(move |style| style.border_color(theme.accent))
+                    .child(crate::components::motion::chevron(
+                        icon(IconName::ChevronRight)
+                            .size(px(14.))
+                            .text_color(theme.secondary_text),
+                        "advanced-chevron",
+                        open,
+                        true,
+                    ))
+                    .child("Opciones avanzadas")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if let Some(form) = this.editing() {
+                            form.toggle_advanced();
+                        }
+                        cx.notify();
+                        let _ = window;
+                    })),
+            )
+            .when(open, |block| {
+                block.child(self.field(Field::RemotePath, theme, cx))
+            })
+            .when(open && self.agent, |block| {
+                block.child(self.field(Field::Socket, theme, cx))
+            })
+    }
+
+    fn key_section(&self, theme: Theme, cx: &Context<Workspace>) -> Div {
+        let (word, color) = self.status(theme);
+        let header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .px(px(10.))
+            .py(px(7.))
+            .border_b_1()
+            .border_color(theme.border)
+            .text_size(px(12.))
+            .text_color(theme.secondary_text)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(self.agent_name())
+                    .when(matches!(self.keys, Keys::Loading(_)), |row| {
+                        row.child(crate::components::motion::spin(
+                            icon(IconName::Spinner)
+                                .size(px(12.))
+                                .text_color(theme.secondary_text),
+                            "agent-spinner",
+                        ))
+                    })
+                    .when(!matches!(self.keys, Keys::Loading(_)), |row| {
+                        row.child(crate::components::status_dot::status_dot(color, None))
+                    })
+                    .child(div().text_color(color).child(word)),
+            )
+            .child(
+                crate::components::button::icon_button(
+                    "refresh-keys",
+                    "Volver a consultar",
+                    IconName::Refresh,
+                    Variant::Secondary,
+                    theme,
+                    cx.listener(|this, _, window, cx| this.refresh_keys(window, cx)),
+                )
+                .size(px(22.)),
+            );
+
+        let notice = self.key_notice(theme, cx);
+        let rows = self.rows();
+        let selected = self.selected_row(&rows);
+        let list = div()
+            .id("agent-keys")
+            .role(Role::ListBox)
+            .aria_label("Claves de Bitwarden")
+            .max_h(px(170.))
+            .overflow_y_scroll()
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                let step = match event.keystroke.key.as_str() {
+                    "down" => 1,
+                    "up" => -1,
+                    _ => return,
+                };
+                cx.stop_propagation();
+                if let Some(form) = this.editing() {
+                    let rows = form.rows();
+                    if let Some(next) = step_row(rows.len(), form.selected_row(&rows), step) {
+                        form.select(next, window, cx);
+                        cx.notify();
+                    }
+                }
+            }))
+            .children(rows.iter().enumerate().map(|(index, row)| {
+                let handle = self.row_focus.get(index).cloned();
+                key_row(row, index, selected == Some(index), handle, theme, cx)
+            }));
+
+        let last = match &self.identity {
+            Identity::File { path, key, .. } => file_row(path, key.as_ref(), theme, cx),
+            _ => div()
+                .id("from-file")
+                .role(Role::Button)
+                .tab_index(0)
+                .flex()
+                .items_center()
+                .gap_2()
+                .px(px(10.))
+                .py(px(7.))
+                .border_t_1()
+                .border_color(theme.border)
+                .text_size(px(13.))
+                .text_color(theme.accent)
+                .cursor_pointer()
+                .hover(move |style| style.bg(theme.hover))
+                .focus(move |style| style.border_color(theme.accent))
+                .child(icon(IconName::Plus).size(px(14.)).text_color(theme.accent))
+                .child("Usar un archivo de clave…")
+                .on_click(cx.listener(|this, _, window, cx| this.choose_identity(window, cx))),
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(icon_label(IconName::Key, "Clave", theme))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(theme.control_border)
+                    .bg(theme.panel)
+                    .overflow_hidden()
+                    .child(header)
+                    .children(notice)
+                    .child(list)
+                    .child(last),
+            )
+            .when_some(self.key_error, |section, message| {
+                section.child(error_text(message, theme))
+            })
+    }
+
+    fn key_notice(&self, theme: Theme, cx: &Context<Workspace>) -> Option<Div> {
+        let text: &'static str = match &self.keys {
+            Keys::Loading(since) => {
+                return Some(
+                    div()
                         .flex()
-                        .w_full()
                         .items_start()
                         .gap_2()
+                        .px(px(10.))
+                        .py(px(6.))
                         .text_size(px(12.))
                         .text_color(theme.secondary_text)
                         .child(
                             icon(IconName::Error)
                                 .size(px(14.))
                                 .mt(px(1.))
-                                .text_color(theme.danger),
+                                .text_color(theme.warning),
                         )
-                        .child(div().flex_1().min_w_0().child(text)),
-                )
-                .child(button(
-                    "retry",
-                    "Reintentar",
-                    Variant::Secondary,
-                    theme,
-                    cx.listener(|this, _, window, cx| this.refresh_keys(window, cx)),
-                ))
-        };
-        let rows = self.rows();
-        let notice = match &self.keys {
-            Keys::Loading(since) => {
-                return boxed(theme).child(
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap_2()
-                        .text_size(px(12.))
-                        .text_color(theme.secondary_text)
-                        .child(crate::components::motion::spin(
-                            icon(IconName::Spinner)
-                                .size(px(14.))
-                                .mt(px(1.))
-                                .text_color(theme.secondary_text),
-                            "keys-spinner",
-                        ))
                         .child(
                             div()
                                 .flex()
                                 .flex_col()
                                 .gap_1()
                                 .min_w_0()
-                                .child("Consultando Bitwarden…")
                                 .when(since.elapsed() >= UNLOCK_HINT_AFTER, |text| {
                                     text.child("Si Bitwarden pide desbloquear, hazlo y espera.")
                                 }),
                         ),
                 );
             }
-            Keys::Ready(keys) if keys.is_empty() => Some(message(
-                "Bitwarden no tiene claves SSH disponibles o está bloqueado.",
-            )),
-            Keys::Ready(_) => None,
-            Keys::Failed(error) => Some(message(match error {
+            Keys::Ready(keys) if keys.is_empty() => {
+                "Bitwarden no tiene claves SSH disponibles o está bloqueado."
+            }
+            Keys::Ready(_) => return None,
+            Keys::Failed(error) => match error {
                 AgentError::Unavailable => {
                     "No se encuentra el agente SSH de Bitwarden. Abre Bitwarden y activa el agente SSH en Ajustes."
                 }
@@ -532,46 +709,26 @@ impl Form {
                     "Bitwarden no respondió a tiempo. Desbloquéalo e inténtalo de nuevo."
                 }
                 AgentError::Protocol(_) => "El agente SSH respondió de forma inesperada.",
-            })),
+            },
         };
-        let selected = self.selected_row(&rows);
-        let list = (!rows.is_empty()).then(|| {
-            let items = rows.iter().enumerate().map(|(index, row)| {
-                let handle = self.row_focus.get(index).cloned();
-                key_row(row, index, selected == Some(index), handle, theme, cx)
-            });
+        let _ = cx;
+        Some(
             div()
-                .id("agent-keys")
-                .role(Role::ListBox)
-                .aria_label("Claves de Bitwarden")
-                .max_h(px(168.))
-                .overflow_y_scroll()
-                .rounded(px(6.))
-                .border_1()
-                .border_color(theme.control_border)
-                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                    let step = match event.keystroke.key.as_str() {
-                        "down" => 1,
-                        "up" => -1,
-                        _ => return,
-                    };
-                    cx.stop_propagation();
-                    if let Some(form) = this.editing() {
-                        let rows = form.rows();
-                        if let Some(next) = step_row(rows.len(), form.selected_row(&rows), step) {
-                            form.select(next, window, cx);
-                            cx.notify();
-                        }
-                    }
-                }))
-                .children(items)
-        });
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .children(notice.map(|notice| boxed(theme).child(notice)))
-            .children(list)
+                .flex()
+                .items_start()
+                .gap_2()
+                .px(px(10.))
+                .py(px(6.))
+                .text_size(px(12.))
+                .text_color(theme.secondary_text)
+                .child(
+                    icon(IconName::Error)
+                        .size(px(14.))
+                        .mt(px(1.))
+                        .text_color(theme.warning),
+                )
+                .child(div().flex_1().min_w_0().child(text)),
+        )
     }
 }
 
@@ -594,16 +751,25 @@ fn step_row(len: usize, selected: Option<usize>, step: isize) -> Option<usize> {
     })
 }
 
-/// `SHA256:abcd…wxyz`: the first and last four characters after the prefix.
+/// `SHA256:abcd…wxyz` becomes `…wxyz`: only the last four hash characters.
 fn short_fingerprint(fingerprint: &str) -> String {
-    let (prefix, hash) = fingerprint.split_once(':').unwrap_or(("", fingerprint));
-    let chars: Vec<char> = hash.chars().collect();
-    if chars.len() <= 9 {
-        return fingerprint.to_owned();
-    }
-    let head: String = chars[..4].iter().collect();
-    let tail: String = chars[chars.len() - 4..].iter().collect();
-    format!("{prefix}:{head}…{tail}")
+    let hash = fingerprint
+        .split_once(':')
+        .map_or(fingerprint, |(_, hash)| hash);
+    let tail: String = hash
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("…{tail}")
+}
+
+/// The type and short fingerprint shown on a key row.
+fn key_detail_text(key_type: &str, fingerprint: &str) -> String {
+    format!("{key_type} · {}", short_fingerprint(fingerprint))
 }
 
 fn key_row(
@@ -619,18 +785,21 @@ fn key_row(
     } else {
         row.key.comment.clone()
     };
-    let fingerprint = short_fingerprint(&row.key.fingerprint());
-    let detail = key_detail(
-        &row.key.key_type,
-        match row.note {
-            Some(note) => div().truncate().child(note),
-            None => div()
-                .truncate()
-                .font_family(crate::theme::monospace())
-                .child(fingerprint.clone()),
-        },
-        theme,
-    );
+    let fingerprint = row.key.fingerprint();
+    let detail = if let Some(note) = row.note {
+        div()
+            .truncate()
+            .text_size(px(12.))
+            .text_color(theme.warning)
+            .child(note)
+    } else {
+        div()
+            .truncate()
+            .text_size(px(11.5))
+            .font_family(crate::theme::monospace())
+            .text_color(theme.secondary_text)
+            .child(key_detail_text(&row.key.key_type, &fingerprint))
+    };
     div()
         .id(SharedString::from(format!("key-{index}")))
         .role(Role::ListBoxOption)
@@ -643,35 +812,30 @@ fn key_row(
         .flex()
         .flex_none()
         .items_center()
-        .gap_2()
-        .h(px(40.))
-        .px_2()
+        .gap(px(9.))
+        .h(px(32.))
+        .px(px(10.))
+        .py(px(7.))
         .border_1()
         .border_color(gpui::transparent_black())
-        .rounded(px(6.))
         .cursor_pointer()
-        .when(selected, |row| row.bg(theme.selection))
+        .when(selected, |row| {
+            row.bg(gpui::Hsla::from(theme.accent).opacity(0.14))
+        })
         .when(!selected, |row| {
             row.hover(move |style| style.bg(theme.hover))
         })
         .focus(move |style| style.border_color(theme.accent))
+        .child(radio_dot(selected, theme))
         .child(
             div()
-                .flex()
-                .flex_col()
+                .truncate()
                 .flex_1()
                 .min_w_0()
-                .child(
-                    div()
-                        .truncate()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(name.clone()),
-                )
-                .child(detail),
+                .text_size(px(13.))
+                .child(name.clone()),
         )
-        .when(selected, |row| {
-            row.child(icon(IconName::Check).text_color(theme.text))
-        })
+        .child(detail)
         .on_click(cx.listener(move |this, _, window, cx| {
             if let Some(form) = this.editing() {
                 form.select(index, window, cx);
@@ -680,61 +844,68 @@ fn key_row(
         }))
 }
 
-/// The second line of a key: its type, a dot and `tail`.
-fn key_detail(key_type: &str, tail: Div, theme: Theme) -> Div {
-    div()
-        .flex()
-        .gap_1()
-        .min_w_0()
-        .text_size(px(12.))
-        .text_color(theme.secondary_text)
-        .child(div().flex_none().child(key_type.to_owned()))
-        .child(div().flex_none().child("·"))
-        .child(tail)
-}
-
-fn file_card(path: &Path, key: Option<&AgentKey>, theme: Theme) -> Div {
+fn file_row(
+    path: &Path,
+    key: Option<&AgentKey>,
+    theme: Theme,
+    cx: &Context<Workspace>,
+) -> Stateful<Div> {
     let name = path
         .file_name()
         .map_or_else(|| path.to_string_lossy(), |name| name.to_string_lossy())
         .into_owned();
-    let card = boxed(theme)
-        .flex()
-        .flex_col()
-        .child(div().truncate().font_weight(FontWeight::MEDIUM).child(name));
-    let secondary = || {
-        div()
+    let detail = match key {
+        Some(key) => div()
+            .truncate()
+            .text_size(px(11.5))
+            .font_family(crate::theme::monospace())
+            .text_color(theme.secondary_text)
+            .child(key_detail_text(&key.key_type, &key.fingerprint())),
+        None => div()
             .truncate()
             .text_size(px(12.))
-            .text_color(theme.secondary_text)
+            .text_color(theme.danger)
+            .child(INVALID_FILE),
     };
-    match key {
-        Some(key) => card
-            .child(key_detail(
-                &key.key_type,
-                div()
-                    .truncate()
-                    .font_family(crate::theme::monospace())
-                    .child(short_fingerprint(&key.fingerprint())),
-                theme,
-            ))
-            .child(secondary().child(path.to_string_lossy().into_owned())),
-        None => card.child(
+    div()
+        .id("file-key-row")
+        .role(Role::ListBoxOption)
+        .aria_selected(true)
+        .flex()
+        .items_center()
+        .gap(px(9.))
+        .min_h(px(32.))
+        .px(px(10.))
+        .py(px(7.))
+        .border_t_1()
+        .border_color(theme.border)
+        .bg(gpui::Hsla::from(theme.accent).opacity(0.14))
+        .child(radio_dot(true, theme))
+        .child(
             div()
-                .text_size(px(12.))
-                .text_color(theme.danger)
-                .child(INVALID_FILE),
-        ),
-    }
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(div().truncate().text_size(px(13.)).child(name))
+                .child(detail),
+        )
+        .child(link(
+            "change-file",
+            "Cambiar…",
+            theme,
+            cx.listener(|this, _, window, cx| this.choose_identity(window, cx)),
+        ))
 }
 
-fn boxed(theme: Theme) -> Div {
+fn icon_label(name: IconName, label: &'static str, theme: Theme) -> Div {
     div()
-        .px_2()
-        .py_2()
-        .rounded(px(6.))
-        .border_1()
-        .border_color(theme.control_border)
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .font_weight(FontWeight::MEDIUM)
+        .child(icon(name).size(px(14.)).text_color(theme.text))
+        .child(label)
 }
 
 fn error_text(message: &'static str, theme: Theme) -> Div {
@@ -760,8 +931,6 @@ fn link(
         .items_center()
         .h(px(24.))
         .px_1()
-        // Aligns the text, not the focus border, with the field edge.
-        .ml(px(-4.))
         .rounded(px(4.))
         .border_1()
         .border_color(gpui::transparent_black())
@@ -775,42 +944,6 @@ fn link(
         .on_click(on_click)
 }
 
-fn labeled(label: &'static str) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(div().font_weight(FontWeight::MEDIUM).child(label))
-}
-
-fn auth_choice(
-    agent: bool,
-    selected: bool,
-    label: &'static str,
-    theme: Theme,
-    cx: &Context<Workspace>,
-) -> impl gpui::IntoElement {
-    button(
-        label,
-        label,
-        if selected == agent {
-            Variant::Selected
-        } else {
-            Variant::Secondary
-        },
-        theme,
-        cx.listener(move |this, _, window, cx| {
-            let Some(form) = this.editing() else { return };
-            let changed = form.agent != agent;
-            form.agent = agent;
-            cx.notify();
-            if changed && agent {
-                this.refresh_keys(window, cx);
-            }
-        }),
-    )
-}
-
 fn validate(
     values: [&str; FIELDS.len()],
     agent: bool,
@@ -818,9 +951,6 @@ fn validate(
 ) -> Result<Submission, Errors> {
     let [name, host, port, user, socket, path] = values.map(str::trim);
     let mut fields = Vec::new();
-    if name.is_empty() {
-        fields.push((Field::Name, "Escribe un nombre."));
-    }
     if host.is_empty()
         || host.starts_with('-')
         || host.contains(|c: char| c.is_whitespace() || c.is_control() || matches!(c, '@' | '/'))
@@ -909,7 +1039,7 @@ mod tests {
                 .into_iter()
                 .map(|(field, _)| field)
                 .collect::<Vec<_>>(),
-            [Field::Name, Field::Host, Field::Port, Field::User]
+            [Field::Host, Field::Port, Field::User]
         );
         assert_eq!(errors.key, Some("Elige una clave"));
         for port in ["0", "+22", "22.5", "dos"] {
@@ -1009,12 +1139,56 @@ mod tests {
     }
 
     #[test]
-    fn shortens_fingerprints_to_four_characters_at_each_end() {
+    fn shortens_fingerprints_to_the_last_four_characters() {
         assert_eq!(
             short_fingerprint("SHA256:Nv9k5CyzST5gm9sN9kt+A2d/j0Nw8kvUzIVrJ8cyTC0"),
-            "SHA256:Nv9k…yTC0"
+            "…yTC0"
         );
-        assert_eq!(short_fingerprint("SHA256:abc"), "SHA256:abc");
+        assert_eq!(short_fingerprint("SHA256:abc"), "…abc");
+        assert_eq!(
+            key_detail_text(
+                "ssh-ed25519",
+                "SHA256:Nv9k5CyzST5gm9sN9kt+A2d/j0Nw8kvUzIVrJ8cyTC0"
+            ),
+            "ssh-ed25519 · …yTC0"
+        );
+    }
+
+    #[test]
+    fn an_empty_name_is_saved_as_an_empty_string() {
+        let submission =
+            validate(["  ", "host", "22", "ana", "", ""], false, &Identity::None).unwrap();
+        assert_eq!(submission.server.name, "");
+        assert_eq!(submission.server.display_name(), "host");
+    }
+
+    #[test]
+    fn a_blank_agent_socket_is_saved_as_none() {
+        let submission = validate(
+            ["", "host", "22", "ana", "   ", ""],
+            true,
+            &Identity::Agent(key("Servidor")),
+        )
+        .unwrap();
+        assert_eq!(
+            submission.server.auth,
+            Auth::Agent {
+                identity_pub: PathBuf::new(),
+                agent_socket: None,
+            }
+        );
+    }
+
+    #[gpui::test]
+    fn choosing_an_agent_row_switches_back_from_a_file(cx: &mut gpui::TestAppContext) {
+        let mut form = cx.update(|cx| Form::new(None, "", None, cx));
+        form.keys = Keys::Ready(vec![key("uno"), key("dos")]);
+        form.pick_file(PathBuf::from("/tmp/clave.pub"));
+        assert!(matches!(form.identity, Identity::File { .. }));
+        // The agent rows stay listed while a file is chosen.
+        assert_eq!(form.rows().len(), 2);
+        assert!(form.pick_row(1));
+        assert!(matches!(form.identity, Identity::Agent(_)));
     }
 
     #[test]

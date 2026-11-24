@@ -379,7 +379,7 @@ fn mountinfo_source_is_block_device(mountinfo: &str, dev: u64) -> bool {
             let (_, after) = line.split_once(" - ")?;
             after.split(' ').nth(1)
         })
-        .last()
+        .next_back()
         .is_some_and(|source| source.starts_with("/dev/"))
 }
 

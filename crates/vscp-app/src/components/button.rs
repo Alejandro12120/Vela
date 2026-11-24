@@ -57,6 +57,53 @@ pub fn icon_text_button(
         .when_some(tone, |button, tone| button.text_color(tone))
 }
 
+/// A 24 px, 12 px-text button for dense settings rows.
+#[allow(dead_code)]
+pub fn small_button(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    variant: Variant,
+    theme: Theme,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    button(id, label, variant, theme, on_click)
+        .h(px(24.))
+        .px(px(9.))
+        .text_size(px(12.))
+}
+
+/// A 24 px icon button for dense settings rows.
+#[allow(dead_code)]
+pub fn small_icon_button(
+    id: impl Into<ElementId>,
+    aria_label: impl Into<SharedString>,
+    name: IconName,
+    variant: Variant,
+    theme: Theme,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    icon_button(id, aria_label, name, variant, theme, on_click)
+        .h(px(24.))
+        .w(px(24.))
+        .px(px(0.))
+}
+
+/// A 24 px icon-and-text button for dense settings rows.
+#[allow(dead_code)]
+pub fn small_icon_text_button(
+    id: impl Into<ElementId>,
+    name: IconName,
+    label: impl Into<SharedString>,
+    variant: Variant,
+    theme: Theme,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    icon_text_button(id, name, label, variant, None, theme, on_click)
+        .h(px(24.))
+        .px(px(9.))
+        .text_size(px(12.))
+}
+
 fn text_color(variant: Variant, theme: Theme) -> Rgba {
     match variant {
         Variant::Primary => theme.primary_text,

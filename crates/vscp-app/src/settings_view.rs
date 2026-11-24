@@ -837,6 +837,8 @@ impl Workspace {
     }
 
     fn editor_section(&self, theme: Theme, cx: &Context<Self>) -> Div {
+        #[cfg(not(target_os = "macos"))]
+        let _ = cx;
         let mut body = div().flex().flex_col().gap_2().items_start();
         #[cfg(target_os = "macos")]
         {

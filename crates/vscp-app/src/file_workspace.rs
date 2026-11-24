@@ -62,7 +62,8 @@ impl Panes {
         window: &mut Window,
         cx: &mut App,
     ) -> Self {
-        let transfers = cx.new(|cx| Transfers::new(session.clone(), server.name.clone(), cx));
+        let transfers =
+            cx.new(|cx| Transfers::new(session.clone(), server.display_name().to_owned(), cx));
         let overlay = cx.new(|cx| TransferOverlay::new(transfers.clone(), cx));
         let local_focus = cx.focus_handle().tab_stop(true);
         let remote_focus = cx.focus_handle().tab_stop(true);
@@ -263,7 +264,7 @@ impl Panes {
                     .min_w_0()
                     .truncate()
                     .font_weight(FontWeight::MEDIUM)
-                    .child(server.name.clone()),
+                    .child(server.display_name().to_owned()),
             )
             .child(
                 div()

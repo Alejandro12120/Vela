@@ -7,6 +7,7 @@ pub mod config;
 pub mod edit;
 mod error;
 pub mod local;
+pub mod path;
 mod session;
 pub mod settings;
 mod sftp;

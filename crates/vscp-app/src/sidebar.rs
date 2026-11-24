@@ -532,7 +532,7 @@ fn labels(server: &Server, theme: Theme, end_padding: bool) -> Div {
             div()
                 .truncate()
                 .font_weight(FontWeight::MEDIUM)
-                .child(server.name.clone()),
+                .child(server.display_name().to_owned()),
         )
         .child(
             div()
@@ -638,7 +638,7 @@ fn row(
                         })
                         .focus(move |style| style.border_color(theme.accent))
                         .cursor_pointer()
-                        .aria_label(format!("{}, {endpoint}, {status}", server.name))
+                        .aria_label(format!("{}, {endpoint}, {status}", server.display_name()))
                         .child(status_dot(color, pulse))
                         .child(labels(server, theme, shown))
                         .on_drag(drag, move |drag, offset, window, cx| {

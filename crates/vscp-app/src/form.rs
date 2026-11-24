@@ -933,7 +933,7 @@ fn icon_label(name: IconName, label: &'static str, theme: Theme) -> Div {
         .child(label)
 }
 
-fn error_text(message: &'static str, theme: Theme) -> Div {
+pub(super) fn error_text(message: &'static str, theme: Theme) -> Div {
     div()
         .text_size(px(12.))
         .text_color(theme.danger)

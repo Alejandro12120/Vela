@@ -310,6 +310,10 @@ pub fn editor_menu() -> bool {
     value("VSCP_DEV_EDITOR_MENU").as_deref() == Some("1")
 }
 
+pub fn prompt() -> Option<String> {
+    value("VSCP_DEV_PROMPT")
+}
+
 pub fn empty_confirm() -> bool {
     value("VSCP_DEV_EMPTY_CONFIRM").as_deref() == Some("1")
 }

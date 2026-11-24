@@ -97,6 +97,7 @@ pub enum Connection {
 struct Prompt {
     request: askpass::Request,
     input: Option<Entity<TextInput>>,
+    rejected: bool,
 }
 
 enum Dialog {
@@ -138,6 +139,7 @@ pub struct Workspace {
     show_stderr: bool,
     dialog: Option<Dialog>,
     prompts: VecDeque<askpass::Request>,
+    password_attempts: HashMap<String, u32>,
     focus: FocusHandle,
     dialog_focus: FocusHandle,
     confirm_focus: FocusHandle,
@@ -333,6 +335,18 @@ impl Workspace {
                             None => {}
                         }
                         this.dev_open_settings(window, cx);
+                        if dev::prompt().as_deref() == Some("password-rejected") {
+                            #[cfg(feature = "dev")]
+                            {
+                                this.password_attempts.insert("prueba".into(), 1);
+                                this.prompts.push_back(askpass::Request::fake(
+                                    "prueba",
+                                    "Contraseña para 'prueba':",
+                                    askpass::Kind::Password,
+                                ));
+                                this.show_next_prompt(window, cx);
+                            }
+                        }
                     }
                     Err(err) => {
                         let message = if err.kind() == std::io::ErrorKind::InvalidData {
@@ -399,6 +413,7 @@ impl Workspace {
             show_stderr: false,
             dialog: None,
             prompts: VecDeque::new(),
+            password_attempts: HashMap::new(),
             focus,
             dialog_focus: cx.focus_handle(),
             confirm_focus: cx.focus_handle(),
@@ -728,6 +743,7 @@ impl Workspace {
                 }
             }.await;
             let _ = this.update_in(cx, |this, window, cx| {
+                this.clear_password_attempts(server.display_name());
                 if matches!(&this.dialog, Some(Dialog::Prompt(prompt)) if !prompt.request.is_pending()) {
                     this.finish_dialog(window, cx);
                 }
@@ -1145,6 +1161,10 @@ impl Workspace {
         cx.notify();
     }
 
+    fn clear_password_attempts(&mut self, display_name: &str) {
+        self.password_attempts.remove(display_name);
+    }
+
     fn show_next_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.dialog.is_some() {
             return;
@@ -1162,7 +1182,20 @@ impl Workspace {
                         Some(cx.new(|cx| TextInput::new("", label, "", secure, cx)))
                     }
                 };
-                self.open_dialog(Dialog::Prompt(Prompt { request, input }), window, cx);
+                let rejected = matches!(request.kind, askpass::Kind::Password)
+                    && self
+                        .password_attempts
+                        .get(&request.destination)
+                        .is_some_and(|count| *count > 0);
+                self.open_dialog(
+                    Dialog::Prompt(Prompt {
+                        request,
+                        input,
+                        rejected,
+                    }),
+                    window,
+                    cx,
+                );
                 return;
             }
         }
@@ -1170,6 +1203,17 @@ impl Workspace {
 
     fn cancel_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.saving {
+            let password_destination = match &self.dialog {
+                Some(Dialog::Prompt(prompt))
+                    if matches!(prompt.request.kind, askpass::Kind::Password) =>
+                {
+                    Some(prompt.request.destination.clone())
+                }
+                _ => None,
+            };
+            if let Some(destination) = password_destination {
+                self.clear_password_attempts(&destination);
+            }
             self.finish_dialog(window, cx);
         }
     }
@@ -1187,11 +1231,22 @@ impl Workspace {
                 {
                     return;
                 }
+                let password_destination = match &self.dialog {
+                    Some(Dialog::Prompt(prompt))
+                        if matches!(prompt.request.kind, askpass::Kind::Password) =>
+                    {
+                        Some(prompt.request.destination.clone())
+                    }
+                    _ => None,
+                };
                 if let Some(Dialog::Prompt(prompt)) = self.dialog.take() {
                     let answer = prompt.input.map_or_else(
                         || "yes".into(),
                         |input| input.update(cx, |input, _| input.take_value()),
                     );
+                    if let Some(destination) = password_destination {
+                        *self.password_attempts.entry(destination).or_insert(0) += 1;
+                    }
                     prompt.request.respond(Some(answer));
                 }
                 self.finish_dialog(window, cx);
@@ -1447,7 +1502,21 @@ impl Workspace {
                         (
                             format!("{kind_name} · {destination}").into(),
                             Some((IconName::Lock, theme.secondary_text)),
-                            div().flex().flex_col().gap_2().child(label.to_owned()).children(prompt.input.clone()),
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(label.to_owned())
+                                .children(prompt.input.clone())
+                                .when(
+                                    matches!(kind, askpass::Kind::Password) && prompt.rejected,
+                                    |body| {
+                                        body.child(crate::form::error_text(
+                                            "El servidor rechazó la contraseña.",
+                                            theme,
+                                        ))
+                                    },
+                                ),
                             "Conectar",
                         )
                     }
@@ -2017,6 +2086,81 @@ mod tests {
     use gpui::{Modifiers, MouseButton, TestAppContext, VisualTestContext, point, px};
 
     use super::*;
+
+    #[gpui::test]
+    fn a_second_password_prompt_for_the_same_destination_is_rejected(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        crate::dev::TEST_CONFIG.with(|config| *config.borrow_mut() = Some(dir.path().to_owned()));
+        cx.update(bind_keys);
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::new(None, None, None, window, cx));
+        cx.run_until_parked();
+        let fake = || askpass::Request::fake("prueba", "Contraseña:", askpass::Kind::Password);
+        workspace.update_in(cx, |this, window, cx| {
+            this.prompts.push_back(fake());
+            this.show_next_prompt(window, cx);
+        });
+        workspace.update(cx, |this, _| {
+            let Some(Dialog::Prompt(prompt)) = &this.dialog else {
+                panic!("no prompt");
+            };
+            assert!(!prompt.rejected);
+        });
+        workspace.update_in(cx, |this, window, cx| this.confirm_dialog(window, cx));
+        cx.run_until_parked();
+        workspace.update_in(cx, |this, window, cx| {
+            this.prompts.push_back(fake());
+            this.show_next_prompt(window, cx);
+        });
+        workspace.update(cx, |this, _| {
+            let Some(Dialog::Prompt(prompt)) = &this.dialog else {
+                panic!("no prompt");
+            };
+            assert!(prompt.rejected);
+            assert_eq!(this.password_attempts.get("prueba"), Some(&1));
+        });
+    }
+
+    #[gpui::test]
+    fn a_connection_result_forgets_the_password_attempts(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        crate::dev::TEST_CONFIG.with(|config| *config.borrow_mut() = Some(dir.path().to_owned()));
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::new(None, None, None, window, cx));
+        cx.run_until_parked();
+        workspace.update(cx, |this, _| {
+            this.password_attempts.insert("prueba".into(), 3);
+            this.clear_password_attempts("prueba");
+            assert!(this.password_attempts.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn cancelling_a_password_prompt_forgets_the_attempts(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        crate::dev::TEST_CONFIG.with(|config| *config.borrow_mut() = Some(dir.path().to_owned()));
+        cx.update(bind_keys);
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::new(None, None, None, window, cx));
+        cx.run_until_parked();
+        let fake = || askpass::Request::fake("prueba", "Contraseña:", askpass::Kind::Password);
+        workspace.update_in(cx, |this, window, cx| {
+            this.prompts.push_back(fake());
+            this.show_next_prompt(window, cx);
+        });
+        workspace.update_in(cx, |this, window, cx| this.confirm_dialog(window, cx));
+        cx.run_until_parked();
+        workspace.update(cx, |this, _| {
+            assert_eq!(this.password_attempts.get("prueba"), Some(&1))
+        });
+        workspace.update_in(cx, |this, window, cx| {
+            this.prompts.push_back(fake());
+            this.show_next_prompt(window, cx);
+        });
+        workspace.update_in(cx, |this, window, cx| this.cancel_dialog(window, cx));
+        cx.run_until_parked();
+        workspace.update(cx, |this, _| assert!(this.password_attempts.is_empty()));
+    }
 
     #[test]
     fn spec_fills_a_missing_socket_from_settings_or_detection() {

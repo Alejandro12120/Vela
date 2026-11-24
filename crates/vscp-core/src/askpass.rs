@@ -39,9 +39,26 @@ pub struct Request {
     pub hint: Option<String>,
     pub kind: Kind,
     reply: oneshot::Sender<Option<String>>,
+    #[cfg(any(test, feature = "dev"))]
+    _dev_receiver: Option<oneshot::Receiver<Option<String>>>,
 }
 
 impl Request {
+    /// A pending request for development captures. The receiver is kept alive
+    /// so the dialog is shown instead of being skipped as already answered.
+    #[cfg(any(test, feature = "dev"))]
+    pub fn fake(destination: impl Into<String>, prompt: impl Into<String>, kind: Kind) -> Self {
+        let (reply, _dev_receiver) = oneshot::channel();
+        Self {
+            destination: destination.into(),
+            prompt: prompt.into(),
+            hint: None,
+            kind,
+            reply,
+            _dev_receiver: Some(_dev_receiver),
+        }
+    }
+
     pub fn is_pending(&self) -> bool {
         !self.reply.is_closed()
     }
@@ -264,6 +281,8 @@ async fn answer_prompt(
         hint: (!hint.is_empty()).then_some(hint),
         prompt,
         reply,
+        #[cfg(any(test, feature = "dev"))]
+        _dev_receiver: None,
     };
     let _pending = PendingPrompt::start(activity);
     let answer = timeout(PROMPT_TIMEOUT, async {

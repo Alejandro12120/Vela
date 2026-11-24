@@ -43,7 +43,7 @@ cargo test -p vscp-app terminal::tests::pty_output_reaches_grid_and_can_resize
 
 Run `scripts/dev-sshd.sh` in a terminal as a regular user. It needs system OpenSSH, `nc` and Python 3. Enter the printed host, port, user, public key and agent socket in the server form. Ctrl+C stops the loopback server and its private agent and removes their temporary files.
 
-User themes live in `themes/<id>.toml` under the configuration directory. `settings.toml` stores the selected theme IDs (`light_theme` and `dark_theme`), color scheme, glass settings, the remote editor, the global SSH agent socket (`agent_socket`, optional; without it vSCP uses the detected Bitwarden socket) and the terminal font size (`terminal_font_size`, optional; without it vSCP uses `kitty.conf`).
+User themes live in `themes/<id>.toml` under the configuration directory. `settings.toml` stores the selected theme IDs (`light_theme` and `dark_theme`), color scheme, glass settings, the remote editor, the global SSH agent socket (`agent_socket`, optional; without it vSCP uses the detected Bitwarden socket), the terminal font size (`terminal_font_size`, optional; without it vSCP uses `kitty.conf`) and whether selecting terminal text copies it (`terminal_copy_on_select`, optional; without it vSCP follows `copy_on_select` in `kitty.conf`).
 
 Use an isolated configuration directory for development runs. The `dev` Cargo feature enables these environment variables in both debug and release binaries.
 

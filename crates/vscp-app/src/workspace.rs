@@ -43,7 +43,7 @@ use crate::{
     icons::IconName,
     pane::{PaneMemory, icon_button},
     sidebar::{self, RowAction, RowMenu, ServerReorder},
-    terminal::{font_size, kitty::Kitty},
+    terminal::{copy_on_select, font_size, kitty::Kitty},
     theme::Theme,
 };
 
@@ -226,6 +226,7 @@ impl Workspace {
         let (settings, settings_error) =
             loaded.map_or_else(|| (Settings::default(), None), |loaded| loaded.install(cx));
         font_size::apply_saved(settings.terminal_font_size, cx);
+        copy_on_select::set(settings.terminal_copy_on_select, cx);
         cx.observe_global::<font_size::FontSize>(|this, cx| {
             let size = cx.global::<font_size::FontSize>().override_size;
             if font_size::dev_override(cx) || this.settings.terminal_font_size == size {
@@ -289,6 +290,7 @@ impl Workspace {
                         if let Some(loaded) = loaded {
                             (this.settings, this.settings_error) = loaded.install(cx);
                             font_size::apply_saved(this.settings.terminal_font_size, cx);
+                            copy_on_select::set(this.settings.terminal_copy_on_select, cx);
                         }
                         this.selected = servers.first().map(|server| server.id.clone());
                         this.dir = Some(dir);

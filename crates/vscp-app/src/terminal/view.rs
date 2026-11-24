@@ -24,6 +24,7 @@ use crate::{
 use super::{
     GridSize, Terminal,
     colors::Palette,
+    copy_on_select,
     element::{Geometry, Surface},
     font_size, keys,
     kitty::{Kitty, OptionAsAlt},
@@ -71,6 +72,14 @@ pub fn bind_keys(cx: &mut App) {
         crate::keybindings::binding(cx, "ctrl-_", DecreaseFontSize, Some("Terminal")),
         crate::keybindings::binding(cx, "ctrl-=", ResetFontSize, Some("Terminal")),
     ]);
+}
+
+pub(super) fn should_copy(
+    finished_selection: bool,
+    setting: Option<bool>,
+    kitty_default: bool,
+) -> bool {
+    finished_selection && setting.unwrap_or(kitty_default)
 }
 
 pub struct Restart;
@@ -470,9 +479,18 @@ impl TerminalView {
         }
     }
 
-    fn mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
+    fn mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let finished_selection = event.button == MouseButton::Left && self.selecting;
         if event.button == MouseButton::Left {
             self.selecting = false;
+        }
+        if finished_selection
+            && copy_on_select::enabled(self.settings.copy_on_select, cx)
+            && let Some(terminal) = &self.terminal
+            && let Some(text) = terminal.grid.lock().selection_to_string()
+            && !text.is_empty()
+        {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
         if self.mouse_press != Some(event.button) {
             return;
@@ -747,12 +765,24 @@ fn option_as_alt(option: OptionAsAlt, key: &Keystroke) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
-    use gpui::{Entity, TestAppContext, VisualTestContext};
+    use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, point};
 
     use super::*;
     use crate::{file_workspace::SessionView, workspace::ShowFiles};
+
+    #[test]
+    fn copy_on_select_needs_a_finished_selection_and_a_enabled_setting() {
+        assert!(!should_copy(false, Some(true), true));
+        assert!(should_copy(true, Some(true), false));
+        assert!(!should_copy(true, Some(false), true));
+        assert!(should_copy(true, None, true));
+        assert!(!should_copy(true, None, false));
+    }
 
     type Sink = Arc<Mutex<Vec<u8>>>;
 
@@ -1014,6 +1044,56 @@ mod tests {
         cx.simulate_keystrokes("ctrl-- ctrl-0");
         assert_eq!(size(cx, &terminal), 11.);
         assert!(sink.lock().unwrap().is_empty());
+    }
+
+    #[gpui::test]
+    fn dragging_over_output_copies_it_when_enabled(cx: &mut TestAppContext) {
+        let (_, terminal, _, cx) = open(cx);
+        cx.update(|_, cx| copy_on_select::set(Some(true), cx));
+        let child = Terminal::spawn(
+            "/bin/sh",
+            vec!["-c".into(), "printf 'hola\\n'; sleep 0.5".into()],
+            &Kitty::default(),
+            GridSize::INITIAL,
+        )
+        .unwrap();
+        terminal.update_in(cx, |view, _, cx| {
+            view.terminal = Some(child);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let mut ready = false;
+        for _ in 0..50 {
+            cx.run_until_parked();
+            ready = terminal.read_with(cx, |view, _| {
+                view.terminal.as_ref().is_some_and(|terminal| {
+                    terminal
+                        .grid
+                        .lock()
+                        .grid()
+                        .display_iter()
+                        .map(|item| item.cell.c)
+                        .collect::<String>()
+                        .contains("hola")
+                })
+            });
+            if ready {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready, "the shell output never reached the grid");
+        let (origin, width, height) = terminal.read_with(cx, |view, _| {
+            let geometry = view.geometry.unwrap();
+            (geometry.origin, geometry.width, geometry.height)
+        });
+        let start = point(origin.x + px(1.), origin.y + height / 2.);
+        let end = point(origin.x + width * 4. + px(1.), origin.y + height / 2.);
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::none());
+        let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+        assert_eq!(copied.as_deref(), Some("hola"));
     }
 
     #[gpui::test]

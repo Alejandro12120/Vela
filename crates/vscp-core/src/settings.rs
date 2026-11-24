@@ -19,6 +19,9 @@ pub struct Settings {
     /// Terminal font size in points. When absent, `kitty.conf` decides.
     #[serde(default)]
     pub terminal_font_size: Option<f32>,
+    /// Whether selecting terminal text copies it. When absent, `kitty.conf` decides.
+    #[serde(default)]
+    pub terminal_copy_on_select: Option<bool>,
     #[serde(default)]
     pub appearance: AppearanceSettings,
 }
@@ -65,6 +68,7 @@ mod tests {
         settings.appearance.glass.enabled = true;
         settings.agent_socket = Some("/tmp/agente-global.sock".into());
         settings.terminal_font_size = Some(13.);
+        settings.terminal_copy_on_select = Some(true);
         settings.save(dir).unwrap();
         let mut settings = Settings::load(dir).unwrap();
         assert_eq!(settings.editor, Some("/Applications/First.app".into()));
@@ -74,6 +78,7 @@ mod tests {
             Some(PathBuf::from("/tmp/agente-global.sock"))
         );
         assert_eq!(settings.terminal_font_size, Some(13.));
+        assert_eq!(settings.terminal_copy_on_select, Some(true));
         settings.editor = Some("/Applications/Second.app".into());
         settings.save(dir).unwrap();
         let settings = Settings::load(dir).unwrap();
@@ -84,6 +89,7 @@ mod tests {
             Some(PathBuf::from("/tmp/agente-global.sock"))
         );
         assert_eq!(settings.terminal_font_size, Some(13.));
+        assert_eq!(settings.terminal_copy_on_select, Some(true));
     }
 
     #[test]

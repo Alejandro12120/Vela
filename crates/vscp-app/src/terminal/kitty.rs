@@ -27,6 +27,7 @@ pub struct Kitty {
     pub cursor: CursorShape,
     pub history: usize,
     pub option_as_alt: OptionAsAlt,
+    pub copy_on_select: bool,
 }
 
 impl Default for Kitty {
@@ -44,6 +45,7 @@ impl Default for Kitty {
             cursor: CursorShape::Block,
             history: 5000,
             option_as_alt: OptionAsAlt::No,
+            copy_on_select: false,
         }
     }
 }
@@ -148,6 +150,7 @@ impl Kitty {
                         };
                     }
                 }
+                "copy_on_select" => self.copy_on_select = matches!(value, "clipboard" | "yes"),
                 "macos_option_as_alt" => {
                     self.option_as_alt = match value {
                         "left" => OptionAsAlt::Left,
@@ -283,6 +286,18 @@ mod tests {
         settings.family = "JET-BRAINS MONO-nerd font".into();
         settings.resolve_family(&["JetBrainsMono Nerd Font".to_owned()]);
         assert_eq!(settings.family, "JET-BRAINS MONO-nerd font");
+    }
+
+    #[test]
+    fn copy_on_select_only_accepts_clipboard_and_yes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kitty.conf");
+        for (value, expected) in [("clipboard", true), ("no", false), ("a1", false)] {
+            fs::write(&path, format!("copy_on_select {value}\n")).unwrap();
+            assert_eq!(Kitty::read(&path).copy_on_select, expected);
+        }
+        let settings = Kitty::read(&dir.path().join("missing.conf"));
+        assert!(!settings.copy_on_select);
     }
 
     #[test]

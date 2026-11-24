@@ -17,7 +17,7 @@ use super::{GridSize, view::TerminalView};
 pub(super) struct Geometry {
     pub origin: Point<Pixels>,
     pub height: Pixels,
-    width: Pixels,
+    pub(super) width: Pixels,
     scale: f32,
     size: GridSize,
 }

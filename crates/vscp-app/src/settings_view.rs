@@ -34,6 +34,7 @@ use crate::{
         button::{icon_button, icon_text_button, small_button, small_icon_text_button},
         dropdown::{self, Placement, dropdown_item, dropdown_panel, menu_height, place},
         status_dot::status_dot,
+        switch::switch,
         text_input::TextInput,
     },
     context_menu::Tooltip,
@@ -509,6 +510,7 @@ impl Workspace {
     ) {
         let Some(dir) = self.dir.clone() else { return };
         self.settings = next.clone();
+        crate::terminal::copy_on_select::set(next.terminal_copy_on_select, cx);
         if self.settings_page.busy || self.settings_page.glass_drag.is_some() {
             self.settings_page.pending_settings = Some(next);
             return;
@@ -1931,6 +1933,11 @@ impl Workspace {
             .when(self.settings.terminal_font_size.is_some(), |row| {
                 row.child(reset)
             });
+        let kitty_default = kitty.copy_on_select;
+        let copy_value = self
+            .settings
+            .terminal_copy_on_select
+            .unwrap_or(kitty_default);
         let font_description = if cfg!(target_os = "macos") {
             "También con ⌘+, ⌘− y ⌘0. Se guarda entre arranques."
         } else {
@@ -2033,6 +2040,28 @@ impl Workspace {
                         "Tamaño de letra",
                         Some(font_description.into()),
                         size_control,
+                        theme,
+                    ),
+                    settings_row(
+                        "Copiar al seleccionar",
+                        Some(
+                            "Copia al portapapeles el texto que seleccionas en la terminal.".into(),
+                        ),
+                        switch(
+                            "terminal-copy-on-select",
+                            "Copiar al seleccionar",
+                            copy_value,
+                            theme,
+                            cx.listener(move |this, _, window, cx| {
+                                let current = this
+                                    .settings
+                                    .terminal_copy_on_select
+                                    .unwrap_or(kitty_default);
+                                let mut next = this.settings.clone();
+                                next.terminal_copy_on_select = Some(!current);
+                                this.save_settings(next, window, cx);
+                            }),
+                        ),
                         theme,
                     ),
                     settings_row(

@@ -16,6 +16,9 @@ pub struct Settings {
     /// socket is used, if any.
     #[serde(default)]
     pub agent_socket: Option<PathBuf>,
+    /// Terminal font size in points. When absent, `kitty.conf` decides.
+    #[serde(default)]
+    pub terminal_font_size: Option<f32>,
     #[serde(default)]
     pub appearance: AppearanceSettings,
 }
@@ -61,6 +64,7 @@ mod tests {
         settings.appearance.dark_theme = "bosque".into();
         settings.appearance.glass.enabled = true;
         settings.agent_socket = Some("/tmp/agente-global.sock".into());
+        settings.terminal_font_size = Some(13.);
         settings.save(dir).unwrap();
         let mut settings = Settings::load(dir).unwrap();
         assert_eq!(settings.editor, Some("/Applications/First.app".into()));
@@ -69,6 +73,7 @@ mod tests {
             settings.agent_socket,
             Some(PathBuf::from("/tmp/agente-global.sock"))
         );
+        assert_eq!(settings.terminal_font_size, Some(13.));
         settings.editor = Some("/Applications/Second.app".into());
         settings.save(dir).unwrap();
         let settings = Settings::load(dir).unwrap();
@@ -78,6 +83,21 @@ mod tests {
             settings.agent_socket,
             Some(PathBuf::from("/tmp/agente-global.sock"))
         );
+        assert_eq!(settings.terminal_font_size, Some(13.));
+    }
+
+    #[test]
+    fn terminal_font_size_round_trips_and_defaults_to_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        assert!(Settings::load(path).unwrap().terminal_font_size.is_none());
+        Settings {
+            terminal_font_size: Some(20.),
+            ..Settings::default()
+        }
+        .save(path)
+        .unwrap();
+        assert_eq!(Settings::load(path).unwrap().terminal_font_size, Some(20.));
     }
 
     #[test]

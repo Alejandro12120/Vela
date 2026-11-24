@@ -43,7 +43,7 @@ use crate::{
     icons::IconName,
     pane::{PaneMemory, icon_button},
     sidebar::{self, RowAction, RowMenu, ServerReorder},
-    terminal::kitty::Kitty,
+    terminal::{font_size, kitty::Kitty},
     theme::Theme,
 };
 
@@ -177,6 +177,12 @@ impl Workspace {
         let preloaded = loaded.is_some();
         let (settings, settings_error) =
             loaded.map_or_else(|| (Settings::default(), None), |loaded| loaded.install(cx));
+        font_size::apply_saved(settings.terminal_font_size, cx);
+        cx.observe_global::<font_size::FontSize>(|this, cx| {
+            this.settings.terminal_font_size = cx.global::<font_size::FontSize>().override_size;
+            cx.notify();
+        })
+        .detach();
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         let prompt_task = client.clone().map(|client| {
@@ -215,6 +221,7 @@ impl Workspace {
                         this.load_edits(index, window, cx);
                         if let Some(loaded) = loaded {
                             (this.settings, this.settings_error) = loaded.install(cx);
+                            font_size::apply_saved(this.settings.terminal_font_size, cx);
                         }
                         this.selected = servers.first().map(|server| server.id.clone());
                         this.dir = Some(dir);

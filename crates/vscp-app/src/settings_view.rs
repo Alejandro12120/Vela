@@ -30,12 +30,13 @@ use super::{Context, Dialog, Theme, Variant, Window, Workspace, button, div};
 use crate::{
     appearance::{Appearance, Variant as ColorVariant},
     components::{
-        button::{icon_button, icon_text_button, small_button},
+        button::{icon_button, icon_text_button, small_button, small_icon_text_button},
         status_dot::status_dot,
         text_input::TextInput,
     },
     context_menu::Tooltip,
     icons::{IconName, icon},
+    terminal::font_size,
 };
 
 struct ThemeCardFocus {
@@ -55,6 +56,7 @@ impl ThemeCardFocus {
 }
 
 type AgentProbe = Result<usize, AgentError>;
+type ClickHandler = Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static>;
 
 const EDITORS: [(&str, &str); 7] = [
     ("Visual Studio Code", "Visual Studio Code.app"),
@@ -107,6 +109,7 @@ pub(super) struct SettingsPage {
     agent_input: Option<Entity<TextInput>>,
     editor_menu: Option<(gpui::Point<Pixels>, Vec<FocusHandle>)>,
     edit_copies: Option<(usize, u64)>,
+    pending_settings: Option<Settings>,
 }
 
 impl SettingsPage {
@@ -126,6 +129,7 @@ impl SettingsPage {
             agent_input: None,
             editor_menu: None,
             edit_copies: None,
+            pending_settings: None,
         }
     }
 
@@ -459,9 +463,15 @@ impl Workspace {
         self.save_settings(next, window, cx);
     }
 
-    fn save_settings(&mut self, next: Settings, window: &Window, cx: &mut Context<Self>) {
+    pub(super) fn save_settings(
+        &mut self,
+        next: Settings,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(dir) = self.dir.clone() else { return };
         if self.settings_page.busy || self.settings_page.glass_drag.is_some() {
+            self.settings_page.pending_settings = Some(next);
             return;
         }
         self.settings_page.busy = true;
@@ -473,7 +483,7 @@ impl Workspace {
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = save.await;
-            let _ = this.update_in(cx, |this, _, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 this.settings_page.busy = false;
                 let glass_changed = cx.global_mut::<Appearance>().glass_preview.take().is_some();
                 if glass_changed {
@@ -493,6 +503,9 @@ impl Workspace {
                     }
                 }
                 cx.notify();
+                if let Some(pending) = this.settings_page.pending_settings.take() {
+                    this.save_settings(pending, window, cx);
+                }
             });
         })
         .detach();
@@ -849,7 +862,7 @@ impl Workspace {
                     .child(self.render_interface(theme, cx))
                     .child(self.agent_section(theme, cx))
                     .child(self.editor_section(theme, cx))
-                    .child(self.terminal_section(theme, cx).pb_6()),
+                    .child(self.terminal_section(theme, window, cx).pb_6()),
             )
             .children(self.render_theme_editor(theme, window, cx))
             .children(self.render_picker(theme, cx))
@@ -1464,32 +1477,292 @@ impl Workspace {
             })
     }
 
-    fn terminal_section(&self, theme: Theme, cx: &Context<Self>) -> Div {
-        let terminal = self
+    fn terminal_section(&self, theme: Theme, window: &Window, cx: &Context<Self>) -> Div {
+        let kitty = self
             .active_terminal_settings(cx)
-            .or(self.kitty_settings.as_ref());
-        section("Terminal")
-            .items_start()
-            .when_some(terminal, |section, settings| {
-                let path = settings.path.as_ref().map_or_else(
-                    || "No se encontró kitty.conf; se usan los valores de Kitty por defecto".into(),
-                    |path| path.display().to_string(),
-                );
-                section
-                    .child(div().text_color(theme.secondary_text).child(path))
-                    .child(
-                        div()
-                            .text_color(theme.secondary_text)
-                            .child(format!("{} · {} pt", settings.family, settings.size)),
-                    )
+            .or(self.kitty_settings.as_ref())
+            .cloned()
+            .unwrap_or_default();
+        let palette = kitty.palette.with_theme(theme.terminal);
+        let size = font_size::effective(kitty.size, cx);
+        let green = gpui::rgb(palette.ansi[2]);
+        let blue = gpui::rgb(palette.ansi[4]);
+        let cursor = palette
+            .cursor
+            .map(gpui::rgb)
+            .unwrap_or(gpui::rgb(palette.foreground));
+        let prompt = move || {
+            div()
+                .flex()
+                .flex_none()
+                .child(div().text_color(green).child("root@ubuntu"))
+                .child(":")
+                .child(div().text_color(blue).child("~"))
+                .child("$")
+        };
+        let preview = div()
+            .flex()
+            .flex_col()
+            .mx(px(14.))
+            .mt(px(12.))
+            .mb(px(4.))
+            .p(px(10.))
+            .rounded(px(8.))
+            .border_1()
+            .border_color(theme.border)
+            .bg(gpui::rgb(palette.background))
+            .text_color(gpui::rgb(palette.foreground))
+            .font_family(crate::theme::monospace())
+            .text_size(px(size))
+            .line_height(px(size * 1.5))
+            .child(
+                div()
+                    .flex()
+                    .child(prompt())
+                    .child(div().pl(px(8.)).child("ls")),
+            )
+            .child(
+                div()
+                    .flex()
+                    .child(div().text_color(blue).child("docs"))
+                    .child("  ")
+                    .child(div().text_color(blue).child("scripts"))
+                    .child("  ")
+                    .child("notas.txt"),
+            )
+            .child(
+                div().flex().items_center().child(prompt()).child(
+                    div()
+                        .ml(px(8.))
+                        .w(px((size * 0.6).max(6.)))
+                        .h(px(size))
+                        .bg(cursor),
+                ),
+            );
+
+        let current = size.round() as i32;
+        let step = |delta: f32| {
+            move |_: &ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                if delta > 0. {
+                    font_size::increase(cx, kitty.size);
+                } else {
+                    font_size::decrease(cx, kitty.size);
+                }
+            }
+        };
+        let cell = |id: &'static str,
+                    label: &'static str,
+                    aria: &'static str,
+                    enabled: bool,
+                    on_click: Option<ClickHandler>| {
+            let mut cell = div()
+                .id(id)
+                .role(Role::Button)
+                .aria_label(aria)
+                .flex()
+                .items_center()
+                .justify_center()
+                .h(px(24.))
+                .min_w(px(28.))
+                .text_size(px(13.));
+            if enabled {
+                cell = cell
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(theme.hover))
+                    .focus(move |style| style.bg(theme.selection));
+            } else {
+                cell = cell.text_color(theme.control_border);
+            }
+            if let Some(on_click) = on_click {
+                cell = cell.on_click(on_click);
+            }
+            cell.child(label)
+        };
+        let stepper = div()
+            .flex()
+            .items_center()
+            .rounded(px(6.))
+            .border_1()
+            .border_color(theme.control_border)
+            .overflow_hidden()
+            .child(cell(
+                "font-smaller",
+                "−",
+                "Reducir tamaño de letra",
+                current > 6,
+                (current > 6).then(|| {
+                    Box::new(step(-1.))
+                        as Box<dyn Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static>
+                }),
+            ))
+            .child(
+                div()
+                    .h(px(24.))
+                    .px(px(9.))
+                    .border_l_1()
+                    .border_color(theme.control_border)
+                    .child(format!("{} pt", current)),
+            )
+            .child(cell(
+                "font-larger",
+                "+",
+                "Aumentar tamaño de letra",
+                current < 48,
+                (current < 48).then(|| {
+                    Box::new(step(1.))
+                        as Box<dyn Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static>
+                }),
+            ));
+        let reset = crate::components::button::icon_button(
+            "reset-font-size",
+            "Volver al tamaño de kitty.conf",
+            IconName::RotateCcw,
+            Variant::Secondary,
+            theme,
+            cx.listener(move |_, _, _, cx| font_size::reset(cx, kitty.size)),
+        )
+        .size(px(24.));
+        let size_control = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(stepper)
+            .when(self.settings.terminal_font_size.is_some(), |row| {
+                row.child(reset)
+            });
+        let font_description = if cfg!(target_os = "macos") {
+            "También con ⌘+, ⌘− y ⌘0. Se guarda entre arranques."
+        } else {
+            "También con Ctrl+Mayús++, Ctrl+Mayús+− y Ctrl+Mayús+0. Se guarda entre arranques."
+        };
+
+        let appearance = cx.global::<Appearance>();
+        let variant = appearance.variant_for(window);
+        let theme_name = appearance.selected(variant).name.clone();
+        let theme_id = appearance.selected(variant).id.clone();
+        let colors_control = div()
+            .id("terminal-colors")
+            .role(Role::Button)
+            .tab_index(0)
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .text_size(px(13.))
+            .text_color(theme.accent)
+            .cursor_pointer()
+            .hover(move |style| style.text_color(theme.text))
+            .focus(move |style| style.border_color(theme.accent))
+            .child(format!("Los del tema «{theme_name}»"))
+            .child(
+                icon(IconName::ArrowRight)
+                    .size(px(14.))
+                    .text_color(theme.accent),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.settings_page.scroll.scroll_to_top_of_item(0);
+                if let Some(focus) = this.settings_page.themes.get(&theme_id) {
+                    match variant {
+                        ColorVariant::Light => focus.light.focus(window, cx),
+                        ColorVariant::Dark => focus.dark.focus(window, cx),
+                    }
+                }
+                cx.notify();
+            }));
+
+        let (path_label, kitty_description, show) = match &kitty.path {
+            Some(path) => (abbreviate_path(path, 40), None, Some(path.clone())),
+            None => (
+                String::new(),
+                Some("No se encontró; se usan los valores de Kitty"),
+                None,
+            ),
+        };
+        let kitty_control = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .when(show.is_some(), |row| {
+                row.child(
+                    div()
+                        .font_family(crate::theme::monospace())
+                        .text_size(px(12.))
+                        .text_color(theme.secondary_text)
+                        .child(path_label),
+                )
             })
-            .child(button(
-                "settings-kitty-reload",
+            .children(show.map(|path| {
+                small_button(
+                    "show-kitty",
+                    "Mostrar",
+                    Variant::Secondary,
+                    theme,
+                    cx.listener(move |_, _, window, cx| {
+                        let path = path.clone();
+                        let reveal = cx
+                            .background_executor()
+                            .spawn(async move { super::edits_view::reveal(&path) });
+                        cx.spawn_in(window, async move |this, cx| {
+                            if let Err(error) = reveal.await {
+                                let _ = this.update_in(cx, |this, _, cx| {
+                                    this.settings_error =
+                                        Some(format!("No se pudo mostrar el archivo. {error}"));
+                                    cx.notify();
+                                });
+                            }
+                        })
+                        .detach();
+                    }),
+                )
+            }))
+            .child(small_icon_text_button(
+                "reload-kitty",
+                IconName::Refresh,
                 "Volver a leer",
                 Variant::Secondary,
                 theme,
                 cx.listener(|this, _, window, cx| this.read_kitty(true, window, cx)),
+            ));
+
+        section("Terminal")
+            .child(preview)
+            .child(settings_group(
+                theme,
+                vec![
+                    settings_row(
+                        "Tamaño de letra",
+                        Some(font_description.into()),
+                        size_control,
+                        theme,
+                    ),
+                    settings_row(
+                        "Fuente",
+                        None,
+                        div()
+                            .text_size(px(12.))
+                            .text_color(theme.secondary_text)
+                            .child(format!(
+                                "{}, {}",
+                                kitty.family,
+                                if kitty.path.is_some() {
+                                    "de kitty.conf"
+                                } else {
+                                    "por defecto"
+                                }
+                            )),
+                        theme,
+                    ),
+                    settings_row("Colores", None, colors_control, theme),
+                    settings_row(
+                        "kitty.conf",
+                        kitty_description.map(Into::into),
+                        kitty_control,
+                        theme,
+                    ),
+                ],
             ))
+            .when_some(self.settings_error.clone(), |section, error| {
+                section.child(div().text_color(theme.danger).child(error))
+            })
     }
 }
 

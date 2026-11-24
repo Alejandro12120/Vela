@@ -288,6 +288,30 @@ pub fn form_file() -> Option<PathBuf> {
     value("VSCP_DEV_FORM_FILE").map(PathBuf::from)
 }
 
+pub fn form_key() -> Option<String> {
+    value("VSCP_DEV_FORM_KEY")
+}
+
+pub fn form_advanced() -> bool {
+    value("VSCP_DEV_FORM_ADVANCED").as_deref() == Some("1")
+}
+
+pub fn form_password() -> bool {
+    value("VSCP_DEV_FORM_PASSWORD").as_deref() == Some("1")
+}
+
+pub fn agent_edit() -> bool {
+    value("VSCP_DEV_AGENT_EDIT").as_deref() == Some("1")
+}
+
+pub fn editor_menu() -> bool {
+    value("VSCP_DEV_EDITOR_MENU").as_deref() == Some("1")
+}
+
+pub fn empty_confirm() -> bool {
+    value("VSCP_DEV_EMPTY_CONFIRM").as_deref() == Some("1")
+}
+
 /// The editor picker is always shown on macOS. On Linux it is a capture hook.
 pub fn editor_picker() -> bool {
     cfg!(target_os = "macos") || value("VSCP_DEV_EDITOR_PICKER").as_deref() == Some("1")

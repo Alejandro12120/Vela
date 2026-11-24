@@ -373,6 +373,15 @@ impl Workspace {
         if let Some(section) = section {
             self.settings_page.scroll.scroll_to_top_of_item(section);
         }
+        if crate::dev::agent_edit() {
+            self.edit_agent_socket(window, cx);
+        }
+        if crate::dev::editor_menu() {
+            self.open_editor_menu(point(px(700.), px(340.)), cx);
+        }
+        if crate::dev::empty_confirm() {
+            self.open_dialog(Dialog::EmptyEdits, window, cx);
+        }
         if let Some(id) = request
             .as_deref()
             .and_then(|request| request.strip_prefix("delete:"))
@@ -1155,7 +1164,7 @@ impl Workspace {
                         _ => {}
                     }
                 }))
-                .children(input)
+                .child(div().w(px(280.)).children(input))
                 .child(small_button(
                     "save-agent-socket",
                     "Guardar",

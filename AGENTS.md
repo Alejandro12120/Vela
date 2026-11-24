@@ -58,7 +58,8 @@ Use an isolated configuration directory for development runs. The `dev` Cargo fe
 - `VSCP_DEV_THEME_ID=<id>` overrides both themes for the run without saving. Use `VSCP_DEV_THEME_ID=<light>,<dark>` to set them independently.
 - `VSCP_DEV_SETTINGS=appearance|interface|agent|editor|terminal` opens Ajustes on startup and scrolls to Apariencia, Interfaz, Agente SSH, Editor or Terminal. `VSCP_DEV_SETTINGS=focus-moon` focuses the vSCP moon orb. `VSCP_DEV_SETTINGS=delete:<id>` opens the confirmation for a user theme.
 - `VSCP_DEV_EDITOR_PICKER=1` shows the Editor picker on Linux for layout captures. `VSCP_DEV_EDITOR_ROOT=<absolute path>` supplies a directory holding fake `.app` bundles (Visual Studio Code.app, Cursor.app, Zed.app, Sublime Text.app, BBEdit.app, Nova.app, TextEdit.app) for the picker's detection; launching is unchanged.
-- `VSCP_DEV_FORM_FILE=<path>` opens the new form in file-key mode with that public key chosen, for key-row captures.
+- `VSCP_DEV_FORM_FILE=<path>` opens the new form in file-key mode with that public key chosen, for key-row captures. `VSCP_DEV_FORM_KEY=<comment>` preselects the agent key with that comment. `VSCP_DEV_FORM_ADVANCED=1` opens «Opciones avanzadas» and `VSCP_DEV_FORM_PASSWORD=1` starts the form in password mode.
+- `VSCP_DEV_AGENT_EDIT=1` opens the inline socket editor in Ajustes. `VSCP_DEV_EDITOR_MENU=1` opens the editor picker menu and `VSCP_DEV_EMPTY_CONFIRM=1` opens the «Vaciar las copias de edición?» confirmation.
 - `VSCP_DEV_SETTINGS=create|editor:<id>|picker:<token>` opens the theme editor or opens a color picker for a new theme, for example `picker:accent`. `create:terminal`, `create:contrast` and `create:dark` show the advanced terminal group, a low-contrast text warning and the dark draft preview.
 - `VSCP_DEV_LOCAL_ROOT=<absolute path>` overrides the local pane's starting folder.
 - `VSCP_DEV_REMOTE_DELAY_MS=<milliseconds>` delays each remote listing asynchronously.

@@ -102,6 +102,7 @@ pub struct Form {
     row_focus: Vec<FocusHandle>,
     blur: Option<Subscription>,
     advanced: bool,
+    preselect: Option<String>,
 }
 
 impl Form {
@@ -214,6 +215,7 @@ impl Form {
             row_focus: Vec::new(),
             blur: None,
             advanced,
+            preselect: None,
         }
     }
 
@@ -292,6 +294,12 @@ impl Form {
             Err(error) => Keys::Failed(error),
         };
         self.row_focus = handles;
+        if let Some(comment) = self.preselect.take() {
+            let rows = self.rows();
+            if let Some(index) = rows.iter().position(|row| row.key.comment == comment) {
+                self.pick_row(index);
+            }
+        }
     }
 
     pub fn pick_file(&mut self, path: PathBuf) {
@@ -303,6 +311,14 @@ impl Form {
         };
         self.key_error = None;
         self.message = None;
+    }
+
+    pub fn preselect(&mut self, comment: String) {
+        self.preselect = Some(comment);
+    }
+
+    pub fn set_agent(&mut self, agent: bool) {
+        self.agent = agent;
     }
 
     pub fn toggle_advanced(&mut self) {
@@ -769,7 +785,8 @@ fn short_fingerprint(fingerprint: &str) -> String {
 
 /// The type and short fingerprint shown on a key row.
 fn key_detail_text(key_type: &str, fingerprint: &str) -> String {
-    format!("{key_type} · {}", short_fingerprint(fingerprint))
+    let family = key_type.strip_prefix("ssh-").unwrap_or(key_type);
+    format!("{family} · {}", short_fingerprint(fingerprint))
 }
 
 fn key_row(
@@ -1150,7 +1167,7 @@ mod tests {
                 "ssh-ed25519",
                 "SHA256:Nv9k5CyzST5gm9sN9kt+A2d/j0Nw8kvUzIVrJ8cyTC0"
             ),
-            "ssh-ed25519 · …yTC0"
+            "ed25519 · …yTC0"
         );
     }
 

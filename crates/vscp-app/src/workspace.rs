@@ -858,6 +858,15 @@ impl Workspace {
         if let Some(path) = dev::form_file() {
             form.pick_file(path);
         }
+        if let Some(comment) = dev::form_key() {
+            form.preselect(comment);
+        }
+        if dev::form_password() {
+            form.set_agent(false);
+        }
+        if dev::form_advanced() {
+            form.toggle_advanced();
+        }
         let socket = form.input(Field::Socket).read(cx).focus_handle(cx);
         self.open_dialog(Dialog::Form(Box::new(form)), window, cx);
         let blur = cx.on_blur(&socket, window, |this, window, cx| {

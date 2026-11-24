@@ -827,7 +827,7 @@ mod tests {
             let mut appearance = crate::appearance::Appearance::default();
             appearance.set_settings(vscp_core::appearance::AppearanceSettings {
                 scheme: vscp_core::appearance::Scheme::Dark,
-                theme: "bosque".into(),
+                dark_theme: "bosque".into(),
                 ..Default::default()
             });
             cx.set_global(appearance);

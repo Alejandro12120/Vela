@@ -34,7 +34,7 @@ pub struct Appearance {
     pub dev_glass: Option<Glass>,
     pub glass_preview: Option<Glass>,
     dev_appearance: Option<WindowAppearance>,
-    dev_theme: Option<String>,
+    dev_themes: Option<(String, String)>,
     builtin_count: usize,
     render_light: Theme,
     render_dark: Theme,
@@ -57,7 +57,7 @@ impl Default for Appearance {
             dev_glass: dev::glass(),
             glass_preview: None,
             dev_appearance: dev::appearance(),
-            dev_theme: dev::theme_id(),
+            dev_themes: dev::theme_ids(),
         };
         appearance.rebuild();
         appearance
@@ -65,8 +65,13 @@ impl Default for Appearance {
 }
 
 impl Appearance {
-    pub fn active(&self) -> &ThemeDef {
-        let id = self.dev_theme.as_ref().unwrap_or(&self.settings.theme);
+    pub fn selected(&self, variant: Variant) -> &ThemeDef {
+        let id = match (variant, &self.dev_themes) {
+            (Variant::Light, Some((light, _))) => light,
+            (Variant::Dark, Some((_, dark))) => dark,
+            (Variant::Light, None) => &self.settings.light_theme,
+            (Variant::Dark, None) => &self.settings.dark_theme,
+        };
         self.themes
             .iter()
             .find(|theme| theme.id == *id)
@@ -125,8 +130,10 @@ impl Appearance {
             let colors = variant.colors(draft);
             (colors, colors)
         } else {
-            let active = self.active();
-            (&active.light, &active.dark)
+            (
+                &self.selected(Variant::Light).light,
+                &self.selected(Variant::Dark).dark,
+            )
         };
         (self.render_light, self.render_dark) =
             (Theme::from_colors(light), Theme::from_colors(dark));
@@ -220,5 +227,53 @@ impl Loaded {
         Appearance::update_native_appearance(cx);
         cx.refresh_windows();
         (settings, error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rebuild_uses_each_selected_theme_for_its_variant() {
+        let mut appearance = Appearance {
+            dev_themes: None,
+            ..Appearance::default()
+        };
+        appearance.set_settings(AppearanceSettings {
+            light_theme: "oceano".into(),
+            dark_theme: "frambuesa".into(),
+            ..Default::default()
+        });
+        let light = appearance
+            .themes
+            .iter()
+            .find(|theme| theme.id == "oceano")
+            .unwrap();
+        let dark = appearance
+            .themes
+            .iter()
+            .find(|theme| theme.id == "frambuesa")
+            .unwrap();
+        assert_eq!(
+            appearance.render_light.background,
+            gpui::rgba(light.light.background)
+        );
+        assert_eq!(
+            appearance.render_dark.background,
+            gpui::rgba(dark.dark.background)
+        );
+        assert_eq!(appearance.render_light.terminal, light.light.terminal);
+        assert_eq!(appearance.render_dark.terminal, dark.dark.terminal);
+
+        appearance.set_settings(AppearanceSettings {
+            light_theme: "missing".into(),
+            ..appearance.settings.clone()
+        });
+        assert_eq!(
+            appearance.render_light.background,
+            gpui::rgba(appearance.themes[0].light.background)
+        );
+        assert_eq!(appearance.selected(Variant::Dark).id, "frambuesa");
     }
 }

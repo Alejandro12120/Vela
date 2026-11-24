@@ -35,18 +35,42 @@ impl Default for Glass {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(from = "StoredAppearanceSettings")]
 pub struct AppearanceSettings {
     pub scheme: Scheme,
-    pub theme: String,
+    pub light_theme: String,
+    pub dark_theme: String,
     pub glass: Glass,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct StoredAppearanceSettings {
+    scheme: Scheme,
+    theme: Option<String>,
+    light_theme: Option<String>,
+    dark_theme: Option<String>,
+    glass: Glass,
+}
+
+impl From<StoredAppearanceSettings> for AppearanceSettings {
+    fn from(stored: StoredAppearanceSettings) -> Self {
+        let legacy = stored.theme.unwrap_or_else(|| "vscp".into());
+        Self {
+            scheme: stored.scheme,
+            light_theme: stored.light_theme.unwrap_or_else(|| legacy.clone()),
+            dark_theme: stored.dark_theme.unwrap_or(legacy),
+            glass: stored.glass,
+        }
+    }
 }
 
 impl Default for AppearanceSettings {
     fn default() -> Self {
         Self {
             scheme: Scheme::System,
-            theme: "vscp".into(),
+            light_theme: "vscp".into(),
+            dark_theme: "vscp".into(),
             glass: Glass::default(),
         }
     }

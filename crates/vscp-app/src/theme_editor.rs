@@ -112,7 +112,9 @@ impl Workspace {
             };
             theme.clone()
         } else {
-            let mut theme = appearance.active().clone();
+            let mut theme = appearance.selected(variant).clone();
+            theme.light = appearance.selected(ColorVariant::Light).light;
+            theme.dark = appearance.selected(ColorVariant::Dark).dark;
             theme.id.clear();
             theme.name.clear();
             theme.builtin = false;
@@ -373,7 +375,7 @@ impl Workspace {
                 Ok(draft.id)
             },
             |this, id, window, cx| {
-                this.activate_theme(&id, window, cx);
+                this.activate_theme(&id, None, window, cx);
                 this.close_theme_editor(window, cx);
             },
         );
@@ -1038,7 +1040,8 @@ mod tests {
         });
         cx.run_until_parked();
         let settings = Settings::load(dir.path()).unwrap();
-        assert_eq!(settings.appearance.theme, "aurora");
+        assert_eq!(settings.appearance.light_theme, "aurora");
+        assert_eq!(settings.appearance.dark_theme, "aurora");
         assert_eq!(settings.editor, Some("/Applications/Editor.app".into()));
         let (themes, errors) = load_user_themes(dir.path());
         assert!(errors.is_empty());
@@ -1046,7 +1049,9 @@ mod tests {
         workspace.read_with(cx, |workspace, cx| {
             assert!(workspace.settings_page.editor.is_none());
             assert!(cx.global::<Appearance>().preview.is_none());
-            assert_eq!(cx.global::<Appearance>().active().id, "aurora");
+            let appearance = cx.global::<Appearance>();
+            assert_eq!(appearance.selected(ColorVariant::Light).id, "aurora");
+            assert_eq!(appearance.selected(ColorVariant::Dark).id, "aurora");
         });
     }
 

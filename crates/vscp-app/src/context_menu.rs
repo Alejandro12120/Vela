@@ -224,7 +224,7 @@ impl Menu {
     }
 }
 
-pub struct Tooltip(pub &'static str);
+pub struct Tooltip(pub gpui::SharedString);
 
 impl gpui::Render for Tooltip {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
@@ -238,6 +238,6 @@ impl gpui::Render for Tooltip {
             .bg(theme.raised)
             .text_color(theme.text)
             .text_size(px(12.))
-            .child(self.0)
+            .child(self.0.clone())
     }
 }

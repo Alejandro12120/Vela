@@ -723,7 +723,10 @@ impl Pane {
                 .tab_index(0)
                 .tab_stop(!self.tree.selected.is_empty())
                 .focus(move |style| style.bg(theme.selection))
-                .tooltip(|_, cx| cx.new(|_| Tooltip("Copiar al otro panel · F5")).into())
+                .tooltip(|_, cx| {
+                    cx.new(|_| Tooltip("Copiar al otro panel · F5".into()))
+                        .into()
+                })
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.list_focus.focus(window, cx);
                     this.copy_to_other(window, cx);

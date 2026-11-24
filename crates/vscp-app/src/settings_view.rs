@@ -27,15 +27,32 @@ use super::{Context, Dialog, Theme, Variant, Window, Workspace, button, div};
 use crate::{
     appearance::{Appearance, Variant as ColorVariant},
     components::button::{icon_button, icon_text_button},
+    context_menu::Tooltip,
     icons::{IconName, icon},
 };
+
+struct ThemeCardFocus {
+    card: FocusHandle,
+    light: FocusHandle,
+    dark: FocusHandle,
+}
+
+impl ThemeCardFocus {
+    fn new(cx: &Context<Workspace>) -> Self {
+        Self {
+            card: cx.focus_handle().tab_stop(true),
+            light: cx.focus_handle().tab_stop(true),
+            dark: cx.focus_handle().tab_stop(true),
+        }
+    }
+}
 
 pub(super) struct SettingsPage {
     previous_focus: Option<FocusHandle>,
     focus: FocusHandle,
     scroll: ScrollHandle,
     schemes: [FocusHandle; 3],
-    themes: HashMap<String, FocusHandle>,
+    themes: HashMap<String, ThemeCardFocus>,
     busy: bool,
     theme_error: Option<String>,
     editor: Option<theme_editor::ThemeEditor>,
@@ -103,6 +120,14 @@ impl Workspace {
         }
         if let Some(request) = request.as_deref() {
             self.dev_theme_editor(request, window, cx);
+        }
+        if request.as_deref() == Some("focus-moon") {
+            self.settings_page
+                .themes
+                .entry("vscp".into())
+                .or_insert_with(|| ThemeCardFocus::new(cx))
+                .dark
+                .focus(window, cx);
         }
         if request.as_deref() == Some("interface") {
             self.settings_page.scroll.scroll_to_top_of_item(1);
@@ -245,9 +270,20 @@ impl Workspace {
         self.save_settings(next, window, cx);
     }
 
-    fn activate_theme(&mut self, id: &str, window: &Window, cx: &mut Context<Self>) {
+    fn activate_theme(
+        &mut self,
+        id: &str,
+        variant: Option<ColorVariant>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
         let mut next = self.settings.clone();
-        next.appearance.theme = id.into();
+        if variant != Some(ColorVariant::Dark) {
+            next.appearance.light_theme = id.into();
+        }
+        if variant != Some(ColorVariant::Light) {
+            next.appearance.dark_theme = id.into();
+        }
         self.save_settings(next, window, cx);
     }
 
@@ -330,8 +366,17 @@ impl Workspace {
             cx,
             move |dir| delete_user_theme(dir, &deleted),
             move |this, _, window, cx| {
-                if this.settings.appearance.theme == id {
-                    this.activate_theme("vscp", window, cx);
+                let mut next = this.settings.clone();
+                for selection in [
+                    &mut next.appearance.light_theme,
+                    &mut next.appearance.dark_theme,
+                ] {
+                    if *selection == id {
+                        *selection = "vscp".into();
+                    }
+                }
+                if next.appearance != this.settings.appearance {
+                    this.save_settings(next, window, cx);
                 }
             },
         );
@@ -390,7 +435,7 @@ impl Workspace {
             self.settings_page
                 .themes
                 .entry(theme.id.clone())
-                .or_insert_with(|| cx.focus_handle());
+                .or_insert_with(|| ThemeCardFocus::new(cx));
         }
         let available = window.viewport_size().width.as_f32()
             - if self.sidebar_visible() {
@@ -399,10 +444,14 @@ impl Workspace {
                 0.
             };
         let columns = if available < 608. { 2 } else { 3 };
-        let active = appearance
+        let light = appearance.selected(ColorVariant::Light);
+        let dark = appearance.selected(ColorVariant::Dark);
+        let colors = appearance
             .preview
             .as_ref()
-            .map_or_else(|| appearance.active(), |(draft, _)| draft);
+            .map_or((light.light, dark.dark), |(draft, _)| {
+                (draft.light, draft.dark)
+            });
         let schemes = [
             ("Sistema", IconName::Monitor, Scheme::System),
             ("Claro", IconName::Sun, Scheme::Light),
@@ -416,7 +465,7 @@ impl Workspace {
                     .gap_3()
                     .children(schemes.into_iter().enumerate().map(
                         |(index, (label, icon, scheme))| {
-                            self.scheme_card(index, label, icon, scheme, active, theme, cx)
+                            self.scheme_card(index, label, icon, scheme, colors, theme, cx)
                         },
                     )),
             )
@@ -482,6 +531,7 @@ impl Workspace {
                                         row * columns + col,
                                         columns,
                                         def,
+                                        (light.id == def.id, dark.id == def.id),
                                         theme,
                                         cx,
                                     ))
@@ -574,7 +624,7 @@ impl Workspace {
         label: &'static str,
         name: IconName,
         scheme: Scheme,
-        active: &ThemeDef,
+        colors: (Colors, Colors),
         theme: Theme,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
@@ -586,11 +636,9 @@ impl Workspace {
             .w_full()
             .overflow_hidden()
             .rounded(px(6.))
-            .when(scheme != Scheme::Dark, |row| {
-                row.child(miniature(active.light))
-            })
+            .when(scheme != Scheme::Dark, |row| row.child(miniature(colors.0)))
             .when(scheme != Scheme::Light, |row| {
-                row.child(miniature(active.dark))
+                row.child(miniature(colors.1))
             });
         card(("scheme", index), focus, theme)
             .flex_1()
@@ -626,22 +674,57 @@ impl Workspace {
         index: usize,
         columns: usize,
         def: &ThemeDef,
+        selected: (bool, bool),
         theme: Theme,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
-        let appearance = cx.global::<Appearance>();
-        let active = appearance.active().id == def.id;
-        let ring = |variant| {
-            active.then_some(match (self.settings.appearance.scheme, variant) {
+        let theme_focus = &self.settings_page.themes[&def.id];
+        let variant_button = |variant: ColorVariant| {
+            let (id, name, mode, focus, selected) = match variant {
+                ColorVariant::Light => (
+                    "sun",
+                    IconName::Sun,
+                    "claro",
+                    &theme_focus.light,
+                    selected.0,
+                ),
+                ColorVariant::Dark => (
+                    "moon",
+                    IconName::Moon,
+                    "oscuro",
+                    &theme_focus.dark,
+                    selected.1,
+                ),
+            };
+            let ring = selected.then_some(match (self.settings.appearance.scheme, variant) {
                 (Scheme::Light, ColorVariant::Dark) | (Scheme::Dark, ColorVariant::Light) => 0.4,
                 _ => 1.,
-            })
+            });
+            let label = format!("Usar «{}» en modo {mode}", def.name);
+            let accessible_label = if selected {
+                format!("{label} (seleccionado)")
+            } else {
+                label.clone()
+            };
+            let tooltip = gpui::SharedString::from(label);
+            let activate = def.id.clone();
+            orb(id, *variant.colors(def), name, ring, theme)
+                .role(gpui::Role::Button)
+                .aria_label(accessible_label)
+                .track_focus(focus)
+                .tooltip(move |_, cx| cx.new(|_| Tooltip(tooltip.clone())).into())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    if this.settings_page.editor.is_none() {
+                        this.activate_theme(&activate, Some(variant), window, cx);
+                    }
+                }))
         };
         let activate = def.id.clone();
         let duplicate = def.id.clone();
         let delete = def.id.clone();
         let edit = def.id.clone();
-        let focus = self.settings_page.themes[&def.id].clone();
+        let focus = theme_focus.card.clone();
         let key_focus = focus.clone();
         let bounds = Rc::new(Cell::new(None));
         let layout = bounds.clone();
@@ -654,7 +737,7 @@ impl Workspace {
                     .inset_0(),
             )
             .aria_label(def.name.clone())
-            .aria_selected(active)
+            .aria_selected(selected.0 || selected.1)
             .justify_between()
             .h(px(124.))
             .p_4()
@@ -665,18 +748,8 @@ impl Workspace {
                     .justify_center()
                     .items_center()
                     .gap_6()
-                    .child(orb(
-                        def.light,
-                        IconName::Sun,
-                        ring(ColorVariant::Light),
-                        theme,
-                    ))
-                    .child(orb(
-                        def.dark,
-                        IconName::Moon,
-                        ring(ColorVariant::Dark),
-                        theme,
-                    )),
+                    .child(variant_button(ColorVariant::Light))
+                    .child(variant_button(ColorVariant::Dark)),
             )
             .child(
                 div()
@@ -740,7 +813,7 @@ impl Workspace {
             )
             .on_click(cx.listener(move |this, _, window, cx| {
                 if this.settings_page.editor.is_none() {
-                    this.activate_theme(&activate, window, cx);
+                    this.activate_theme(&activate, None, window, cx);
                 }
             }))
             .on_key_down(
@@ -752,7 +825,9 @@ impl Workspace {
                     if let Some(next) =
                         arrow_target(index, columns, themes.len(), &event.keystroke.key)
                     {
-                        this.settings_page.themes[&themes[next].id].focus(window, cx);
+                        this.settings_page.themes[&themes[next].id]
+                            .card
+                            .focus(window, cx);
                         if let Some(rect) = bounds.get() {
                             let rows = (next / columns) as f32 - (index / columns) as f32;
                             reveal_theme_card(&this.settings_page.scroll, rect, rows);
@@ -943,8 +1018,15 @@ fn theme_action(
         .child(icon(name).size(px(14.)).text_color(theme.text))
 }
 
-fn orb(colors: Colors, name: IconName, ring: Option<f32>, theme: Theme) -> Div {
+fn orb(
+    id: &'static str,
+    colors: Colors,
+    name: IconName,
+    ring: Option<f32>,
+    theme: Theme,
+) -> Stateful<Div> {
     div()
+        .id(id)
         .relative()
         .size(px(58.))
         .flex_none()
@@ -952,11 +1034,16 @@ fn orb(colors: Colors, name: IconName, ring: Option<f32>, theme: Theme) -> Div {
         .items_center()
         .justify_center()
         .rounded_full()
+        .border_2()
+        .border_color(gpui::transparent_black())
+        .hover(move |style| style.bg(gpui::Hsla::from(theme.accent).opacity(0.10)))
+        .focus(move |style| style.border_color(theme.accent))
+        .cursor_pointer()
         .when_some(ring, |orb, alpha| {
             orb.child(
                 div()
                     .absolute()
-                    .inset_0()
+                    .inset(px(1.))
                     .rounded_full()
                     .border_2()
                     .border_color(gpui::Hsla::from(theme.accent).opacity(alpha)),
@@ -1097,6 +1184,14 @@ fn is_application(path: &Path) -> bool {
 mod tests {
     use super::*;
 
+    fn press(cx: &mut gpui::VisualTestContext, key: &'static str) {
+        cx.simulate_keystrokes(key);
+        cx.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse(key).unwrap(),
+        });
+        cx.run_until_parked();
+    }
+
     #[gpui::test]
     fn keyboard_selects_appearance_cards_and_restores_focus(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -1115,36 +1210,124 @@ mod tests {
         workspace.update_in(cx, |workspace, window, _| {
             assert!(workspace.settings_page.schemes[1].is_focused(window));
         });
-        cx.simulate_keystrokes("enter");
-        cx.simulate_event(gpui::KeyUpEvent {
-            keystroke: gpui::Keystroke::parse("enter").unwrap(),
-        });
-        cx.run_until_parked();
+        press(cx, "enter");
         assert_eq!(
             Settings::load(dir.path()).unwrap().appearance.scheme,
             Scheme::Light
         );
 
         workspace.update_in(cx, |workspace, window, cx| {
-            workspace.settings_page.themes["vscp"].focus(window, cx);
+            workspace.settings_page.themes["vscp"]
+                .card
+                .focus(window, cx);
         });
         cx.simulate_keystrokes("right");
         workspace.update_in(cx, |workspace, window, _| {
-            assert!(workspace.settings_page.themes["frambuesa"].is_focused(window));
+            assert!(
+                workspace.settings_page.themes["frambuesa"]
+                    .card
+                    .is_focused(window)
+            );
         });
-        cx.simulate_keystrokes("space");
-        cx.simulate_event(gpui::KeyUpEvent {
-            keystroke: gpui::Keystroke::parse("space").unwrap(),
-        });
-        cx.run_until_parked();
-        assert_eq!(
-            Settings::load(dir.path()).unwrap().appearance.theme,
-            "frambuesa"
-        );
+        press(cx, "space");
+        let settings = Settings::load(dir.path()).unwrap().appearance;
+        assert_eq!(settings.light_theme, "frambuesa");
+        assert_eq!(settings.dark_theme, "frambuesa");
         cx.simulate_keystrokes("escape");
         workspace.update_in(cx, |workspace, window, cx| {
             assert!(!workspace.settings_open());
             assert_eq!(window.focused(cx), Some(workspace.focus_handle()));
         });
+    }
+
+    #[gpui::test]
+    fn keyboard_selects_light_and_dark_orbs_independently(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = Settings::default();
+        settings.appearance.scheme = Scheme::Dark;
+        settings.save(dir.path()).unwrap();
+        crate::dev::TEST_CONFIG.with(|config| *config.borrow_mut() = Some(dir.path().to_owned()));
+        cx.update(crate::workspace::bind_keys);
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::new(None, None, None, window, cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("secondary-,");
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.settings_page.themes["oceano"]
+                .card
+                .focus(window, cx);
+        });
+        press(cx, "tab");
+        workspace.update_in(cx, |workspace, window, _| {
+            assert!(
+                workspace.settings_page.themes["oceano"]
+                    .light
+                    .is_focused(window)
+            );
+        });
+        press(cx, "enter");
+        let settings = Settings::load(dir.path()).unwrap().appearance;
+        assert_eq!(settings.light_theme, "oceano");
+        assert_eq!(settings.dark_theme, "vscp");
+        assert_eq!(settings.scheme, Scheme::Dark);
+
+        press(cx, "tab");
+        workspace.update_in(cx, |workspace, window, _| {
+            assert!(
+                workspace.settings_page.themes["oceano"]
+                    .dark
+                    .is_focused(window)
+            );
+        });
+        press(cx, "tab");
+        press(cx, "tab");
+        workspace.update_in(cx, |workspace, window, _| {
+            assert!(
+                workspace.settings_page.themes["ambar"]
+                    .card
+                    .is_focused(window)
+            );
+        });
+        press(cx, "tab");
+        press(cx, "tab");
+        workspace.update_in(cx, |workspace, window, _| {
+            assert!(
+                workspace.settings_page.themes["ambar"]
+                    .dark
+                    .is_focused(window)
+            );
+        });
+        press(cx, "space");
+        let settings = Settings::load(dir.path()).unwrap().appearance;
+        assert_eq!(settings.light_theme, "oceano");
+        assert_eq!(settings.dark_theme, "ambar");
+        assert_eq!(settings.scheme, Scheme::Dark);
+    }
+
+    #[gpui::test]
+    fn deleting_the_dark_theme_preserves_the_light_choice(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut theme = vscp_core::appearance::builtin_themes().remove(0);
+        theme.id = "noche".into();
+        theme.name = "Noche".into();
+        theme.builtin = false;
+        save_user_theme(dir.path(), &theme).unwrap();
+        let mut settings = Settings::default();
+        settings.appearance.light_theme = "oceano".into();
+        settings.appearance.dark_theme = theme.id.clone();
+        settings.save(dir.path()).unwrap();
+        crate::dev::TEST_CONFIG.with(|config| *config.borrow_mut() = Some(dir.path().to_owned()));
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::new(None, None, None, window, cx));
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.remove_theme(theme.id, window, cx);
+        });
+        cx.run_until_parked();
+        let settings = Settings::load(dir.path()).unwrap().appearance;
+        assert_eq!(settings.light_theme, "oceano");
+        assert_eq!(settings.dark_theme, "vscp");
+        assert!(load_user_themes(dir.path()).0.is_empty());
     }
 }

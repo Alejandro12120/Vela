@@ -53,7 +53,8 @@ mod tests {
         let mut settings = Settings::load(dir).unwrap();
         assert_eq!(settings.appearance, AppearanceSettings::default());
         settings.appearance.scheme = Scheme::Dark;
-        settings.appearance.theme = "bosque".into();
+        settings.appearance.light_theme = "oceano".into();
+        settings.appearance.dark_theme = "bosque".into();
         settings.appearance.glass.enabled = true;
         settings.save(dir).unwrap();
         let mut settings = Settings::load(dir).unwrap();
@@ -89,5 +90,49 @@ mod tests {
         );
         Settings::default().save(path).unwrap();
         assert!(Settings::load(path).unwrap().editor.is_none());
+    }
+
+    #[test]
+    fn legacy_theme_selects_both_variants() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("settings.toml"),
+            "[appearance]\ntheme = 'oceano'\n",
+        )
+        .unwrap();
+        let settings = Settings::load(dir.path()).unwrap();
+        assert_eq!(settings.appearance.light_theme, "oceano");
+        assert_eq!(settings.appearance.dark_theme, "oceano");
+    }
+
+    #[test]
+    fn distinct_themes_round_trip_without_the_legacy_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = Settings::default();
+        settings.appearance.light_theme = "oceano".into();
+        settings.appearance.dark_theme = "frambuesa".into();
+        settings.save(dir.path()).unwrap();
+        let stored = Settings::load(dir.path()).unwrap();
+        assert_eq!(stored.appearance, settings.appearance);
+        let text = fs::read_to_string(dir.path().join("settings.toml")).unwrap();
+        let stored: toml::Table = toml::from_str(&text).unwrap();
+        assert!(stored["appearance"].get("theme").is_none());
+    }
+
+    #[test]
+    fn missing_theme_ids_fall_back_to_vscp() {
+        for (text, light, dark) in [
+            ("[appearance]\nscheme = 'light'", "vscp", "vscp"),
+            ("[appearance]\nlight_theme = 'oceano'", "oceano", "vscp"),
+            (
+                "[appearance]\ndark_theme = 'frambuesa'",
+                "vscp",
+                "frambuesa",
+            ),
+        ] {
+            let settings: Settings = toml::from_str(text).unwrap();
+            assert_eq!(settings.appearance.light_theme, light);
+            assert_eq!(settings.appearance.dark_theme, dark);
+        }
     }
 }

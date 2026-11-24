@@ -50,8 +50,12 @@ pub fn appearance() -> Option<WindowAppearance> {
     }
 }
 
-pub fn theme_id() -> Option<String> {
-    value("VSCP_DEV_THEME_ID")
+pub fn theme_ids() -> Option<(String, String)> {
+    let value = value("VSCP_DEV_THEME_ID")?;
+    Some(match value.split_once(',') {
+        Some((light, dark)) => (light.into(), dark.into()),
+        None => (value.clone(), value),
+    })
 }
 
 pub fn settings_page() -> Option<String> {

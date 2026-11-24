@@ -2754,8 +2754,11 @@ mod tests {
             workspace.settings_page.editor_trigger.focus(window, cx);
         });
         press(cx, "enter");
+        // Below the macOS title bar strip, whose mouse down starts a window
+        // move that the test platform does not implement.
+        let top = cx.update(|window, _| crate::workspace::titlebar_height(window));
         cx.simulate_mouse_down(
-            point(px(4.), px(4.)),
+            point(px(4.), top + px(4.)),
             gpui::MouseButton::Left,
             gpui::Modifiers::none(),
         );

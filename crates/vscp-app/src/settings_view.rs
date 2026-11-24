@@ -478,7 +478,13 @@ impl Workspace {
                                 .flex()
                                 .gap_3()
                                 .children(themes.iter().enumerate().map(|(col, def)| {
-                                    self.theme_card(row * columns + col, columns, def, theme, cx)
+                                    div().flex_1().min_w_0().child(self.theme_card(
+                                        row * columns + col,
+                                        columns,
+                                        def,
+                                        theme,
+                                        cx,
+                                    ))
                                 }))
                                 .children((themes.len()..columns).map(|_| div().flex_1().min_w_0()))
                         }),
@@ -587,6 +593,7 @@ impl Workspace {
                 row.child(miniature(active.dark))
             });
         card(("scheme", index), focus, theme)
+            .flex_1()
             .aria_selected(selected)
             .border_2()
             .when(selected, |card| card.border_color(theme.accent))
@@ -639,6 +646,7 @@ impl Workspace {
         let bounds = Rc::new(Cell::new(None));
         let layout = bounds.clone();
         card(&focus, &focus, theme)
+            .w_full()
             .relative()
             .child(
                 canvas(move |rect, _, _| layout.set(Some(rect)), |_, _, _, _| {})
@@ -911,7 +919,6 @@ fn card(id: impl Into<ElementId>, focus: &FocusHandle, theme: Theme) -> Stateful
         .track_focus(focus)
         .flex()
         .flex_col()
-        .flex_1()
         .min_w_0()
         .rounded(px(12.))
         .border_1()

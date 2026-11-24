@@ -164,6 +164,46 @@ fn spec_with_socket(
     spec
 }
 
+/// Fills a missing agent socket from a freshly detected one, leaving an
+/// explicit socket untouched. Returns the socket that was filled in.
+fn fill_detected_socket(spec: &mut ConnectionSpec, detected: Option<&Path>) -> Option<PathBuf> {
+    if !matches!(
+        spec.auth,
+        Auth::Agent {
+            agent_socket: None,
+            ..
+        }
+    ) {
+        return None;
+    }
+    let socket = detected.map(Path::to_owned);
+    if let Auth::Agent { agent_socket, .. } = &mut spec.auth {
+        *agent_socket = socket.clone();
+    }
+    socket
+}
+
+/// Detects the Bitwarden socket off the main thread and fills the spec when
+/// its agent socket is still unset. Returns the socket that was filled in.
+async fn redetect_socket(
+    spec: &mut ConnectionSpec,
+    executor: &gpui::BackgroundExecutor,
+) -> Option<PathBuf> {
+    if !matches!(
+        spec.auth,
+        Auth::Agent {
+            agent_socket: None,
+            ..
+        }
+    ) {
+        return None;
+    }
+    let detected = executor
+        .spawn(async { vscp_core::bitwarden_agent_sockets().into_iter().next() })
+        .await;
+    fill_detected_socket(spec, detected.as_deref())
+}
+
 impl Workspace {
     pub fn new(
         client: Option<Client>,
@@ -659,7 +699,13 @@ impl Workspace {
         cx.notify();
         let mut spec = self.spec_for(&server);
         dev::isolate_known_hosts(&mut spec);
+        let executor = cx.background_executor().clone();
         cx.spawn_in(window, async move |this, cx| {
+            if let Some(socket) = redetect_socket(&mut spec, &executor).await {
+                let _ = this.update(cx, |this, _| {
+                    this.agent_socket = socket.to_string_lossy().into_owned();
+                });
+            }
             let result = async {
                 let session = client.connect(spec).await?;
                 dev::log(format_args!("connected {}", server.display_name()));
@@ -1302,6 +1348,11 @@ impl Workspace {
                 let Ok(mut spec) = this.update(cx, |this, _| this.spec_for(&server)) else {
                     return;
                 };
+                if let Some(socket) = redetect_socket(&mut spec, cx.background_executor()).await {
+                    let _ = this.update(cx, |this, _| {
+                        this.agent_socket = socket.to_string_lossy().into_owned();
+                    });
+                }
                 dev::isolate_known_hosts(&mut spec);
                 let warning = identity_warning(&client, spec).await;
                 let _ = this.update_in(cx, |this, _, cx| {
@@ -1998,6 +2049,51 @@ mod tests {
             agent_socket: Some("/tmp/own.sock".into()),
         };
         let spec = spec_with_socket(&server, Some(Path::new("/tmp/global.sock")), None);
+        assert_eq!(
+            spec.auth,
+            Auth::Agent {
+                identity_pub: "/tmp/key.pub".into(),
+                agent_socket: Some("/tmp/own.sock".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn detection_fills_only_a_missing_agent_socket() {
+        let mut spec = ConnectionSpec::new(
+            "host".into(),
+            22,
+            "u".into(),
+            Auth::Agent {
+                identity_pub: "/tmp/key.pub".into(),
+                agent_socket: None,
+            },
+        );
+        assert_eq!(
+            fill_detected_socket(&mut spec, Some(Path::new("/tmp/detected.sock"))),
+            Some(PathBuf::from("/tmp/detected.sock"))
+        );
+        assert_eq!(
+            spec.auth,
+            Auth::Agent {
+                identity_pub: "/tmp/key.pub".into(),
+                agent_socket: Some("/tmp/detected.sock".into()),
+            }
+        );
+
+        let mut spec = ConnectionSpec::new(
+            "host".into(),
+            22,
+            "u".into(),
+            Auth::Agent {
+                identity_pub: "/tmp/key.pub".into(),
+                agent_socket: Some("/tmp/own.sock".into()),
+            },
+        );
+        assert_eq!(
+            fill_detected_socket(&mut spec, Some(Path::new("/tmp/detected.sock"))),
+            None
+        );
         assert_eq!(
             spec.auth,
             Auth::Agent {

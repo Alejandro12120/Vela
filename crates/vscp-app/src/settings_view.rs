@@ -297,8 +297,8 @@ impl Workspace {
         } else {
             Some(PathBuf::from(value))
         };
-        self.probe_agent(window, cx);
         self.save_settings(next, window, cx);
+        self.probe_agent(window, cx);
     }
 
     fn cancel_agent_socket(&mut self, cx: &mut Context<Self>) {
@@ -310,8 +310,8 @@ impl Workspace {
     fn use_bitwarden_socket(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut next = self.settings.clone();
         next.agent_socket = None;
-        self.probe_agent(window, cx);
         self.save_settings(next, window, cx);
+        self.probe_agent(window, cx);
     }
 
     fn agent_status(&self, theme: Theme) -> (&'static str, gpui::Rgba) {
@@ -1292,13 +1292,20 @@ impl Workspace {
             );
         }
         #[cfg(target_os = "macos")]
-        rows.push(div().h(px(1.)).my(px(4.)).bg(theme.border));
+        rows.push(
+            div()
+                .id("editor-menu-separator")
+                .h(px(1.))
+                .my(px(4.))
+                .bg(theme.border),
+        );
         #[cfg(target_os = "macos")]
         rows.push(
             div()
                 .id("editor-menu-other")
                 .role(Role::MenuItem)
                 .tab_index(0)
+                .track_focus(&handles[handles.len() - 1])
                 .flex()
                 .items_center()
                 .h(px(28.))
@@ -1307,6 +1314,7 @@ impl Workspace {
                 .cursor_pointer()
                 .text_size(px(13.))
                 .hover(move |style| style.bg(theme.hover))
+                .focus(move |style| style.bg(theme.selection))
                 .child("Otra aplicación…")
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.close_editor_menu(cx);
@@ -2108,6 +2116,105 @@ mod tests {
     fn copy_sizes_use_a_spanish_decimal_comma() {
         assert_eq!(format_copies_size(1_200_000), "1,2 MB");
         assert_eq!(format_copies_size(999), "1,0 KB");
+    }
+
+    fn serve_agent(
+        socket: &Path,
+    ) -> (
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let listener = UnixListener::bind(socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let server = std::thread::spawn(move || {
+            while !flag.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut request = [0u8; 5];
+                        stream.read_exact(&mut request).unwrap();
+                        let answer = [12u8, 0, 0, 0, 0];
+                        stream
+                            .write_all(&(answer.len() as u32).to_be_bytes())
+                            .unwrap();
+                        stream.write_all(&answer).unwrap();
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        (stop, server)
+    }
+
+    #[gpui::test]
+    fn committing_a_missing_socket_probes_the_new_socket(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        crate::dev::TEST_CONFIG.with(|config| *config.borrow_mut() = Some(dir.path().to_owned()));
+        cx.update(crate::workspace::bind_keys);
+        cx.executor().allow_parking();
+        let live = dir.path().join("live.sock");
+        let (stop, server) = serve_agent(&live);
+        let client = vscp_core::Client::new(std::env::current_exe().unwrap()).unwrap();
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::new(Some(client), None, None, window, cx));
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            let mut next = workspace.settings.clone();
+            next.agent_socket = Some(live.clone());
+            workspace.save_settings(next, window, cx);
+            workspace.probe_agent(window, cx);
+        });
+        for _ in 0..50 {
+            cx.run_until_parked();
+            if workspace.update(cx, |workspace, _| {
+                workspace.settings_page.agent_probe.is_some()
+            }) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        workspace.update(cx, |workspace, _| {
+            assert_eq!(workspace.settings_page.agent_probe, Some(Ok(0)));
+        });
+
+        let missing = dir.path().join("missing.sock");
+        workspace.update_in(cx, |workspace, window, cx| {
+            let input = cx.new(|cx| {
+                TextInput::new(
+                    &missing.to_string_lossy(),
+                    "Socket del agente",
+                    "/ruta/al/agente.sock",
+                    false,
+                    cx,
+                )
+            });
+            workspace.settings_page.agent_input = Some(input);
+            workspace.commit_agent_socket(window, cx);
+        });
+        for _ in 0..50 {
+            cx.run_until_parked();
+            if workspace.update(cx, |workspace, _| {
+                workspace.settings_page.agent_probe.is_some()
+            }) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        workspace.update(cx, |workspace, _| {
+            assert_eq!(
+                workspace.settings_page.agent_probe,
+                Some(Err(AgentError::Unavailable))
+            );
+        });
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        server.join().unwrap();
     }
 
     #[gpui::test]

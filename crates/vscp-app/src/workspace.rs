@@ -68,6 +68,11 @@ pub fn bind_keys(cx: &mut gpui::App) {
         KeyBinding::new("tab", Next, Some("Workspace")),
         KeyBinding::new("shift-tab", Previous, Some("Workspace")),
         KeyBinding::new("escape", DismissMenu, Some("Workspace")),
+        KeyBinding::new(
+            "escape",
+            crate::components::dropdown::Dismiss,
+            Some("EditorMenu"),
+        ),
         crate::keybindings::binding(cx, "secondary-s", ToggleSidebar, Some("Workspace")),
         KeyBinding::new("tab", modal::Next, Some("RowMenu")),
         KeyBinding::new("down", modal::Next, Some("RowMenu")),

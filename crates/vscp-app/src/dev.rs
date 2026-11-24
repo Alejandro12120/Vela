@@ -16,6 +16,8 @@ thread_local! {
     /// Lets a test own the configuration directory without touching the
     /// process environment. GPUI tests run their tasks on the test thread.
     pub static TEST_CONFIG: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    pub static TEST_EDITOR_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    pub static TEST_EDITOR_PICKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn config_override() -> Option<PathBuf> {
@@ -314,11 +316,19 @@ pub fn empty_confirm() -> bool {
 
 /// The editor picker is always shown on macOS. On Linux it is a capture hook.
 pub fn editor_picker() -> bool {
+    #[cfg(test)]
+    if TEST_EDITOR_PICKER.get() {
+        return true;
+    }
     cfg!(target_os = "macos") || value("VSCP_DEV_EDITOR_PICKER").as_deref() == Some("1")
 }
 
 /// Roots searched for editor bundles, in order.
 pub fn editor_roots() -> Vec<PathBuf> {
+    #[cfg(test)]
+    if let Some(root) = TEST_EDITOR_ROOT.with(|root| root.borrow().clone()) {
+        return vec![root];
+    }
     #[cfg(target_os = "macos")]
     {
         let home = std::env::home_dir();

@@ -12,9 +12,10 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, Bounds, ClickEvent, Div, ElementId, Entity, FocusHandle, Focusable, FontWeight,
-    KeyDownEvent, PathPromptOptions, Pixels, Role, ScrollHandle, SharedString, Stateful, anchored,
-    canvas, deferred, linear_color_stop, linear_gradient, point, prelude::*, px, rgba,
+    Animation, AnimationExt, AnyElement, Bounds, ClickEvent, Div, ElementId, Entity, FocusHandle,
+    Focusable, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent, PathPromptOptions, Pixels,
+    Role, ScrollHandle, SharedString, Stateful, canvas, deferred, ease_out_quint,
+    linear_color_stop, linear_gradient, point, prelude::*, px, rgba,
 };
 use vscp_core::{
     agent::AgentError,
@@ -31,6 +32,7 @@ use crate::{
     appearance::{Appearance, Variant as ColorVariant},
     components::{
         button::{icon_button, icon_text_button, small_button, small_icon_text_button},
+        dropdown::{self, Placement, dropdown_item, dropdown_panel, menu_height, place},
         status_dot::status_dot,
         text_input::TextInput,
     },
@@ -94,6 +96,15 @@ pub(crate) fn installed_editors(roots: &[PathBuf]) -> Vec<(&'static str, PathBuf
     found
 }
 
+struct EditorMenu {
+    placement: Placement,
+    items: Vec<FocusHandle>,
+    entries: Vec<(&'static str, Option<PathBuf>)>,
+    closing: bool,
+    restore_focus: bool,
+    generation: u64,
+}
+
 pub(super) struct SettingsPage {
     previous_focus: Option<FocusHandle>,
     focus: FocusHandle,
@@ -107,7 +118,11 @@ pub(super) struct SettingsPage {
     agent_probe: Option<AgentProbe>,
     agent_editing: bool,
     agent_input: Option<Entity<TextInput>>,
-    editor_menu: Option<(gpui::Point<Pixels>, Vec<FocusHandle>)>,
+    editor_trigger: FocusHandle,
+    editor_trigger_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    settings_viewport: Rc<Cell<Option<Bounds<Pixels>>>>,
+    editor_menu: Option<EditorMenu>,
+    editor_generation: u64,
     edit_copies: Option<(usize, u64)>,
     pending_settings: Option<Settings>,
 }
@@ -127,7 +142,11 @@ impl SettingsPage {
             agent_probe: None,
             agent_editing: false,
             agent_input: None,
+            editor_trigger: cx.focus_handle().tab_stop(true),
+            editor_trigger_bounds: Rc::new(Cell::new(None)),
+            settings_viewport: Rc::new(Cell::new(None)),
             editor_menu: None,
+            editor_generation: 0,
             edit_copies: None,
             pending_settings: None,
         }
@@ -366,7 +385,7 @@ impl Workspace {
             Some("appearance") => Some(0),
             Some("interface") => Some(1),
             Some("agent") => Some(2),
-            Some("editor") => Some(3),
+            Some("editor") | Some("editor-low") => Some(3),
             Some("terminal") => Some(4),
             _ => None,
         };
@@ -376,8 +395,18 @@ impl Workspace {
         if crate::dev::agent_edit() {
             self.edit_agent_socket(window, cx);
         }
-        if crate::dev::editor_menu() {
-            self.open_editor_menu(point(px(700.), px(340.)), cx);
+        if crate::dev::editor_menu() || request.as_deref() == Some("editor-low") {
+            let low = request.as_deref() == Some("editor-low");
+            cx.on_next_frame(window, move |this, window, cx| {
+                if low {
+                    this.scroll_editor_to_bottom(cx);
+                    cx.on_next_frame(window, move |this, window, cx| {
+                        this.open_editor_menu(window, cx)
+                    });
+                } else {
+                    this.open_editor_menu(window, cx);
+                }
+            });
         }
         if crate::dev::empty_confirm() {
             self.open_dialog(Dialog::EmptyEdits, window, cx);
@@ -858,22 +887,35 @@ impl Workspace {
             )
             .child(
                 div()
-                    .id("settings-scroll")
+                    .relative()
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .flex_col()
-                    .items_center()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.settings_page.scroll)
-                    .when(theme.glassy, |scroll| {
-                        scroll.bg(theme.chrome(theme.background))
+                    .child({
+                        let viewport = self.settings_page.settings_viewport.clone();
+                        canvas(move |rect, _, _| viewport.set(Some(rect)), |_, _, _, _| {})
+                            .absolute()
+                            .inset_0()
                     })
-                    .child(appearance_section)
-                    .child(self.render_interface(theme, cx))
-                    .child(self.agent_section(theme, cx))
-                    .child(self.editor_section(theme, cx))
-                    .child(self.terminal_section(theme, window, cx).pb_6()),
+                    .child(
+                        div()
+                            .id("settings-scroll")
+                            .flex()
+                            .flex_1()
+                            .min_h_0()
+                            .flex_col()
+                            .items_center()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.settings_page.scroll)
+                            .when(theme.glassy, |scroll| {
+                                scroll.bg(theme.chrome(theme.background))
+                            })
+                            .child(appearance_section)
+                            .child(self.render_interface(theme, cx))
+                            .child(self.agent_section(theme, cx))
+                            .child(self.editor_section(theme, cx))
+                            .child(self.terminal_section(theme, window, cx).pb_6()),
+                    ),
             )
             .children(self.render_theme_editor(theme, window, cx))
             .children(self.render_picker(theme, cx))
@@ -1219,221 +1261,453 @@ impl Workspace {
         self.save_settings(next, window, cx);
     }
 
-    fn open_editor_menu(&mut self, position: gpui::Point<Pixels>, cx: &mut Context<Self>) {
-        let count = 1 + installed_editors(&crate::dev::editor_roots()).len() + 1;
-        let handles = (0..count).map(|_| cx.focus_handle()).collect();
-        self.settings_page.editor_menu = Some((position, handles));
+    fn editor_entries(&self) -> Vec<(&'static str, Option<PathBuf>)> {
+        let mut entries = vec![("Predeterminada del sistema", None)];
+        entries.extend(
+            installed_editors(&crate::dev::editor_roots())
+                .into_iter()
+                .map(|(name, path)| (name, Some(path))),
+        );
+        #[cfg(target_os = "macos")]
+        entries.push(("Otra aplicación…", None));
+        entries
+    }
+
+    fn scroll_editor_to_bottom(&mut self, cx: &mut Context<Self>) {
+        let shift = match (
+            self.settings_page.settings_viewport.get(),
+            self.settings_page.editor_trigger_bounds.get(),
+        ) {
+            (Some(viewport), Some(trigger)) => (viewport.bottom() - px(8.)) - trigger.bottom(),
+            (Some(viewport), None) => viewport.size.height - px(88.),
+            _ => return,
+        };
+        let offset = self.settings_page.scroll.offset();
+        self.settings_page
+            .scroll
+            .set_offset(point(offset.x, (offset.y + shift).min(px(0.))));
         cx.notify();
     }
 
-    fn close_editor_menu(&mut self, cx: &mut Context<Self>) {
-        self.settings_page.editor_menu = None;
-        cx.notify();
-    }
-
-    fn render_editor_menu(&self, theme: Theme, cx: &Context<Self>) -> Option<AnyElement> {
-        let (position, handles) = self.settings_page.editor_menu.as_ref()?;
-        let chosen = self.settings.editor.as_deref();
-        let mut items: Vec<(FocusHandle, &'static str, String, bool)> = Vec::new();
-        items.push((
-            handles[0].clone(),
-            "Predeterminada del sistema",
-            String::new(),
-            chosen.is_none(),
-        ));
-        for (index, (name, path)) in installed_editors(&crate::dev::editor_roots())
-            .into_iter()
-            .enumerate()
+    fn open_editor_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .settings_page
+            .editor_menu
+            .as_ref()
+            .is_some_and(|menu| !menu.closing)
         {
-            items.push((
-                handles[index + 1].clone(),
-                name,
-                path.to_string_lossy().into_owned(),
-                chosen == Some(path.as_path()),
-            ));
+            self.close_editor_menu(true, window, cx);
+            return;
         }
-        let _ = chosen;
-        let mut rows = Vec::new();
-        for (label, detail, checked) in items
-            .into_iter()
-            .map(|(_, label, detail, checked)| (label, detail, checked))
-        {
-            let handle = rows.len();
-            let focus = handles[handle].clone();
-            rows.push(
-                div()
-                    .id(("editor-menu-item", handle))
-                    .role(Role::MenuItem)
-                    .tab_index(0)
-                    .track_focus(&focus)
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .h(px(28.))
-                    .px(px(8.))
-                    .rounded(px(6.))
-                    .cursor_pointer()
-                    .text_size(px(13.))
-                    .hover(move |style| style.bg(theme.hover))
-                    .focus(move |style| style.bg(theme.selection))
-                    .child(div().flex_1().min_w_0().truncate().child(label.to_owned()))
-                    .when(checked, |row| {
-                        row.child(icon(IconName::Check).size(px(14.)).text_color(theme.accent))
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        let editor = if detail.is_empty() {
-                            None
-                        } else {
-                            Some(PathBuf::from(&detail))
-                        };
-                        this.close_editor_menu(cx);
-                        this.select_editor(editor, window, cx);
-                    })),
-            );
-        }
-        #[cfg(target_os = "macos")]
-        rows.push(
-            div()
-                .id("editor-menu-separator")
-                .h(px(1.))
-                .my(px(4.))
-                .bg(theme.border),
-        );
-        #[cfg(target_os = "macos")]
-        rows.push(
-            div()
-                .id("editor-menu-other")
-                .role(Role::MenuItem)
-                .tab_index(0)
-                .track_focus(&handles[handles.len() - 1])
-                .flex()
-                .items_center()
-                .h(px(28.))
-                .px(px(8.))
-                .rounded(px(6.))
-                .cursor_pointer()
-                .text_size(px(13.))
-                .hover(move |style| style.bg(theme.hover))
-                .focus(move |style| style.bg(theme.selection))
-                .child("Otra aplicación…")
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.close_editor_menu(cx);
-                    this.choose_editor(window, cx);
-                })),
-        );
-        let panel = div()
-            .id("editor-menu")
-            .role(Role::Menu)
-            .key_context("EditorMenu")
-            .flex()
-            .flex_col()
-            .min_w(px(220.))
-            .max_h(px(320.))
-            .overflow_y_scroll()
-            .p(px(4.))
-            .rounded(px(8.))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.raised)
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                match event.keystroke.key.as_str() {
-                    "escape" => {
-                        cx.stop_propagation();
-                        this.close_editor_menu(cx);
+        let entries = self.editor_entries();
+        let separators = usize::from(cfg!(target_os = "macos"));
+        let height = menu_height(entries.len(), separators);
+        let trigger = self.settings_page.editor_trigger_bounds.get();
+        let viewport = self.settings_page.settings_viewport.get();
+        let placement = trigger
+            .zip(viewport)
+            .and_then(|(trigger, viewport)| place(trigger, viewport, height))
+            .unwrap_or_else(|| {
+                if let (Some(trigger), Some(viewport)) = (trigger, viewport) {
+                    let needed = height + px(dropdown::GAP);
+                    let shift = if trigger.top() < viewport.top() {
+                        viewport.top() - trigger.top()
+                    } else if trigger.bottom() + needed > viewport.bottom() {
+                        viewport.bottom() - trigger.bottom() - needed
+                    } else {
+                        px(0.)
+                    };
+                    if shift != px(0.) {
+                        let offset = self.settings_page.scroll.offset();
+                        self.settings_page
+                            .scroll
+                            .set_offset(point(offset.x, (offset.y + shift).min(px(0.))));
                     }
-                    "down" | "up" => {
-                        cx.stop_propagation();
-                        let handles = this
-                            .settings_page
-                            .editor_menu
-                            .as_ref()
-                            .map(|(_, h)| h.clone());
-                        if let Some(handles) = handles {
-                            let current =
-                                handles.iter().position(|handle| handle.is_focused(window));
-                            let delta = if event.keystroke.key == "down" {
-                                1isize
-                            } else {
-                                -1
-                            };
-                            let next = match current {
-                                Some(index) => (index as isize + delta)
-                                    .rem_euclid(handles.len() as isize)
-                                    as usize,
-                                None => 0,
-                            };
-                            handles[next].focus(window, cx);
-                        }
-                    }
-                    _ => {}
                 }
-            }))
-            .children(rows);
-        Some(
-            deferred(
-                anchored()
-                    .position(*position)
-                    .snap_to_window_with_margin(px(8.))
-                    .child(crate::components::motion::appear(
-                        panel,
-                        "editor-menu-appear",
-                        3.,
-                        crate::components::motion::FAST,
-                    )),
-            )
-            .with_priority(1)
-            .into_any_element(),
-        )
+                Placement::Below
+            });
+        let items = (0..entries.len())
+            .map(|_| cx.focus_handle().tab_stop(true))
+            .collect::<Vec<_>>();
+        let checked = self.settings.editor.as_deref();
+        let focus = entries
+            .iter()
+            .position(|(_, path)| path.as_deref() == checked)
+            .unwrap_or(0);
+        let generation = self.settings_page.editor_generation;
+        self.settings_page.editor_generation += 1;
+        self.settings_page.editor_menu = Some(EditorMenu {
+            placement,
+            items,
+            entries,
+            closing: false,
+            restore_focus: true,
+            generation,
+        });
+        self.settings_page.editor_menu.as_ref().unwrap().items[focus].focus(window, cx);
+        cx.notify();
     }
 
-    fn editor_section(&self, theme: Theme, cx: &Context<Self>) -> Div {
-        let picker = crate::dev::editor_picker();
-        let editor_control: AnyElement = if picker {
-            let label = self
-                .settings
-                .editor
-                .as_deref()
-                .and_then(|path| path.file_stem())
-                .map_or_else(
-                    || "Predeterminada del sistema".to_owned(),
-                    |name| name.to_string_lossy().into_owned(),
-                );
-            div()
-                .id("editor-picker")
-                .role(Role::Button)
-                .tab_index(0)
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(10.))
-                .h(px(28.))
-                .min_w(px(190.))
-                .px(px(10.))
-                .rounded(px(6.))
-                .border_1()
-                .border_color(theme.control_border)
-                .bg(theme.panel)
-                .text_size(px(13.))
-                .cursor_pointer()
-                .hover(move |style| style.bg(theme.hover))
-                .focus(move |style| style.border_color(theme.accent))
-                .child(label)
-                .child(
-                    icon(IconName::ChevronsUpDown)
-                        .size(px(14.))
-                        .text_color(theme.secondary_text),
-                )
-                .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
-                    this.open_editor_menu(event.position(), cx);
-                }))
-                .into_any_element()
-        } else {
-            div()
+    fn set_editor_menu_placement(&mut self, placement: Option<Placement>, cx: &mut Context<Self>) {
+        match placement {
+            Some(placement) => {
+                let changed = self.settings_page.editor_menu.as_mut().is_some_and(|menu| {
+                    if menu.closing || menu.placement == placement {
+                        return false;
+                    }
+                    menu.placement = placement;
+                    true
+                });
+                if changed {
+                    cx.notify();
+                }
+            }
+            None => self.begin_editor_menu_close(false, None, cx),
+        }
+    }
+
+    fn close_editor_menu(
+        &mut self,
+        restore_focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.begin_editor_menu_close(restore_focus, Some(window), cx);
+    }
+
+    fn begin_editor_menu_close(
+        &mut self,
+        restore_focus: bool,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(menu) = self.settings_page.editor_menu.as_mut() else {
+            return;
+        };
+        if menu.closing {
+            return;
+        }
+        menu.closing = true;
+        menu.restore_focus = restore_focus;
+        let generation = menu.generation;
+        if cx.reduce_motion() {
+            self.settings_page.editor_menu = None;
+            if restore_focus && let Some(window) = window {
+                self.settings_page.editor_trigger.focus(window, cx);
+            }
+            cx.notify();
+            return;
+        }
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(crate::components::motion::FAST)
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                let remove = this
+                    .settings_page
+                    .editor_menu
+                    .as_ref()
+                    .is_some_and(|menu| menu.closing && menu.generation == generation);
+                if !remove {
+                    return;
+                }
+                let restore = this
+                    .settings_page
+                    .editor_menu
+                    .as_ref()
+                    .is_some_and(|menu| menu.restore_focus);
+                this.settings_page.editor_menu = None;
+                if restore {
+                    this.settings_page.editor_trigger.focus(window, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn render_editor_control(&self, theme: Theme, cx: &Context<Self>) -> AnyElement {
+        if !crate::dev::editor_picker() {
+            return div()
                 .text_size(px(13.))
                 .text_color(theme.secondary_text)
                 .child("Aplicación predeterminada (xdg-open)")
-                .into_any_element()
-        };
+                .into_any_element();
+        }
+        let label = self
+            .settings
+            .editor
+            .as_deref()
+            .and_then(|path| path.file_stem())
+            .map_or_else(
+                || "Predeterminada del sistema".to_owned(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+        let bounds = self.settings_page.editor_trigger_bounds.clone();
+        let weak = cx.weak_entity();
+        let trigger = div()
+            .id("editor-picker")
+            .role(Role::Button)
+            .tab_index(0)
+            .track_focus(&self.settings_page.editor_trigger)
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(10.))
+            .h(px(28.))
+            .min_w(px(190.))
+            .px(px(10.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(theme.control_border)
+            .bg(theme.panel)
+            .text_size(px(13.))
+            .cursor_pointer()
+            .hover(move |style| style.bg(theme.hover))
+            .focus(move |style| style.border_color(theme.accent))
+            .on_click(
+                cx.listener(|this, _: &ClickEvent, window, cx| this.open_editor_menu(window, cx)),
+            )
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space" | "down") {
+                    cx.stop_propagation();
+                    this.open_editor_menu(window, cx);
+                }
+            }))
+            .child(label)
+            .child(
+                icon(IconName::ChevronsUpDown)
+                    .size(px(14.))
+                    .text_color(theme.secondary_text),
+            );
+        let wrapper = div()
+            .relative()
+            .flex_none()
+            .child(
+                canvas(
+                    move |rect, _, cx| {
+                        bounds.set(Some(rect));
+                        let weak = weak.clone();
+                        cx.defer(move |cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                let Some(menu) = this.settings_page.editor_menu.as_ref() else {
+                                    return;
+                                };
+                                if menu.closing {
+                                    return;
+                                }
+                                let height = menu_height(
+                                    menu.entries.len(),
+                                    usize::from(cfg!(target_os = "macos")),
+                                );
+                                let result = this
+                                    .settings_page
+                                    .editor_trigger_bounds
+                                    .get()
+                                    .zip(this.settings_page.settings_viewport.get())
+                                    .and_then(|(trigger, viewport)| {
+                                        place(trigger, viewport, height)
+                                    });
+                                if result != Some(menu.placement) {
+                                    let weak = cx.weak_entity();
+                                    cx.defer(move |cx| {
+                                        let _ = weak.update(cx, |this, cx| {
+                                            this.set_editor_menu_placement(result, cx)
+                                        });
+                                    });
+                                }
+                            });
+                        });
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
+            .child(trigger);
+        wrapper
+            .when_some(self.settings_page.editor_menu.as_ref(), |wrapper, menu| {
+                let placement = menu.placement;
+                let closing = menu.closing;
+                let generation = menu.generation;
+                let rise = if placement == Placement::Below {
+                    -4.
+                } else {
+                    4.
+                };
+                let chosen = self.settings.editor.as_deref();
+                let mut rows: Vec<AnyElement> = Vec::new();
+                for (index, (label, path)) in menu.entries.iter().enumerate() {
+                    #[cfg(target_os = "macos")]
+                    if index + 1 == menu.entries.len() {
+                        rows.push(
+                            div()
+                                .id("editor-menu-separator")
+                                .h(px(1.))
+                                .my(px(4.))
+                                .bg(theme.border)
+                                .into_any_element(),
+                        );
+                    }
+                    let focus = menu.items[index].clone();
+                    let editor = path.clone();
+                    rows.push(
+                        dropdown_item(
+                            ("editor-menu-item", index),
+                            *label,
+                            path.as_deref() == chosen,
+                            &focus,
+                            theme,
+                        )
+                        .when(!closing, |row| {
+                            row.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    #[cfg(target_os = "macos")]
+                                    let count = this
+                                        .settings_page
+                                        .editor_menu
+                                        .as_ref()
+                                        .map_or(0, |m| m.entries.len());
+                                    this.close_editor_menu(true, window, cx);
+                                    #[cfg(target_os = "macos")]
+                                    if index + 1 == count {
+                                        this.choose_editor(window, cx);
+                                        return;
+                                    }
+                                    this.select_editor(editor.clone(), window, cx);
+                                }))
+                        })
+                        .into_any_element(),
+                    );
+                }
+                let panel = dropdown_panel("editor-menu", theme)
+                    .role(Role::Menu)
+                    .key_context("EditorMenu")
+                    .when(!closing, |panel| {
+                        panel
+                            .on_action(cx.listener(|this, _: &dropdown::Dismiss, window, cx| {
+                                cx.stop_propagation();
+                                this.close_editor_menu(true, window, cx);
+                            }))
+                            .on_key_down(cx.listener(
+                                move |this, event: &KeyDownEvent, window, cx| {
+                                    let key = event.keystroke.key.as_str();
+                                    match key {
+                                        "tab" => {
+                                            this.close_editor_menu(true, window, cx);
+                                        }
+                                        "up" | "down" | "home" | "end" => {
+                                            cx.stop_propagation();
+                                            let Some(items) = this
+                                                .settings_page
+                                                .editor_menu
+                                                .as_ref()
+                                                .map(|menu| menu.items.clone())
+                                            else {
+                                                return;
+                                            };
+                                            let current = items
+                                                .iter()
+                                                .position(|handle| handle.is_focused(window))
+                                                .unwrap_or(0);
+                                            let next = match key {
+                                                "down" => (current + 1) % items.len(),
+                                                "up" => (current + items.len() - 1) % items.len(),
+                                                "end" => items.len() - 1,
+                                                _ => 0,
+                                            };
+                                            items[next].focus(window, cx);
+                                        }
+                                        "enter" | "space" => {
+                                            cx.stop_propagation();
+                                            let Some(menu) =
+                                                this.settings_page.editor_menu.as_ref()
+                                            else {
+                                                return;
+                                            };
+                                            let index = menu
+                                                .items
+                                                .iter()
+                                                .position(|handle| handle.is_focused(window))
+                                                .unwrap_or(0);
+                                            let editor = menu.entries[index].1.clone();
+                                            #[cfg(target_os = "macos")]
+                                            let count = menu.entries.len();
+                                            this.close_editor_menu(true, window, cx);
+                                            #[cfg(target_os = "macos")]
+                                            if index + 1 == count {
+                                                this.choose_editor(window, cx);
+                                                return;
+                                            }
+                                            this.select_editor(editor, window, cx);
+                                        }
+                                        _ => {}
+                                    }
+                                },
+                            ))
+                            .on_mouse_down_out(cx.listener(
+                                |this, event: &MouseDownEvent, window, cx| {
+                                    if this
+                                        .settings_page
+                                        .editor_trigger_bounds
+                                        .get()
+                                        .is_some_and(|bounds| bounds.contains(&event.position))
+                                    {
+                                        return;
+                                    }
+                                    this.close_editor_menu(false, window, cx);
+                                },
+                            ))
+                    })
+                    .children(rows);
+                let panel = if closing {
+                    panel
+                        .with_animation(
+                            ("editor-menu-close", generation),
+                            Animation::new(crate::components::motion::FAST)
+                                .with_easing(ease_out_quint()),
+                            move |panel, t| panel.opacity(1. - t).relative().top(px(rise * t)),
+                        )
+                        .into_any_element()
+                } else if cx.reduce_motion() {
+                    panel.into_any_element()
+                } else {
+                    let side: usize = match placement {
+                        Placement::Below => 0,
+                        Placement::Above => 1,
+                    };
+                    crate::components::motion::appear(
+                        panel,
+                        ("editor-menu-open", side),
+                        rise,
+                        crate::components::motion::FAST,
+                    )
+                    .into_any_element()
+                };
+                wrapper.child(
+                    deferred(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .min_w_full()
+                            .when(placement == Placement::Below, |menu| {
+                                menu.top(px(28. + dropdown::GAP))
+                            })
+                            .when(placement == Placement::Above, |menu| {
+                                menu.bottom(px(28. + dropdown::GAP))
+                            })
+                            .child(panel),
+                    )
+                    .with_priority(1),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn editor_section(&self, theme: Theme, cx: &Context<Self>) -> Div {
+        let editor_control = self.render_editor_control(theme, cx);
 
         let copies = self.settings_page.edit_copies;
         let caption = match copies {
@@ -1473,7 +1747,6 @@ impl Workspace {
             ));
 
         section("Editor")
-            .children(self.render_editor_menu(theme, cx))
             .child(settings_group(
                 theme,
                 vec![
@@ -2384,6 +2657,136 @@ mod tests {
         let saved = Settings::load(dir.path()).unwrap();
         assert_eq!(saved.appearance.light_theme, "oceano");
         assert_eq!(saved.terminal_font_size, Some(12.));
+    }
+
+    fn editor_fixture() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("apps");
+        std::fs::create_dir_all(root.join("Zed.app")).unwrap();
+        crate::dev::TEST_CONFIG.with(|config| *config.borrow_mut() = Some(dir.path().to_owned()));
+        crate::dev::TEST_EDITOR_ROOT.with(|config| *config.borrow_mut() = Some(root));
+        crate::dev::TEST_EDITOR_PICKER.set(true);
+        dir
+    }
+
+    #[gpui::test]
+    fn editor_menu_opens_on_enter_with_the_checked_item_focused(cx: &mut gpui::TestAppContext) {
+        let _dir = editor_fixture();
+        cx.update(crate::workspace::bind_keys);
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::new(None, None, None, window, cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("secondary-,");
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.settings_page.editor_trigger.focus(window, cx);
+        });
+        press(cx, "enter");
+        workspace.update_in(cx, |workspace, window, _| {
+            let menu = workspace.settings_page.editor_menu.as_ref().unwrap();
+            assert!(!menu.closing);
+            assert!(menu.items[0].is_focused(window));
+        });
+    }
+
+    #[gpui::test]
+    fn escape_closes_the_editor_menu_and_restores_focus(cx: &mut gpui::TestAppContext) {
+        let _dir = editor_fixture();
+        cx.update(crate::workspace::bind_keys);
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::new(None, None, None, window, cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("secondary-,");
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.settings_page.editor_trigger.focus(window, cx);
+        });
+        press(cx, "enter");
+        press(cx, "escape");
+        cx.executor()
+            .advance_clock(crate::components::motion::FAST * 2);
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, _| {
+            assert!(workspace.settings_page.editor_menu.is_none());
+            assert!(workspace.settings_page.editor_trigger.is_focused(window));
+        });
+    }
+
+    #[gpui::test]
+    fn a_click_far_outside_closes_the_editor_menu(cx: &mut gpui::TestAppContext) {
+        let _dir = editor_fixture();
+        cx.update(crate::workspace::bind_keys);
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::new(None, None, None, window, cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("secondary-,");
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.settings_page.editor_trigger.focus(window, cx);
+        });
+        press(cx, "enter");
+        cx.simulate_mouse_down(
+            point(px(4.), px(4.)),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        cx.executor()
+            .advance_clock(crate::components::motion::FAST * 2);
+        cx.run_until_parked();
+        workspace.update(cx, |workspace, _| {
+            assert!(workspace.settings_page.editor_menu.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn down_and_enter_select_the_focused_editor(cx: &mut gpui::TestAppContext) {
+        let dir = editor_fixture();
+        cx.update(crate::workspace::bind_keys);
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::new(None, None, None, window, cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("secondary-,");
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.settings_page.editor_trigger.focus(window, cx);
+        });
+        press(cx, "enter");
+        press(cx, "down");
+        press(cx, "enter");
+        let saved = Settings::load(dir.path()).unwrap();
+        assert_eq!(saved.editor, Some(dir.path().join("apps/Zed.app")));
+    }
+
+    #[gpui::test]
+    fn clicking_the_trigger_closes_the_editor_menu_without_reopening(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let _dir = editor_fixture();
+        cx.update(crate::workspace::bind_keys);
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::new(None, None, None, window, cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("secondary-,");
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.settings_page.editor_trigger.focus(window, cx);
+        });
+        press(cx, "enter");
+        let centre = workspace.update(cx, |workspace, _| {
+            workspace
+                .settings_page
+                .editor_trigger_bounds
+                .get()
+                .unwrap()
+                .center()
+        });
+        cx.simulate_click(centre, gpui::Modifiers::none());
+        cx.executor()
+            .advance_clock(crate::components::motion::FAST * 2);
+        cx.run_until_parked();
+        workspace.update(cx, |workspace, _| {
+            assert!(workspace.settings_page.editor_menu.is_none());
+        });
     }
 
     #[gpui::test]

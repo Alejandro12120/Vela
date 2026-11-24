@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use gpui::{App, Global};
 
 use crate::dev;
@@ -45,6 +43,10 @@ pub(crate) fn ensure(cx: &mut App) {
     }
 }
 
+pub(crate) fn dev_override(cx: &App) -> bool {
+    cx.global::<FontSize>().dev_override
+}
+
 pub(crate) fn effective(base: f32, cx: &App) -> f32 {
     cx.global::<FontSize>().override_size.unwrap_or(base)
 }
@@ -65,41 +67,13 @@ fn adjust(cx: &mut App, base: f32, delta: f32) {
     }
     cx.global_mut::<FontSize>().override_size = Some(next);
     dev::log(format!("Terminal: font size {next}"));
-    schedule_save(Some(next), cx);
 }
 
 pub(crate) fn reset(cx: &mut App, base: f32) {
     if cx.global::<FontSize>().override_size.is_some() {
         cx.global_mut::<FontSize>().override_size = None;
         dev::log(format!("Terminal: font size {base}"));
-        schedule_save(None, cx);
     }
-}
-
-/// Writes `settings.toml` after a short debounce. The retry covers a
-/// concurrent settings save; the last write wins with the newest value.
-fn schedule_save(size: Option<f32>, cx: &mut App) {
-    let Ok(dir) = dev::config_directory() else {
-        return;
-    };
-    let executor = cx.background_executor().clone();
-    let timer = executor.clone();
-    executor
-        .spawn(async move {
-            timer.timer(Duration::from_millis(500)).await;
-            loop {
-                let mut settings = vscp_core::settings::Settings::load(&dir).unwrap_or_default();
-                if settings.terminal_font_size == size {
-                    break;
-                }
-                settings.terminal_font_size = size;
-                if settings.save(&dir).is_ok() {
-                    break;
-                }
-                timer.timer(Duration::from_millis(200)).await;
-            }
-        })
-        .detach();
 }
 
 #[cfg(test)]

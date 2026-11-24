@@ -479,6 +479,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let Some(dir) = self.dir.clone() else { return };
+        self.settings = next.clone();
         if self.settings_page.busy || self.settings_page.glass_drag.is_some() {
             self.settings_page.pending_settings = Some(next);
             return;
@@ -500,10 +501,11 @@ impl Workspace {
                 }
                 match result {
                     Ok(settings) => {
-                        cx.global_mut::<Appearance>()
-                            .set_settings(settings.appearance.clone());
-                        this.settings = settings;
-                        Appearance::update_native_appearance(cx);
+                        if this.settings.appearance == settings.appearance {
+                            cx.global_mut::<Appearance>()
+                                .set_settings(settings.appearance.clone());
+                            Appearance::update_native_appearance(cx);
+                        }
                         cx.refresh_windows();
                     }
                     Err(error) => {
@@ -2245,5 +2247,52 @@ mod tests {
         assert_eq!(settings.light_theme, "oceano");
         assert_eq!(settings.dark_theme, "vscp");
         assert!(load_user_themes(dir.path()).0.is_empty());
+    }
+
+    #[gpui::test]
+    fn font_size_and_theme_changes_share_one_save(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        crate::dev::TEST_CONFIG.with(|config| *config.borrow_mut() = Some(dir.path().to_owned()));
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::new(None, None, None, window, cx));
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.activate_theme("oceano", Some(ColorVariant::Light), window, cx);
+        });
+        cx.update(|_, cx| crate::terminal::font_size::increase(cx, 11.));
+        for _ in 0..3 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(600));
+            cx.run_until_parked();
+        }
+        let saved = Settings::load(dir.path()).unwrap();
+        assert_eq!(saved.appearance.light_theme, "oceano");
+        assert_eq!(saved.terminal_font_size, Some(12.));
+    }
+
+    #[gpui::test]
+    fn font_size_and_agent_socket_changes_share_one_save(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        crate::dev::TEST_CONFIG.with(|config| *config.borrow_mut() = Some(dir.path().to_owned()));
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::new(None, None, None, window, cx));
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            let mut next = workspace.settings.clone();
+            next.agent_socket = Some(PathBuf::from("/tmp/agente-de-prueba.sock"));
+            workspace.save_settings(next, window, cx);
+        });
+        cx.update(|_, cx| crate::terminal::font_size::increase(cx, 11.));
+        for _ in 0..3 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(600));
+            cx.run_until_parked();
+        }
+        let saved = Settings::load(dir.path()).unwrap();
+        assert_eq!(
+            saved.agent_socket,
+            Some(PathBuf::from("/tmp/agente-de-prueba.sock"))
+        );
+        assert_eq!(saved.terminal_font_size, Some(12.));
     }
 }

@@ -139,6 +139,7 @@ pub struct Workspace {
     previous_focus: Option<FocusHandle>,
     prompt_task: Option<gpui::Task<()>>,
     trace_startup: Option<Instant>,
+    font_size_generation: u64,
 }
 
 /// The socket used when a server does not set its own: the global setting
@@ -179,7 +180,26 @@ impl Workspace {
             loaded.map_or_else(|| (Settings::default(), None), |loaded| loaded.install(cx));
         font_size::apply_saved(settings.terminal_font_size, cx);
         cx.observe_global::<font_size::FontSize>(|this, cx| {
-            this.settings.terminal_font_size = cx.global::<font_size::FontSize>().override_size;
+            let size = cx.global::<font_size::FontSize>().override_size;
+            if font_size::dev_override(cx) || this.settings.terminal_font_size == size {
+                cx.notify();
+                return;
+            }
+            this.settings.terminal_font_size = size;
+            this.font_size_generation = this.font_size_generation.wrapping_add(1);
+            let generation = this.font_size_generation;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(500))
+                    .await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    if this.font_size_generation != generation {
+                        return;
+                    }
+                    this.save_settings(this.settings.clone(), window, cx);
+                });
+            })
+            .detach();
             cx.notify();
         })
         .detach();
@@ -340,6 +360,7 @@ impl Workspace {
             previous_focus: None,
             prompt_task,
             trace_startup,
+            font_size_generation: 0,
         }
     }
 

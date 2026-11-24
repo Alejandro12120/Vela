@@ -35,7 +35,7 @@ const FIELDS: [(Field, &str, &str); 6] = [
     (Field::Host, "Host", "servidor.ejemplo"),
     (Field::Port, "Puerto", "22"),
     (Field::User, "Usuario", ""),
-    (Field::Socket, "Socket del agente", "El de Ajustes"),
+    (Field::Socket, "Socket del agente", ""),
     (
         Field::RemotePath,
         "Carpeta inicial",
@@ -108,34 +108,33 @@ pub struct Form {
 impl Form {
     pub fn new(
         server: Option<&Server>,
-        default_socket: &str,
+        effective_socket: Option<&Path>,
         config_dir: Option<&Path>,
         cx: &mut App,
     ) -> Self {
-        Self::build(server, false, default_socket, config_dir, cx)
+        Self::build(server, false, effective_socket, config_dir, cx)
     }
 
     /// Opens the add-server form prefilled from `server`, but with no id and a
     /// suffixed name, so saving appends an independent copy.
     pub fn duplicate(
         server: &Server,
-        default_socket: &str,
+        effective_socket: Option<&Path>,
         config_dir: Option<&Path>,
         cx: &mut App,
     ) -> Self {
-        Self::build(Some(server), true, default_socket, config_dir, cx)
+        Self::build(Some(server), true, effective_socket, config_dir, cx)
     }
 
     fn build(
         server: Option<&Server>,
         duplicate: bool,
-        default_socket: &str,
+        effective_socket: Option<&Path>,
         config_dir: Option<&Path>,
         cx: &mut App,
     ) -> Self {
         let mut values = [""; FIELDS.len()];
         values[Field::Port as usize] = "22";
-        let _ = default_socket;
         let mut port = String::new();
         let mut agent = true;
         let mut identity = Identity::None;
@@ -192,7 +191,15 @@ impl Form {
                     }
                 )
         });
+        let socket_placeholder = effective_socket
+            .map(|path| vscp_core::path::abbreviate_path(path, 40))
+            .unwrap_or_else(|| "Ningún agente detectado".to_owned());
         let inputs = FIELDS.map(|(field, label, placeholder)| {
+            let placeholder = if field == Field::Socket {
+                socket_placeholder.clone()
+            } else {
+                placeholder.to_owned()
+            };
             cx.new(|cx| TextInput::new(values[field as usize], label, placeholder, false, cx))
         });
         Self {
@@ -503,6 +510,7 @@ impl Form {
         div()
             .flex()
             .flex_col()
+            .items_start()
             .gap_2()
             .child(icon_label(IconName::Lock, "Autenticación", theme))
             .child(segmented(
@@ -1198,7 +1206,7 @@ mod tests {
 
     #[gpui::test]
     fn choosing_an_agent_row_switches_back_from_a_file(cx: &mut gpui::TestAppContext) {
-        let mut form = cx.update(|cx| Form::new(None, "", None, cx));
+        let mut form = cx.update(|cx| Form::new(None, None, None, cx));
         form.keys = Keys::Ready(vec![key("uno"), key("dos")]);
         form.pick_file(PathBuf::from("/tmp/clave.pub"));
         assert!(matches!(form.identity, Identity::File { .. }));

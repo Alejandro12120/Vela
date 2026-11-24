@@ -1582,10 +1582,12 @@ impl Workspace {
                 .items_center()
                 .justify_center()
                 .h(px(24.))
-                .min_w(px(28.))
-                .text_size(px(13.));
+                .w(px(28.))
+                .text_size(px(13.))
+                .line_height(px(24.));
             if enabled {
                 cell = cell
+                    .tab_index(0)
                     .cursor_pointer()
                     .hover(move |style| style.bg(theme.hover))
                     .focus(move |style| style.bg(theme.selection));
@@ -1616,11 +1618,18 @@ impl Workspace {
             ))
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
                     .h(px(24.))
-                    .px(px(9.))
+                    .min_w(px(52.))
+                    .px(px(8.))
                     .border_l_1()
+                    .border_r_1()
                     .border_color(theme.control_border)
-                    .child(format!("{} pt", current)),
+                    .text_size(px(13.))
+                    .line_height(px(24.))
+                    .child(format!("{current} pt")),
             )
             .child(cell(
                 "font-larger",

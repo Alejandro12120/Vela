@@ -52,7 +52,7 @@ impl TextInput {
     pub fn new(
         content: &str,
         label: &'static str,
-        placeholder: &'static str,
+        placeholder: impl Into<SharedString>,
         secure: bool,
         cx: &mut Context<Self>,
     ) -> Self {

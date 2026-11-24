@@ -905,7 +905,7 @@ impl Workspace {
             return;
         }
         let server = id.and_then(|id| self.servers.iter().find(|server| server.id == id));
-        let form = Form::new(server, &self.agent_socket, self.dir.as_deref(), cx);
+        let form = Form::new(server, self.effective_socket(), self.dir.as_deref(), cx);
         self.show_form(form, window, cx);
     }
 
@@ -917,7 +917,7 @@ impl Workspace {
         let Some(server) = self.servers.iter().find(|server| server.id == id) else {
             return;
         };
-        let form = Form::duplicate(server, &self.agent_socket, self.dir.as_deref(), cx);
+        let form = Form::duplicate(server, self.effective_socket(), self.dir.as_deref(), cx);
         self.show_form(form, window, cx);
     }
 

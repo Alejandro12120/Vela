@@ -254,10 +254,12 @@ Funciona: arrastrar entre paneles, de Finder a los paneles y de los paneles a Fi
         - Fila «Colores»: enlace «Los del tema «<nombre>»» con flecha, que lleva a Apariencia. Usa el tema de la variante visible.
         - Fila «kitty.conf»: la ruta abreviada, «Mostrar» y «Volver a leer» (con `rotate-cw`). Sin archivo: «No se encontró; se usan los valores de Kitty» y solo «Volver a leer».
 
-18. **Copiar al seleccionar en la terminal (pendiente).** Pedido por el usuario el 2026-11-24: una opción para que el texto seleccionado en la terminal integrada se copie solo al portapapeles. Irá como interruptor en Ajustes → Terminal. El valor inicial sale de `copy_on_select` de `kitty.conf`, igual que la fuente. Sin implementar.
+18. **Copiar al seleccionar en la terminal (hecho, 2026-11-24).** Pedido por el usuario el 2026-11-24: una opción para que el texto seleccionado en la terminal integrada se copie solo al portapapeles. Irá como interruptor en Ajustes → Terminal. El valor inicial sale de `copy_on_select` de `kitty.conf`, igual que la fuente.
+    - Se construyó el interruptor «Copiar al seleccionar» en Ajustes → Terminal. Su valor inicial viene de `copy_on_select` de `kitty.conf`, donde `clipboard` o `yes` lo activan y cualquier otro valor lo desactiva; se guarda como `terminal_copy_on_select` (ausente: sigue `kitty.conf`). El texto se copia al portapapeles al soltar el ratón después de una selección.
 
-19. **Pulido de F7 parte 4 (pendiente).** Detalles que el usuario anotó el 2026-11-24 al probar en el Mac, con la causa encontrada en el código:
+19. **Pulido de F7 parte 4 (hecho, 2026-11-24).** Detalles que el usuario anotó el 2026-11-24 al probar en el Mac, con la causa encontrada en el código:
     - **Control de tamaño de letra** (`− | 12 pt | +`): el texto no está centrado. Cada celda debe ser `flex`, centrada en los dos ejes y de alto completo, con anchos fijos para «−» y «+» y la misma altura de línea en las tres.
+      - Solución: las tres celdas son `flex`, centradas en los dos ejes, con anchos fijos de 28 y 52 px y `line-height` de 24 px; la celda central añade borde derecho.
     - **Desplegable «Abrir archivos remotos con»**: no funciona como un desplegable.
       - Causas:
         - Se abre en el punto del clic (`event.position()`), en coordenadas de ventana fijas. Por eso aparece en cualquier sitio, con el teclado se abre en (0, 0) y al desplazar la página se queda flotando.
@@ -270,11 +272,16 @@ Funciona: arrastrar entre paneles, de Finder a los paneles y de los paneles a Fi
         - Al abrirse, el foco va a la opción marcada; las flechas recorren las opciones y Enter elige.
         - Animación corta de aparición y desaparición (opacidad y desplazamiento de unos 4 px desde el botón) con las constantes de `motion.rs`, respetando «Reducir movimiento».
       - Debe convertirse en un componente reutilizable (`components/dropdown.rs`), tomando como referencia `context_menu.rs`, que sí funciona bien.
-    - **«Usar el de Bitwarden»**: vuelve a `agent_socket` vacío, es decir, al socket de Bitwarden detectado. En macOS se busca primero `~/Library/Containers/com.bitwarden.desktop/Data/.bitwarden-ssh-agent.sock` (versión de la App Store) y después `~/.bitwarden-ssh-agent.sock`. En Linux, `~/.bitwarden-ssh-agent.sock`, la ruta de Snap y la de Flatpak. Falta decidir si el botón debe mostrar la ruta a la que vuelve.
+      - Solución: `components/dropdown.rs` calcula la colocación (`place`), dibuja el panel y las filas, y el menú se ancla al botón con `deferred`; sigue el desplazamiento mediante dos lienzos, se cierra con Escape, clic fuera o Tab, recupera el foco del botón y recorre las opciones con flechas, Inicio y Fin, con animación corta que respeta «Reducir movimiento».
+    - **«Usar el de Bitwarden»**: vuelve a `agent_socket` vacío, es decir, al socket de Bitwarden detectado. En macOS se busca primero `~/Library/Containers/com.bitwarden.desktop/Data/.bitwarden-ssh-agent.sock` (versión de la App Store) y después `~/.bitwarden-ssh-agent.sock`. En Linux, `~/.bitwarden-ssh-agent.sock`, la ruta de Snap y la de Flatpak. Falta decidir si el botón debe mostrar la ruta a la que vuelve. Sin cambios: la decisión sigue abierta.
     - **Control «Clave SSH | Contraseña»**: ocupa todo el ancho porque la columna de la etiqueta estira a sus hijos. Debe medir lo que su contenido, como en la maqueta (`self_start` o un contenedor `items_start`).
+      - Solución: la columna de «Autenticación» lleva `items_start`, así que el control segmentado mide solo sus opciones.
     - **Contraseña rechazada**: cuando el servidor rechaza la contraseña, el diálogo vuelve a salir sin ningún aviso. Solo al agotar los intentos se cierra y aparece «autenticación rechazada». A partir del segundo aviso de `askpass` para la misma conexión y el mismo tipo de dato, el diálogo debe mostrar un error junto al campo y quizá cuántos intentos quedan, si se conocen.
       - El mensaje debe ser neutro, porque el cliente no puede saber la causa: con `PermitRootLogin prohibit-password`, `sshd` pide la contraseña igualmente y la rechaza siempre, igual que una incorrecta. El usuario lo señaló el 2026-11-24.
       - Texto: solo «El servidor rechazó la contraseña.», sin explicación debajo. El usuario lo decidió el 2026-11-24: si no se puede saber la causa, no se apunta ninguna.
+      - Solución: el diálogo cuenta los avisos de contraseña por destino y muestra ese único texto en rojo y 12 px bajo el campo desde el segundo aviso; el resultado de la conexión y una cancelación reinician el contador.
     - **Marcador del socket en Opciones avanzadas**: al usuario no le gusta «El de Ajustes». Propuesta: usar como marcador la ruta efectiva abreviada y añadir debajo una ayuda de 12 px: «Déjalo vacío para usar el agente de Ajustes.» Pendiente de confirmar con el usuario.
+      - Solución: el marcador es la ruta efectiva de Ajustes abreviada, o «Ningún agente detectado» cuando no hay socket; no se añade texto de ayuda.
+    - **Sin comprobar en macOS**: el comportamiento real del desplegable con ratón, teclado y desplazamiento, la opción «Otra aplicación…» y su selector nativo (compilado con una comprobación temporal, no ejecutado), el mensaje de contraseña rechazada contra un `sshd` real, la centración del stepper y la copia al seleccionar con entrada física. Las capturas se hicieron en Hyprland (Arch).
 
 Las respuestas también están registradas en `.agent/CONTINUITY.md`.

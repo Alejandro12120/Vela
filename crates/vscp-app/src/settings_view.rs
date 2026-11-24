@@ -3,13 +3,10 @@ mod glass_settings;
 #[path = "theme_editor.rs"]
 mod theme_editor;
 
-use std::{
-    cell::Cell,
-    collections::HashMap,
-    io,
-    path::{Path, PathBuf},
-    rc::Rc,
-};
+use std::{cell::Cell, collections::HashMap, io, path::Path, rc::Rc};
+
+#[cfg(target_os = "macos")]
+use std::path::PathBuf;
 
 use gpui::{
     Bounds, Div, ElementId, FocusHandle, FontWeight, PathPromptOptions, Pixels, ScrollHandle,

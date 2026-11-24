@@ -254,4 +254,27 @@ Funciona: arrastrar entre paneles, de Finder a los paneles y de los paneles a Fi
         - Fila «Colores»: enlace «Los del tema «<nombre>»» con flecha, que lleva a Apariencia. Usa el tema de la variante visible.
         - Fila «kitty.conf»: la ruta abreviada, «Mostrar» y «Volver a leer» (con `rotate-cw`). Sin archivo: «No se encontró; se usan los valores de Kitty» y solo «Volver a leer».
 
+18. **Copiar al seleccionar en la terminal (pendiente).** Pedido por el usuario el 2026-11-24: una opción para que el texto seleccionado en la terminal integrada se copie solo al portapapeles. Irá como interruptor en Ajustes → Terminal. El valor inicial sale de `copy_on_select` de `kitty.conf`, igual que la fuente. Sin implementar.
+
+19. **Pulido de F7 parte 4 (pendiente).** Detalles que el usuario anotó el 2026-11-24 al probar en el Mac, con la causa encontrada en el código:
+    - **Control de tamaño de letra** (`− | 12 pt | +`): el texto no está centrado. Cada celda debe ser `flex`, centrada en los dos ejes y de alto completo, con anchos fijos para «−» y «+» y la misma altura de línea en las tres.
+    - **Desplegable «Abrir archivos remotos con»**: no funciona como un desplegable.
+      - Causas:
+        - Se abre en el punto del clic (`event.position()`), en coordenadas de ventana fijas. Por eso aparece en cualquier sitio, con el teclado se abre en (0, 0) y al desplazar la página se queda flotando.
+        - Al abrirse no recibe el foco, así que Escape no le llega.
+        - No tiene `on_mouse_down_out`, así que no se cierra al pulsar fuera.
+      - Comportamiento pedido:
+        - Se abre pegado al botón: debajo si cabe y, si no, encima. Debe seguir al botón al desplazar la página.
+        - Si al desplazar ya no cabe debajo, pasa arriba. Si tampoco cabe arriba, o el botón sale de la zona visible, se cierra.
+        - Se cierra con Escape o con un clic fuera, y el foco vuelve al botón.
+        - Al abrirse, el foco va a la opción marcada; las flechas recorren las opciones y Enter elige.
+        - Animación corta de aparición y desaparición (opacidad y desplazamiento de unos 4 px desde el botón) con las constantes de `motion.rs`, respetando «Reducir movimiento».
+      - Debe convertirse en un componente reutilizable (`components/dropdown.rs`), tomando como referencia `context_menu.rs`, que sí funciona bien.
+    - **«Usar el de Bitwarden»**: vuelve a `agent_socket` vacío, es decir, al socket de Bitwarden detectado. En macOS se busca primero `~/Library/Containers/com.bitwarden.desktop/Data/.bitwarden-ssh-agent.sock` (versión de la App Store) y después `~/.bitwarden-ssh-agent.sock`. En Linux, `~/.bitwarden-ssh-agent.sock`, la ruta de Snap y la de Flatpak. Falta decidir si el botón debe mostrar la ruta a la que vuelve.
+    - **Control «Clave SSH | Contraseña»**: ocupa todo el ancho porque la columna de la etiqueta estira a sus hijos. Debe medir lo que su contenido, como en la maqueta (`self_start` o un contenedor `items_start`).
+    - **Contraseña rechazada**: cuando el servidor rechaza la contraseña, el diálogo vuelve a salir sin ningún aviso. Solo al agotar los intentos se cierra y aparece «autenticación rechazada». A partir del segundo aviso de `askpass` para la misma conexión y el mismo tipo de dato, el diálogo debe mostrar un error junto al campo y quizá cuántos intentos quedan, si se conocen.
+      - El mensaje debe ser neutro, porque el cliente no puede saber la causa: con `PermitRootLogin prohibit-password`, `sshd` pide la contraseña igualmente y la rechaza siempre, igual que una incorrecta. El usuario lo señaló el 2026-11-24.
+      - Texto: solo «El servidor rechazó la contraseña.», sin explicación debajo. El usuario lo decidió el 2026-11-24: si no se puede saber la causa, no se apunta ninguna.
+    - **Marcador del socket en Opciones avanzadas**: al usuario no le gusta «El de Ajustes». Propuesta: usar como marcador la ruta efectiva abreviada y añadir debajo una ayuda de 12 px: «Déjalo vacío para usar el agente de Ajustes.» Pendiente de confirmar con el usuario.
+
 Las respuestas también están registradas en `.agent/CONTINUITY.md`.

@@ -58,6 +58,28 @@ pub fn settings_page() -> Option<String> {
     value("VSCP_DEV_SETTINGS")
 }
 
+pub fn reduce_transparency() -> Option<bool> {
+    match value("VSCP_DEV_REDUCE_TRANSPARENCY")?.as_str() {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
+}
+
+pub fn glass() -> Option<vscp_core::appearance::Glass> {
+    use crate::components::slider::{MAX, MIN};
+    let value = value("VSCP_DEV_GLASS")?;
+    let (chrome, content) = value.split_once(',')?;
+    let (chrome, content) = (chrome.parse().ok()?, content.parse().ok()?);
+    ((MIN..=MAX).contains(&chrome) && (MIN..=MAX).contains(&content)).then_some(
+        vscp_core::appearance::Glass {
+            enabled: true,
+            chrome,
+            content,
+        },
+    )
+}
+
 pub fn logging() -> bool {
     value("VSCP_DEV_LOG").as_deref() == Some("1")
 }

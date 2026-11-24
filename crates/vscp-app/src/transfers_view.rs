@@ -725,7 +725,7 @@ impl Transfers {
                     strip
                         .border_t_1()
                         .border_color(theme.border)
-                        .bg(theme.raised)
+                        .bg(theme.content(theme.raised))
                 },
             )
             .when(!self.rows.is_empty(), |strip| {

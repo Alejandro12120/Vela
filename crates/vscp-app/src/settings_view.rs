@@ -1,15 +1,19 @@
+#[path = "glass_settings.rs"]
+mod glass_settings;
 #[path = "theme_editor.rs"]
 mod theme_editor;
 
 use std::{
+    cell::Cell,
     collections::HashMap,
     io,
     path::{Path, PathBuf},
+    rc::Rc,
 };
 
 use gpui::{
-    Div, ElementId, FocusHandle, FontWeight, PathPromptOptions, ScrollHandle, Stateful,
-    linear_color_stop, linear_gradient, prelude::*, px, rgba,
+    Bounds, Div, ElementId, FocusHandle, FontWeight, PathPromptOptions, Pixels, ScrollHandle,
+    Stateful, canvas, linear_color_stop, linear_gradient, point, prelude::*, px, rgba,
 };
 use vscp_core::{
     appearance::{
@@ -35,6 +39,7 @@ pub(super) struct SettingsPage {
     busy: bool,
     theme_error: Option<String>,
     editor: Option<theme_editor::ThemeEditor>,
+    glass_drag: Option<glass_settings::GlassDrag>,
 }
 
 impl SettingsPage {
@@ -48,6 +53,7 @@ impl SettingsPage {
             busy: false,
             theme_error: None,
             editor: None,
+            glass_drag: None,
         }
     }
 
@@ -82,6 +88,7 @@ impl Workspace {
     }
 
     pub(super) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_glass_drag(window, cx);
         self.close_theme_editor(window, cx);
         if let Some(previous) = self.settings_page.previous_focus.take() {
             previous.focus(window, cx);
@@ -192,7 +199,7 @@ impl Workspace {
 
     fn save_settings(&mut self, next: Settings, window: &Window, cx: &mut Context<Self>) {
         let Some(dir) = self.dir.clone() else { return };
-        if self.settings_page.busy {
+        if self.settings_page.busy || self.settings_page.glass_drag.is_some() {
             return;
         }
         self.settings_page.busy = true;
@@ -206,6 +213,10 @@ impl Workspace {
             let result = save.await;
             let _ = this.update_in(cx, |this, _, cx| {
                 this.settings_page.busy = false;
+                let glass_changed = cx.global_mut::<Appearance>().glass_preview.take().is_some();
+                if glass_changed {
+                    cx.refresh_windows();
+                }
                 match result {
                     Ok(settings) => {
                         cx.global_mut::<Appearance>()
@@ -248,7 +259,7 @@ impl Workspace {
         on_success: impl FnOnce(&mut Self, R, &mut Window, &mut Context<Self>) + 'static,
     ) {
         let Some(dir) = self.dir.clone() else { return };
-        if self.settings_page.busy {
+        if self.settings_page.busy || self.settings_page.glass_drag.is_some() {
             return;
         }
         self.settings_page.busy = true;
@@ -495,6 +506,9 @@ impl Workspace {
                     .h(px(52.))
                     .flex_none()
                     .px_4()
+                    .when(theme.glassy, |header| {
+                        header.bg(theme.chrome(theme.background))
+                    })
                     .border_b_1()
                     .border_color(theme.border)
                     .child(
@@ -535,14 +549,11 @@ impl Workspace {
                     .items_center()
                     .overflow_y_scroll()
                     .track_scroll(&self.settings_page.scroll)
+                    .when(theme.glassy, |scroll| {
+                        scroll.bg(theme.chrome(theme.background))
+                    })
                     .child(appearance_section)
-                    .child(
-                        section("Interfaz").child(
-                            div()
-                                .text_color(theme.secondary_text)
-                                .child("Vidrio esmerilado: próximamente."),
-                        ),
-                    )
+                    .child(self.render_interface(theme, cx))
                     .child(self.editor_section(theme, cx))
                     .child(self.terminal_section(theme, cx).pb_6()),
             )
@@ -625,7 +636,15 @@ impl Workspace {
         let edit = def.id.clone();
         let focus = self.settings_page.themes[&def.id].clone();
         let key_focus = focus.clone();
+        let bounds = Rc::new(Cell::new(None));
+        let layout = bounds.clone();
         card(&focus, &focus, theme)
+            .relative()
+            .child(
+                canvas(move |rect, _, _| layout.set(Some(rect)), |_, _, _, _| {})
+                    .absolute()
+                    .inset_0(),
+            )
             .aria_label(def.name.clone())
             .aria_selected(active)
             .justify_between()
@@ -726,6 +745,11 @@ impl Workspace {
                         arrow_target(index, columns, themes.len(), &event.keystroke.key)
                     {
                         this.settings_page.themes[&themes[next].id].focus(window, cx);
+                        if let Some(rect) = bounds.get() {
+                            let rows = (next / columns) as f32 - (index / columns) as f32;
+                            reveal_theme_card(&this.settings_page.scroll, rect, rows);
+                            cx.notify();
+                        }
                         cx.stop_propagation();
                     }
                 }),
@@ -823,6 +847,22 @@ impl Workspace {
     }
 }
 
+fn reveal_theme_card(scroll: &ScrollHandle, rect: Bounds<Pixels>, rows: f32) {
+    let viewport = scroll.bounds();
+    let distance = rows * (rect.size.height + px(12.));
+    let top = rect.top() + distance;
+    let bottom = rect.bottom() + distance;
+    let shift = if top < viewport.top() {
+        viewport.top() - top
+    } else if bottom > viewport.bottom() {
+        viewport.bottom() - bottom
+    } else {
+        return;
+    };
+    let offset = scroll.offset();
+    scroll.set_offset(point(offset.x, (offset.y + shift).min(px(0.))));
+}
+
 fn names_match(a: &str, b: &str) -> bool {
     a.to_lowercase() == b.to_lowercase()
 }
@@ -876,7 +916,7 @@ fn card(id: impl Into<ElementId>, focus: &FocusHandle, theme: Theme) -> Stateful
         .rounded(px(12.))
         .border_1()
         .border_color(theme.border)
-        .bg(theme.panel)
+        .bg(theme.content(theme.panel))
         .focus(move |style| style.border_color(theme.accent).bg(theme.hover))
         .hover(move |style| style.bg(theme.hover))
         .cursor_pointer()
@@ -1044,4 +1084,60 @@ fn is_application(path: &Path) -> bool {
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("app"))
         && path.join("Contents/Info.plist").is_file()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[gpui::test]
+    fn keyboard_selects_appearance_cards_and_restores_focus(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        crate::dev::TEST_CONFIG.with(|config| *config.borrow_mut() = Some(dir.path().to_owned()));
+        cx.update(crate::workspace::bind_keys);
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::new(None, None, None, window, cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("secondary-,");
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(workspace.settings_open());
+            workspace.settings_page.schemes[0].focus(window, cx);
+        });
+        cx.simulate_keystrokes("right");
+        workspace.update_in(cx, |workspace, window, _| {
+            assert!(workspace.settings_page.schemes[1].is_focused(window));
+        });
+        cx.simulate_keystrokes("enter");
+        cx.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse("enter").unwrap(),
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            Settings::load(dir.path()).unwrap().appearance.scheme,
+            Scheme::Light
+        );
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.settings_page.themes["vscp"].focus(window, cx);
+        });
+        cx.simulate_keystrokes("right");
+        workspace.update_in(cx, |workspace, window, _| {
+            assert!(workspace.settings_page.themes["frambuesa"].is_focused(window));
+        });
+        cx.simulate_keystrokes("space");
+        cx.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse("space").unwrap(),
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            Settings::load(dir.path()).unwrap().appearance.theme,
+            "frambuesa"
+        );
+        cx.simulate_keystrokes("escape");
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(!workspace.settings_open());
+            assert_eq!(window.focused(cx), Some(workspace.focus_handle()));
+        });
+    }
 }

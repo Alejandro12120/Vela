@@ -191,19 +191,7 @@ impl Workspace {
                         + groups_before_terminal
                         + TOKENS.iter().take_while(|token| !token.terminal()).count();
                     editor.advanced = true;
-                    editor.scroll.scroll_to_top_of_item(index);
-                    cx.on_next_frame(window, |_, window, cx| {
-                        cx.on_next_frame(window, |this, _, cx| {
-                            if let Some(editor) = &this.settings_page.editor {
-                                let offset = editor.scroll.offset();
-                                editor
-                                    .scroll
-                                    .set_offset(point(offset.x, (offset.y + px(24.)).min(px(0.))));
-                                cx.notify();
-                            }
-                        });
-                        cx.notify();
-                    });
+                    editor.scroll.scroll_to_top_of_item(index.saturating_sub(3));
                     cx.notify();
                 }
             }

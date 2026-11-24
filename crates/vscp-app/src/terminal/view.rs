@@ -625,6 +625,7 @@ impl Render for TerminalView {
                         .flex()
                         .items_center()
                         .gap_2()
+                        .when(theme.glassy, |status| status.bg(theme.content(theme.panel)))
                         .border_t_1()
                         .border_color(theme.border)
                         .text_color(theme.secondary_text)
@@ -811,6 +812,55 @@ mod tests {
         (host, terminal, sink, cx)
     }
 
+    #[gpui::test]
+    fn changing_theme_updates_a_running_pty_palette(cx: &mut TestAppContext) {
+        let (_, terminal, _, cx) = open(cx);
+        let grid = terminal.update(cx, |view, _| {
+            let child = Terminal::spawn("/bin/cat", Vec::new(), &view.settings, GridSize::INITIAL)
+                .expect("start an isolated PTY");
+            let grid = child.grid.clone();
+            view.terminal = Some(child);
+            grid
+        });
+
+        cx.update(|_, cx| {
+            let mut appearance = crate::appearance::Appearance::default();
+            appearance.set_settings(vscp_core::appearance::AppearanceSettings {
+                scheme: vscp_core::appearance::Scheme::Dark,
+                theme: "bosque".into(),
+                ..Default::default()
+            });
+            cx.set_global(appearance);
+            cx.refresh_windows();
+        });
+        cx.run_until_parked();
+
+        terminal.read_with(cx, |view, _| {
+            let child = view.terminal.as_ref().unwrap();
+            assert!(Arc::ptr_eq(&child.grid, &grid));
+            assert!(!child.ended());
+            assert_eq!(view.palette.background, 0x171f1b);
+            assert_eq!(
+                child.listener.io.lock().unwrap().palette.background,
+                0x171f1b
+            );
+        });
+
+        terminal.update_in(cx, |view, window, cx| {
+            let mut kitty = view.settings().clone();
+            kitty.palette.set("color1", "#113355");
+            view.reload(kitty, window, cx);
+            // A standalone view normally refreshes when selected. In Workspace the
+            // existing selected terminal is notified by its window on palette change.
+            cx.notify();
+        });
+        cx.run_until_parked();
+        terminal.read_with(cx, |view, _| {
+            assert!(Arc::ptr_eq(&view.terminal.as_ref().unwrap().grid, &grid));
+            assert_eq!(view.palette.ansi[1], 0x113355);
+            assert_eq!(view.palette.background, 0x171f1b);
+        });
+    }
     #[gpui::test]
     fn keyboard_routes_control_text_and_workspace_shortcuts(cx: &mut TestAppContext) {
         let (host, _, sink, cx) = open(cx);

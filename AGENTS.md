@@ -79,6 +79,8 @@ Use an isolated configuration directory for development runs. The `dev` Cargo fe
 - `VSCP_DEV_FORM=new` opens the new-server form at startup. `VSCP_DEV_FORM=edit:<display name>` opens the edit form of that server. `VSCP_DEV_FORM=duplicate:<display name>` opens the add-server form prefilled from that server with ` duplicate` appended to its name.
 - `VSCP_DEV_ROW_MENU=<display name>` selects that server and opens its floating right-click menu at the centre of its row.
 - `VSCP_DEV_DRAG=<display name>:<dy>` shows that server's card dragged `dy` px from its slot, with the other cards making room, and holds it there for visual checks.
+- `VSCP_DEV_GLASS=<chrome>,<content>` enables frosted glass for the run with opacity percentages from 30 to 100, for example `70,92`. The override stays out of settings.toml.
+- `VSCP_DEV_REDUCE_TRANSPARENCY=1|0` overrides the system “Reduce Transparency” setting. When enabled, the app uses an opaque window and disables the glass sliders.
 - `VSCP_DEV_REDUCE_MOTION=1|0` overrides the system "reduce motion" setting. Animations render their end state when it is on.
 - Server forms list the keys of the agent socket in their Socket field, or else the first Bitwarden socket under `$HOME`. To check the picker without the real Bitwarden, set `HOME` to a temporary directory holding a `.bitwarden-ssh-agent.sock` symlink to the fixture agent, or a stale socket for the unavailable state.
 - With a custom `VSCP_CONFIG_DIR`, remote edits use its `edit-cache/` directory.

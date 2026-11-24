@@ -197,7 +197,7 @@ impl Panes {
             div()
                 .size_full()
                 .flex()
-                .bg(theme.panel)
+                .when(!theme.glassy, |body| body.bg(theme.panel))
                 .child(self.local.clone())
                 .child(div().w(px(1.)).flex_none().bg(theme.border))
                 .child(self.remote.clone())
@@ -206,7 +206,7 @@ impl Panes {
             div()
                 .size_full()
                 .flex()
-                .bg(theme.panel)
+                .when(!theme.glassy, |body| body.bg(theme.panel))
                 .children(self.terminal.clone())
         };
         let (current, previous) = match self.view {
@@ -302,13 +302,14 @@ impl Panes {
             .flex_1()
             .flex()
             .flex_col()
-            .bg(theme.panel)
+            .when(!theme.glassy, |session| session.bg(theme.panel))
             .child(
                 div()
                     .flex_none()
                     .flex()
                     .gap_1()
                     .px_2()
+                    .when(theme.glassy, |header| header.bg(theme.chrome(theme.panel)))
                     .border_b_1()
                     .border_color(theme.border)
                     .when(compact, |header| header.flex_col().gap_0())

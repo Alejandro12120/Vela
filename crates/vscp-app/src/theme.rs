@@ -1,5 +1,5 @@
 use gpui::{App, Rgba, Window, rgba};
-use vscp_core::appearance::{Colors, TerminalColors, VSCP_DARK, VSCP_LIGHT};
+use vscp_core::appearance::{Colors, Glass, TerminalColors, VSCP_DARK, VSCP_LIGHT};
 
 use crate::appearance::{Appearance, Variant, system_variant};
 
@@ -28,6 +28,9 @@ pub struct Theme {
     pub danger: Rgba,
     pub danger_bg: Rgba,
     pub terminal: TerminalColors,
+    pub glassy: bool,
+    chrome_opacity: f32,
+    content_opacity: f32,
 }
 
 impl Theme {
@@ -55,7 +58,27 @@ impl Theme {
             danger: rgba(colors.danger),
             danger_bg: rgba(colors.danger_bg),
             terminal: colors.terminal,
+            glassy: false,
+            chrome_opacity: 1.,
+            content_opacity: 1.,
         }
+    }
+
+    pub fn with_glass(mut self, glass: Glass) -> Self {
+        if glass.enabled {
+            self.glassy = true;
+            self.chrome_opacity = f32::from(glass.chrome) / 100.;
+            self.content_opacity = f32::from(glass.content) / 100.;
+        }
+        self
+    }
+
+    pub fn chrome(self, color: Rgba) -> Rgba {
+        color.opacity(self.chrome_opacity)
+    }
+
+    pub fn content(self, color: Rgba) -> Rgba {
+        color.opacity(self.content_opacity)
     }
 
     pub fn current(window: &Window, cx: &App) -> Self {

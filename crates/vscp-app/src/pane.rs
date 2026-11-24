@@ -1166,12 +1166,16 @@ impl Render for Pane {
                     this.list_focus.focus(window, cx);
                 }
             }))
-            .child(self.external_drop_zone(
-                self.toolbar(theme, cx).id("pane-toolbar"),
-                None,
-                theme,
-                cx,
-            ))
+            .child(
+                self.external_drop_zone(
+                    self.toolbar(theme, cx)
+                        .id("pane-toolbar")
+                        .when(theme.glassy, |header| header.bg(theme.chrome(theme.panel))),
+                    None,
+                    theme,
+                    cx,
+                ),
+            )
             .when_some(self.path_error.clone(), |pane, error| {
                 pane.child(motion::appear(
                     div()
@@ -1273,6 +1277,7 @@ impl Render for Pane {
                                 this.open_folder(index, window, cx);
                             }
                         }))
+                        .when(theme.glassy, |list| list.bg(theme.content(theme.panel)))
                         .child(list)
                         .on_drag_move(cx.listener(Self::drag_move))
                         .on_drop(cx.listener(Self::drop_files))
@@ -1322,6 +1327,7 @@ impl Render for Pane {
                     .items_center()
                     .gap_2()
                     .px_2()
+                    .when(theme.glassy, |footer| footer.bg(theme.content(theme.panel)))
                     .border_t_1()
                     .border_color(if active { theme.accent } else { theme.border })
                     .text_size(px(12.))
@@ -1412,7 +1418,7 @@ impl Columns {
 
     fn header(self, theme: Theme) -> Div {
         row_layout()
-            .bg(theme.sidebar)
+            .bg(theme.content(theme.sidebar))
             .border_b_1()
             .border_color(theme.border)
             .flex_none()

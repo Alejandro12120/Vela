@@ -1,8 +1,10 @@
 use std::path::Path;
 
-use gpui::{App, Global, Window, WindowAppearance};
+use gpui::{App, Global, Window, WindowAppearance, WindowBackgroundAppearance};
 use vscp_core::{
-    appearance::{AppearanceSettings, Colors, Scheme, ThemeDef, builtin_themes, load_user_themes},
+    appearance::{
+        AppearanceSettings, Colors, Glass, Scheme, ThemeDef, builtin_themes, load_user_themes,
+    },
     settings::Settings,
 };
 
@@ -28,6 +30,9 @@ pub struct Appearance {
     pub themes: Vec<ThemeDef>,
     pub errors: Vec<String>,
     pub preview: Option<(ThemeDef, Variant)>,
+    pub reduce_transparency: bool,
+    pub dev_glass: Option<Glass>,
+    pub glass_preview: Option<Glass>,
     dev_appearance: Option<WindowAppearance>,
     dev_theme: Option<String>,
     builtin_count: usize,
@@ -48,6 +53,9 @@ impl Default for Appearance {
             themes,
             errors: Vec::new(),
             preview: None,
+            reduce_transparency: crate::accessibility::reduce_transparency(),
+            dev_glass: dev::glass(),
+            glass_preview: None,
             dev_appearance: dev::appearance(),
             dev_theme: dev::theme_id(),
         };
@@ -124,11 +132,51 @@ impl Appearance {
             (Theme::from_colors(light), Theme::from_colors(dark));
     }
 
+    pub fn glass(&self) -> Glass {
+        let mut glass = self
+            .glass_preview
+            .or(self.dev_glass)
+            .unwrap_or(self.settings.glass);
+        use crate::components::slider::{MAX, MIN};
+        glass.chrome = glass.chrome.clamp(MIN, MAX);
+        glass.content = glass.content.clamp(MIN, MAX);
+        glass
+    }
+
+    pub fn initial_window_background(&self, loaded: Option<&Loaded>) -> WindowBackgroundAppearance {
+        let glass = self
+            .dev_glass
+            .or_else(|| {
+                loaded?
+                    .settings
+                    .as_ref()
+                    .ok()
+                    .map(|settings| settings.appearance.glass)
+            })
+            .unwrap_or_default();
+        self.background_appearance(glass)
+    }
+
+    pub fn window_background(&self) -> WindowBackgroundAppearance {
+        self.background_appearance(self.glass())
+    }
+
+    fn background_appearance(&self, glass: Glass) -> WindowBackgroundAppearance {
+        if glass.enabled && !self.reduce_transparency {
+            WindowBackgroundAppearance::Blurred
+        } else {
+            WindowBackgroundAppearance::Opaque
+        }
+    }
+
     pub fn current_theme(&self, window: &Window) -> Theme {
+        let mut glass = self.glass();
+        glass.enabled &= !self.reduce_transparency;
         match self.variant_for(window) {
             Variant::Light => self.render_light,
             Variant::Dark => self.render_dark,
         }
+        .with_glass(glass)
     }
 }
 

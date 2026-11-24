@@ -1,4 +1,4 @@
-//! The system's "reduce motion" setting. GPUI does not read it by itself.
+//! System accessibility preferences used by the app.
 
 use crate::dev;
 
@@ -18,5 +18,22 @@ fn system_reduce_motion() -> bool {
 
 #[cfg(not(target_os = "macos"))]
 fn system_reduce_motion() -> bool {
+    false
+}
+
+/// Whether the platform asks applications to use opaque surfaces.
+pub fn reduce_transparency() -> bool {
+    dev::reduce_transparency().unwrap_or_else(system_reduce_transparency)
+}
+
+#[cfg(target_os = "macos")]
+fn system_reduce_transparency() -> bool {
+    let workspace = objc2_app_kit::NSWorkspace::sharedWorkspace();
+    // SAFETY: this documented NSWorkspace property returns a BOOL.
+    unsafe { objc2::msg_send![&*workspace, accessibilityDisplayShouldReduceTransparency] }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn system_reduce_transparency() -> bool {
     false
 }

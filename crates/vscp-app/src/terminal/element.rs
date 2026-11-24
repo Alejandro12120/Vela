@@ -121,6 +121,7 @@ struct Run {
 
 #[derive(Default)]
 pub(super) struct Frame {
+    default_background: u32,
     backgrounds: Vec<(u32, Bounds<Pixels>)>,
     runs: Vec<Run>,
     cursor: Option<(CursorShape, u32, Bounds<Pixels>)>,
@@ -160,6 +161,7 @@ impl Element for Surface {
         window: &mut Window,
         cx: &mut App,
     ) -> Frame {
+        let glassy = crate::theme::Theme::current(window, cx).glassy;
         self.0.update(cx, |view, cx| {
             let geometry = Geometry::new(bounds, view, window);
             view.geometry = Some(geometry);
@@ -168,7 +170,7 @@ impl Element for Surface {
             let mut frame = Frame::default();
             let palette = &view.palette;
             let Some(terminal) = view.terminal.as_mut() else {
-                frame.backgrounds.push((palette.background, bounds));
+                frame.default_background = palette.background;
                 return frame;
             };
             terminal.resize(geometry.size);
@@ -178,7 +180,7 @@ impl Element for Surface {
                 alacritty_terminal::vte::ansi::Color::Named(NamedColor::Background),
                 content.colors,
             );
-            frame.backgrounds.push((background, bounds));
+            frame.default_background = background;
             let cursor = content.cursor.point;
             let focus = view.focus.is_focused(window) && window.is_window_active();
             let shape = if content.cursor.shape == CursorShape::Hidden || terminal.ended() {
@@ -188,7 +190,7 @@ impl Element for Surface {
             } else {
                 CursorShape::HollowBlock
             };
-            let mut background_run: Option<(u32, usize, i32, usize)> = None;
+            let mut background_run: Option<(Option<u32>, usize, i32, usize)> = None;
 
             for cell in content.display_iter {
                 let row = cell.point.line.0 + content.display_offset as i32;
@@ -204,8 +206,13 @@ impl Element for Surface {
                 };
                 let mut fg = palette.color(cell.cell.fg, content.colors);
                 let mut bg = palette.color(cell.cell.bg, content.colors);
+                let mut explicit = !matches!(
+                    cell.cell.bg,
+                    alacritty_terminal::vte::ansi::Color::Named(NamedColor::Background)
+                );
                 if flags.contains(Flags::INVERSE) {
                     std::mem::swap(&mut fg, &mut bg);
+                    explicit = true;
                 }
                 if flags.contains(Flags::DIM) {
                     fg = dim(fg, bg);
@@ -215,6 +222,7 @@ impl Element for Surface {
                         || (columns == 2
                             && selection.contains(CellPoint::new(cell.point.line, Column(col + 1))))
                 }) {
+                    explicit = true;
                     (fg, bg) = (
                         palette.selection_foreground.unwrap_or(
                             if palette.selection_background.is_none() {
@@ -238,11 +246,13 @@ impl Element for Surface {
                             .cursor_text
                             .filter(|_| palette.cursor.is_some())
                             .unwrap_or(bg);
+                        explicit = true;
                         bg = cursor_color;
                     } else {
                         frame.cursor = Some((shape, cursor_color, rect));
                     }
                 }
+                let bg = (bg != background || (glassy && explicit)).then_some(bg);
                 match &mut background_run {
                     Some((color, start, line, count))
                         if *color == bg && *line == row && *start + *count == col =>
@@ -250,9 +260,8 @@ impl Element for Surface {
                         *count += columns
                     }
                     _ => {
-                        if let Some((color, start, line, count)) =
+                        if let Some((Some(color), start, line, count)) =
                             background_run.replace((bg, col, row, columns))
-                            && color != background
                         {
                             frame
                                 .backgrounds
@@ -303,9 +312,7 @@ impl Element for Surface {
                     });
                 }
             }
-            if let Some((color, col, row, columns)) = background_run
-                && color != background
-            {
+            if let Some((Some(color), col, row, columns)) = background_run {
                 frame
                     .backgrounds
                     .push((color, geometry.rect(col, row, columns)));
@@ -341,7 +348,9 @@ impl Element for Surface {
             .zip(view.marked.as_ref())
             .map(|(rect, marked)| (rect, marked.text.replace(['\n', '\r'], " "), view.palette));
         window.handle_input(&focus, ElementInputHandler::new(bounds, self.0.clone()), cx);
+        let theme = crate::theme::Theme::current(window, cx);
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            window.paint_quad(fill(bounds, theme.content(rgb(frame.default_background))));
             for &(color, rect) in &frame.backgrounds {
                 window.paint_quad(fill(rect, rgb(color)));
             }

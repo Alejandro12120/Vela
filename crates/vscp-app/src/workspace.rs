@@ -21,7 +21,7 @@ use std::{
 
 use gpui::{
     AnyElement, AppContext, Context, Entity, FocusHandle, Focusable, FontWeight, KeyBinding,
-    PathPromptOptions, Render, Window, actions, div, prelude::*, px,
+    PathPromptOptions, Render, Window, WindowBackgroundAppearance, actions, div, prelude::*, px,
 };
 use vscp_core::{
     Auth, Client, Error, Session,
@@ -120,6 +120,7 @@ pub struct Workspace {
     kitty_settings: Option<Kitty>,
     settings_error: Option<String>,
     settings_page: settings_view::SettingsPage,
+    window_background: Option<WindowBackgroundAppearance>,
     loading: bool,
     sidebar_visible: Rc<Cell<bool>>,
     pane_memory: HashMap<String, PaneMemory>,
@@ -254,6 +255,11 @@ impl Workspace {
         cx.observe_window_activation(window, |_, window, cx| {
             if window.is_window_active() {
                 cx.set_reduce_motion(crate::accessibility::reduce_motion());
+                let reduced = crate::accessibility::reduce_transparency();
+                if reduced != cx.global::<Appearance>().reduce_transparency {
+                    cx.global_mut::<Appearance>().reduce_transparency = reduced;
+                    cx.refresh_windows();
+                }
             }
         })
         .detach();
@@ -284,6 +290,7 @@ impl Workspace {
             kitty_settings: None,
             settings_error,
             settings_page: settings_view::SettingsPage::new(cx),
+            window_background: None,
             loading: true,
             sidebar_visible: Rc::new(Cell::new(true)),
             pane_memory: HashMap::new(),
@@ -1292,17 +1299,10 @@ impl Workspace {
                         on_click,
                     )
                 } else if matches!(dialog, Dialog::DeleteTheme(_)) {
-                    button(
-                        "confirm",
-                        label,
-                        Variant::Primary,
-                        Theme {
-                            primary: theme.danger,
-                            primary_hover: theme.danger,
-                            ..theme
-                        },
-                        on_click,
-                    )
+                    let mut danger = theme;
+                    danger.primary = theme.danger;
+                    danger.primary_hover = theme.danger;
+                    button("confirm", label, Variant::Primary, danger, on_click)
                 } else {
                     button("confirm", label, Variant::Primary, theme, on_click)
                 }
@@ -1395,7 +1395,11 @@ impl Workspace {
             .min_w_0()
             .min_h_0()
             .overflow_y_scroll()
-            .bg(theme.panel)
+            .bg(if theme.glassy {
+                theme.chrome(theme.background)
+            } else {
+                theme.panel
+            })
             .p_6()
             .when(!self.sidebar_visible.get(), |panel| {
                 panel.child(self.sidebar_button(theme, cx))
@@ -1614,6 +1618,11 @@ impl Render for Workspace {
                 );
             });
         }
+        let background = cx.global::<Appearance>().window_background();
+        if self.window_background != Some(background) {
+            window.set_background_appearance(background);
+            self.window_background = Some(background);
+        }
         let theme = Theme::current(window, cx);
         if self.reorder.as_ref().is_some_and(|reorder| !reorder.held) && !cx.has_active_drag() {
             // The drag ended without a drop over the list.
@@ -1704,13 +1713,21 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|this, _: &modal::Cancel, window, cx| this.cancel_dialog(window, cx)),
             )
-            .bg(theme.background)
+            // Each zone paints its own backdrop in glass mode. A full-window
+            // base here would increase the effective opacity under every zone.
+            .when(!theme.glassy, |root| root.bg(theme.background))
             .font_family(".SystemUIFont")
             .text_size(px(13.))
             .line_height(px(18.))
             .text_color(theme.text)
             .when(self.quitting, |root| {
-                root.child(div().p_4().child("Cerrando conexiones…"))
+                root.child(
+                    div()
+                        .flex_1()
+                        .p_4()
+                        .bg(theme.chrome(theme.background))
+                        .child("Cerrando conexiones…"),
+                )
             })
             .when(!self.quitting, |root| {
                 root.child(sidebar::render(self, theme, cx))

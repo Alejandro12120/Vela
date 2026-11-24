@@ -25,8 +25,8 @@ mod workspace;
 use std::time::Instant;
 
 use gpui::{
-    App, AppContext, Bounds, Menu, MenuItem, QuitMode, TitlebarOptions, WindowBackgroundAppearance,
-    WindowBounds, WindowKind, WindowOptions, actions, px, size,
+    App, AppContext, Bounds, Menu, MenuItem, QuitMode, TitlebarOptions, WindowBounds, WindowKind,
+    WindowOptions, actions, px, size,
 };
 
 use workspace::Workspace;
@@ -75,6 +75,9 @@ fn main() {
             cx.spawn(async move |cx| {
                 let loaded = loading.await;
                 cx.update(move |cx| {
+                    let background = cx
+                        .global::<appearance::Appearance>()
+                        .initial_window_background(loaded.as_ref());
                     let window = cx
                         .open_window(
                             WindowOptions {
@@ -93,7 +96,7 @@ fn main() {
                                     ..Default::default()
                                 }),
                                 window_min_size: Some(size(px(640.0), px(420.0))),
-                                window_background: WindowBackgroundAppearance::Opaque,
+                                window_background: background,
                                 app_id: Some("vscp".into()),
                                 ..Default::default()
                             },

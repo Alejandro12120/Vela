@@ -303,7 +303,7 @@ fn body(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -> Div {
         .min_h_0()
         .border_r_1()
         .border_color(theme.border)
-        .bg(theme.sidebar)
+        .bg(theme.chrome(theme.sidebar))
         .p_3()
         .gap_2()
         .child(heading);

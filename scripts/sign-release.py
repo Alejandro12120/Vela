@@ -314,11 +314,16 @@ def main() -> int:
         ssh_key_pem, ssh_pub_line = build_openssh_ed25519_keys(raw_seed, raw_pub)
         write_secret_file(ssh_key_path, ssh_key_pem)
         ssh_pub_path.write_text(ssh_pub_line + "\n", encoding="ascii")
-        derived_ssh_pub = run_cmd(["ssh-keygen", "-y", "-f", str(ssh_key_path)]).decode(
-            "ascii"
-        ).strip()
+        derived_ssh_pub = " ".join(
+            run_cmd(["ssh-keygen", "-y", "-f", str(ssh_key_path)])
+            .decode("ascii")
+            .split()[:2]
+        )
         if derived_ssh_pub != ssh_pub_line:
-            sys.exit("Derived OpenSSH public key does not match OpenSSL Ed25519 key")
+            sys.exit(
+                f"Derived OpenSSH public key ({derived_ssh_pub}) "
+                f"does not match OpenSSL Ed25519 key ({ssh_pub_line})"
+            )
         allowed_signers.write_text(
             f"{SSHSIG_IDENTITY} {ssh_pub_line}\n", encoding="ascii"
         )

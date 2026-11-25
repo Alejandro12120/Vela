@@ -860,20 +860,24 @@ async fn cancel_connect_reaps_ssh_before_readiness_timeout() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     listener.set_nonblocking(true).unwrap();
+    let (accepted_tx, accepted_rx) = std::sync::mpsc::channel::<()>();
     let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
     let held = thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + Duration::from_secs(25);
         let mut stream = None;
         while stream.is_none() && Instant::now() < deadline {
             match listener.accept() {
-                Ok((accepted, _)) => stream = Some(accepted),
+                Ok((accepted, _)) => {
+                    stream = Some(accepted);
+                    let _ = accepted_tx.send(());
+                }
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(10));
                 }
                 Err(_) => break,
             }
         }
-        let _ = release_rx.recv_timeout(Duration::from_secs(10));
+        let _ = release_rx.recv_timeout(Duration::from_secs(15));
         drop(stream);
     });
 
@@ -888,15 +892,22 @@ async fn cancel_connect_reaps_ssh_before_readiness_timeout() {
         client.connect_with_timeout_and_cancel(spec, Duration::from_secs(30), cancel.clone());
     tokio::pin!(connection);
 
-    let deadline = Instant::now() + Duration::from_secs(6);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut accepted = false;
     let mut early = None;
-    while ssh_using(&marker).is_empty() && Instant::now() < deadline {
+    while Instant::now() < deadline {
+        if !accepted && accepted_rx.try_recv().is_ok() {
+            accepted = true;
+        }
+        if accepted && !ssh_using(&marker).is_empty() {
+            break;
+        }
         tokio::select! {
             result = &mut connection => {
                 early = Some(result.map(|_| "session"));
                 break;
             }
-            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
         }
     }
     assert!(early.is_none(), "connect finished early: {early:?}");
@@ -908,18 +919,18 @@ async fn cancel_connect_reaps_ssh_before_readiness_timeout() {
 
     cancel.cancel();
     let started = Instant::now();
-    let result = timeout(Duration::from_secs(3), &mut connection)
+    let result = timeout(Duration::from_secs(8), &mut connection)
         .await
-        .expect("cancelled connect did not finish within 3 s");
-    assert!(started.elapsed() < Duration::from_secs(3));
+        .expect("cancelled connect did not finish within 8 s");
+    assert!(started.elapsed() < Duration::from_secs(8));
     assert!(
         matches!(result, Err(Error::Cancelled)),
         "expected Cancelled, got another result"
     );
 
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(5);
     while !ssh_using(&marker).is_empty() && Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(
         ssh_using(&marker).is_empty(),

@@ -2222,6 +2222,7 @@ impl Render for Workspace {
                 .flex()
                 .flex_1()
                 .min_h_0()
+                .when(!theme.glassy, |page| page.bg(theme.background))
                 .child(self.render_settings(theme, window, cx));
             let panel = if self.settings_page.is_opening() {
                 page.occlude()
@@ -2252,9 +2253,9 @@ impl Render for Workspace {
                     div()
                         .absolute()
                         .inset_0()
+                        .overflow_hidden()
                         .flex()
                         .flex_col()
-                        .when(!theme.glassy, |layer| layer.bg(theme.background))
                         .child(panel),
                 )
                 .into_any_element()
@@ -2266,44 +2267,54 @@ impl Render for Workspace {
             let connected = self.selected.as_ref().is_some_and(|id| {
                 matches!(self.connections.get(id), Some(Connection::Connected { .. }))
             });
-            let content_color = if theme.glassy && !connected {
+            let same_background = theme.glassy && !connected;
+            let content_color = if same_background {
                 theme.background
             } else {
                 theme.panel
             };
-            let mut strip = div()
-                .relative()
-                .h(titlebar_height)
-                .flex_none()
-                .bg(theme.chrome(content_color));
-            if settings_visible {
-                let strip_page = div()
-                    .absolute()
-                    .inset_0()
-                    .bg(theme.chrome(theme.background));
-                let overlay = if (settings_open && !settings_animating) || cx.reduce_motion() {
-                    strip_page.opacity(1.).into_any_element()
-                } else if self.settings_page.is_opening() {
-                    strip_page
-                        .with_animation(
-                            ("titlebar-settings-open", generation),
-                            Animation::new(motion::BASE).with_easing(ease_out_quint()),
-                            |overlay, t| overlay.opacity(t),
-                        )
-                        .into_any_element()
-                } else if self.settings_page.is_closing() {
-                    strip_page
-                        .with_animation(
-                            ("titlebar-settings-close", generation),
-                            Animation::new(motion::FAST).with_easing(ease_out_quint()),
-                            |overlay, t| overlay.opacity(1. - t),
-                        )
-                        .into_any_element()
-                } else {
-                    strip_page.into_any_element()
-                };
-                strip = strip.child(overlay);
-            }
+            let strip = if !settings_visible {
+                div()
+                    .h(titlebar_height)
+                    .flex_none()
+                    .bg(theme.chrome(content_color))
+            } else if (settings_open && !settings_animating) || cx.reduce_motion() {
+                div()
+                    .h(titlebar_height)
+                    .flex_none()
+                    .bg(theme.chrome(theme.background))
+            } else {
+                let mut strip = div()
+                    .relative()
+                    .h(titlebar_height)
+                    .flex_none()
+                    .bg(theme.chrome(content_color));
+                if !same_background {
+                    let strip_page = div()
+                        .absolute()
+                        .inset_0()
+                        .bg(theme.chrome(theme.background));
+                    let overlay = if self.settings_page.is_opening() {
+                        strip_page
+                            .with_animation(
+                                ("titlebar-settings-open", generation),
+                                Animation::new(motion::BASE).with_easing(ease_out_quint()),
+                                |overlay, t| overlay.opacity(t),
+                            )
+                            .into_any_element()
+                    } else {
+                        strip_page
+                            .with_animation(
+                                ("titlebar-settings-close", generation),
+                                Animation::new(motion::FAST).with_easing(ease_out_quint()),
+                                |overlay, t| overlay.opacity(1. - t),
+                            )
+                            .into_any_element()
+                    };
+                    strip = strip.child(overlay);
+                }
+                strip
+            };
             div()
                 .flex()
                 .flex_col()

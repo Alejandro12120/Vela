@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<title>vSCP: maqueta de Añadir servidor y Ajustes</title>
+<!-- Referencia visual aprobada por el usuario el 2026-11-24 (ver docs/PLAN.md, decisión 17).
+     Es una maqueta en HTML, no código de la app: medidas y fuentes son aproximadas.
+     Colores aproximados de Frambuesa oscuro. Las claves son inventadas. -->
+<style>
+  body{margin:24px;background:#18141b}
+  .app{--bg:#221d26;--side:#251e29;--modal:#2b2430;--field:#231d27;--text:#eee9f0;--muted:#a89dad;--border:#463c4c;--ctl:#5a4f60;--accent:#e78fb9;--accent-bg:rgba(231,143,185,.14);--hover:#342b39;
+    font:13px/1.35 -apple-system,BlinkMacSystemFont,"SF Pro Text","Inter",system-ui,sans-serif;color:var(--text);max-width:728px}
+  .cap{font-weight:500;color:var(--muted);margin:0 0 8px 2px}
+  .modal{max-width:380px;background:var(--modal);border:1px solid var(--border);border-radius:12px;padding:20px;box-shadow:0 12px 32px rgba(0,0,0,.35)}
+  h2{font-size:16px;font-weight:500;margin:0 0 16px}
+  .f{margin-bottom:12px}
+  .lbl{display:flex;align-items:center;gap:6px;margin-bottom:6px;font-weight:500}
+  .lbl .opt{color:var(--muted);font-weight:400}
+  .in{height:30px;border:1px solid var(--ctl);border-radius:6px;background:var(--field);display:flex;align-items:center;padding:0 9px;color:var(--text);white-space:nowrap;overflow:hidden}
+  .in.ph{color:var(--muted)}
+  .in.focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(231,143,185,.18)}
+  .hp{display:grid;grid-template-columns:1fr 64px;gap:8px}
+  .seg{display:inline-flex;border:1px solid var(--ctl);border-radius:7px;padding:2px;gap:2px;background:var(--field)}
+  .seg span{padding:4px 10px;border-radius:5px;color:var(--muted)}
+  .seg span.on{background:var(--hover);color:var(--text);box-shadow:inset 0 0 0 1px var(--border)}
+  .keys{border:1px solid var(--ctl);border-radius:8px;overflow:hidden;background:var(--field)}
+  .khead{display:flex;align-items:center;justify-content:space-between;padding:7px 10px;border-bottom:1px solid var(--border);color:var(--muted);font-size:12px}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#6fcf97;margin:0 5px 0 6px;vertical-align:1px}
+  .k{display:flex;align-items:center;gap:9px;padding:7px 10px}
+  .k.sel{background:var(--accent-bg)}
+  .radio{width:13px;height:13px;border-radius:50%;border:1.5px solid var(--ctl);flex:none;box-sizing:border-box}
+  .k.sel .radio{border:4px solid var(--accent)}
+  .kn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .kf{color:var(--muted);font:11.5px ui-monospace,Menlo,monospace;white-space:nowrap}
+  .k.add{border-top:1px solid var(--border);color:var(--accent)}
+  .adv{display:flex;align-items:center;gap:6px;color:var(--muted);margin:14px 0 4px}
+  .foot{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+  .btn{height:28px;padding:0 12px;border-radius:6px;border:1px solid var(--ctl);display:inline-flex;align-items:center;gap:6px}
+  .btn.pri{background:var(--accent);border-color:var(--accent);color:#2a1620;font-weight:500}
+  .btn.sm{height:24px;padding:0 9px;font-size:12px}
+  svg.i{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round;flex:none}
+  .muted{color:var(--muted)}
+  .settings{margin-top:28px;background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:20px 24px}
+  .sec{font-size:14px;font-weight:500;margin:0 0 8px}
+  .group{border:1px solid var(--border);border-radius:10px;background:var(--side);margin-bottom:22px}
+  .gr{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:11px 14px}
+  .gr+.gr{border-top:1px solid var(--border)}
+  .gl{min-width:0}
+  .gl .d{color:var(--muted);font-size:12px;margin-top:2px}
+  .gc{display:flex;align-items:center;gap:8px;flex:none}
+  .sel-btn{height:28px;min-width:190px;padding:0 10px;border:1px solid var(--ctl);border-radius:6px;background:var(--field);display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .path{font:12px ui-monospace,Menlo,monospace;color:var(--muted)}
+  .step{display:inline-flex;align-items:center;border:1px solid var(--ctl);border-radius:6px;overflow:hidden}
+  .step span{padding:3px 9px}
+  .step span+span{border-left:1px solid var(--ctl)}
+  .term{margin:12px 14px 4px;border-radius:8px;background:#1a151d;border:1px solid var(--border);padding:10px 12px;font:12.5px/1.5 Menlo,ui-monospace,monospace;white-space:pre}
+  .g{color:#9fd8a8}.b{color:#8fb8f0}
+  .link{color:var(--accent)}
+</style></head><body>
+<svg width="0" height="0" style="position:absolute">
+  <symbol id="lock" viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></symbol>
+  <symbol id="key" viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="4.5"/><path d="M10.7 12.3 21 2M16 7l3 3M18 5l2 2"/></symbol>
+  <symbol id="chev" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+  <symbol id="refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14.9-3M4 4v4h4M4 13a8 8 0 0 0 14.9 3M20 20v-4h-4"/></symbol>
+  <symbol id="plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="updown" viewBox="0 0 24 24"><path d="m8 9 4-4 4 4M8 15l4 4 4-4"/></symbol>
+  <symbol id="arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+  <symbol id="reset" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5"/></symbol>
+</svg>
+<div class="app">
+  <p class="cap">A · Añadir servidor</p>
+  <div class="modal">
+    <h2>Añadir servidor</h2>
+    <div class="f"><div class="lbl">Nombre <span class="opt">(opcional)</span></div><div class="in ph focus">Igual que el host</div></div>
+    <div class="f hp">
+      <div><div class="lbl">Host</div><div class="in">192.168.10.32</div></div>
+      <div><div class="lbl">Puerto</div><div class="in">22</div></div>
+    </div>
+    <div class="f"><div class="lbl">Usuario</div><div class="in">root</div></div>
+    <div class="f"><div class="lbl"><svg class="i"><use href="#lock"/></svg>Autenticación</div>
+      <div class="seg"><span class="on">Clave SSH</span><span>Contraseña</span></div></div>
+    <div class="f"><div class="lbl"><svg class="i"><use href="#key"/></svg>Clave</div>
+      <div class="keys">
+        <div class="khead"><span>Bitwarden<span class="dot"></span>disponible</span><svg class="i"><use href="#refresh"/></svg></div>
+        <div class="k sel"><span class="radio"></span><span class="kn">servidor de casa</span><span class="kf">ed25519 · …Q7mA</span></div>
+        <div class="k"><span class="radio"></span><span class="kn">vps nube</span><span class="kf">ed25519 · …2xLk</span></div>
+        <div class="k"><span class="radio"></span><span class="kn">github</span><span class="kf">ed25519 · …Vb9e</span></div>
+        <div class="k add"><svg class="i"><use href="#plus"/></svg><span>Usar un archivo de clave…</span></div>
+      </div></div>
+    <div class="adv"><svg class="i"><use href="#chev"/></svg>Opciones avanzadas</div>
+    <div class="foot"><span class="btn">Cancelar</span><span class="btn pri">Guardar</span></div>
+  </div>
+
+  <div class="settings">
+    <p class="cap" style="margin-left:0">B · Ajustes: Agente SSH, Editor y Terminal (debajo de Apariencia e Interfaz)</p>
+    <div class="sec">Agente SSH</div>
+    <div class="group">
+      <div class="gr"><div class="gl">Agente<div class="d">Lo usan todos los servidores con clave SSH.</div></div>
+        <div class="gc"><span>Bitwarden<span class="dot"></span><span class="muted">disponible</span></span><span class="btn sm">Cambiar…</span></div></div>
+      <div class="gr"><div class="gl">Socket</div><div class="gc"><span class="path">~/Library/Containers/…/.bitwarden-ssh-agent.sock</span></div></div>
+    </div>
+    <div class="sec">Editor</div>
+    <div class="group">
+      <div class="gr"><div class="gl">Abrir archivos remotos con<div class="d">Al guardar en el editor, vSCP sube el cambio al servidor.</div></div>
+        <div class="gc"><span class="sel-btn"><span>Visual Studio Code</span><svg class="i muted"><use href="#updown"/></svg></span></div></div>
+      <div class="gr"><div class="gl">Copias de edición<div class="d">3 archivos · 1,2 MB. Las que tienen cambios sin subir no se borran.</div></div>
+        <div class="gc"><span class="btn sm">Mostrar</span><span class="btn sm">Vaciar…</span></div></div>
+    </div>
+    <div class="sec">Terminal</div>
+    <div class="group" style="margin-bottom:0">
+      <div class="term"><span class="g">root@ubuntu</span>:<span class="b">~</span>$ ls
+<span class="b">docs</span>  <span class="b">scripts</span>  notas.txt
+<span class="g">root@ubuntu</span>:<span class="b">~</span>$ <span style="background:var(--accent)"> </span></div>
+      <div class="gr"><div class="gl">Tamaño de letra<div class="d">También con ⌘+, ⌘− y ⌘0. Se guarda entre arranques.</div></div>
+        <div class="gc"><span class="step"><span>−</span><span>13 pt</span><span>+</span></span><span class="btn sm" title="Volver al tamaño de kitty.conf"><svg class="i"><use href="#reset"/></svg></span></div></div>
+      <div class="gr"><div class="gl">Fuente</div><div class="gc"><span class="muted">JetBrains Mono, de kitty.conf</span></div></div>
+      <div class="gr"><div class="gl">Colores</div><div class="gc"><span class="link">Los del tema «Frambuesa»</span><svg class="i link"><use href="#arrow"/></svg></div></div>
+      <div class="gr"><div class="gl">kitty.conf</div>
+        <div class="gc"><span class="path">~/.config/kitty/kitty.conf</span><span class="btn sm">Mostrar</span><span class="btn sm"><svg class="i"><use href="#refresh"/></svg>Volver a leer</span></div></div>
+    </div>
+  </div>
+</div>
+</body></html>

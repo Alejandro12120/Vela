@@ -636,7 +636,7 @@ fn row(
                         .when(!selected, |row| {
                             row.hover(move |style| style.bg(theme.hover))
                         })
-                        .focus(move |style| style.border_color(theme.accent))
+                        .focus_visible(move |style| style.border_color(theme.accent))
                         .cursor_pointer()
                         .aria_label(format!("{}, {endpoint}, {status}", server.display_name()))
                         .child(status_dot(color, pulse))
@@ -708,7 +708,7 @@ fn pin_button(
         .border_color(gpui::transparent_black())
         .cursor_pointer()
         .hover(move |style| style.bg(theme.hover))
-        .focus(move |style| style.border_color(theme.accent))
+        .focus_visible(move |style| style.border_color(theme.accent))
         .child(
             icon(if pinned {
                 IconName::PinOff

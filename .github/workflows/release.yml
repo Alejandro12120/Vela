@@ -1,0 +1,268 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (optional, defaults to v<Cargo.toml version>)'
+        required: false
+        type: string
+      draft:
+        description: 'Create the GitHub Release as a draft'
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  prepare:
+    name: Prepare release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+      draft: ${{ steps.meta.outputs.draft }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate version and tag
+        id: meta
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_DRAFT: ${{ inputs.draft }}
+        run: |
+          python3 - <<'PY'
+          import os, re, sys, tomllib
+
+          with open("crates/vscp-app/Cargo.toml", "rb") as f:
+              app_version = tomllib.load(f)["package"]["version"]
+          with open("crates/vscp-core/Cargo.toml", "rb") as f:
+              core_version = tomllib.load(f)["package"]["version"]
+
+          if app_version != core_version:
+              sys.exit(
+                  f"Version mismatch: vscp-app={app_version} != vscp-core={core_version}"
+              )
+
+          event = os.environ["GITHUB_EVENT_NAME"]
+          if event == "push":
+              tag = os.environ["GITHUB_REF_NAME"]
+              draft = "false"
+          else:
+              tag = os.environ.get("INPUT_TAG", "").strip() or f"v{app_version}"
+              draft = "true" if os.environ.get("INPUT_DRAFT", "true") == "true" else "false"
+
+          expected_tag = f"v{app_version}"
+          if tag != expected_tag:
+              sys.exit(
+                  f"Tag '{tag}' does not match Cargo.toml version '{app_version}' "
+                  f"(expected '{expected_tag}'). Bump Cargo.toml before tagging."
+              )
+
+          if not re.match(r"^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$", app_version):
+              sys.exit(f"Invalid semver version: {app_version}")
+
+          prerelease = "true" if "-" in app_version else "false"
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"version={app_version}\n")
+              out.write(f"tag={tag}\n")
+              out.write(f"prerelease={prerelease}\n")
+              out.write(f"draft={draft}\n")
+          PY
+
+  build:
+    name: Build (${{ matrix.platform }})
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            os: ubuntu-latest
+            asset: vscp-${{ needs.prepare.outputs.version }}-linux-x86_64.tar.gz
+          - platform: macos-aarch64
+            os: macos-15
+            asset: vSCP-${{ needs.prepare.outputs.version }}-macos-aarch64.tar.gz
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libvulkan-dev \
+            libfontconfig1-dev \
+            libfreetype-dev \
+            libx11-dev \
+            libxcb1-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            fontconfig \
+            fonts-dejavu-core \
+            openssh-client \
+            openssh-server
+          sudo mkdir -p /run/sshd
+          sudo chmod 0755 /run/sshd
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run workspace tests
+        run: cargo test --workspace --locked
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package Linux archive
+        if: runner.os == 'Linux'
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          ASSET: ${{ matrix.asset }}
+        run: |
+          stage="dist/vscp-${VERSION}-linux-x86_64"
+          mkdir -p "$stage"
+          cp target/release/vscp "$stage/vscp"
+          cp LICENSE "$stage/LICENSE"
+          cat > "$stage/vscp.desktop" <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=vSCP
+          Comment=Lightweight SSH and SFTP client
+          Exec=vscp
+          Terminal=false
+          Categories=Network;FileTransfer;Utility;
+          StartupWMClass=vscp
+          EOF
+          chmod 0755 "$stage/vscp"
+          tar -C dist -czf "dist/${ASSET}" "vscp-${VERSION}-linux-x86_64"
+          rm -rf "$stage"
+
+      - name: Package macOS app bundle
+        if: runner.os == 'macOS'
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          ASSET: ${{ matrix.asset }}
+        run: |
+          app="dist/vSCP.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp target/release/vscp "$app/Contents/MacOS/vscp"
+          cp LICENSE "$app/Contents/Resources/LICENSE"
+          chmod 0755 "$app/Contents/MacOS/vscp"
+          cat > "$app/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDevelopmentRegion</key>
+            <string>es</string>
+            <key>CFBundleDisplayName</key>
+            <string>vSCP</string>
+            <key>CFBundleExecutable</key>
+            <string>vscp</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.alejandro12120.vscp</string>
+            <key>CFBundleInfoDictionaryVersion</key>
+            <string>6.0</string>
+            <key>CFBundleName</key>
+            <string>vSCP</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleShortVersionString</key>
+            <string>${VERSION}</string>
+            <key>CFBundleVersion</key>
+            <string>${VERSION}</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>14.0</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+          </dict>
+          </plist>
+          EOF
+          codesign --force --deep --sign - "$app"
+          tar -C dist -czf "dist/${ASSET}" "vSCP.app"
+          rm -rf "$app"
+
+      - name: Upload platform archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    name: Sign & Publish Release
+    needs:
+      - prepare
+      - build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Sign artifacts and build update manifest
+        env:
+          VSCP_SIGNING_KEY: ${{ secrets.VSCP_SIGNING_KEY }}
+        run: |
+          if [ -z "$VSCP_SIGNING_KEY" ]; then
+            echo "::error::Missing repository secret VSCP_SIGNING_KEY (Ed25519 private key in PEM format)."
+            exit 1
+          fi
+          python3 scripts/sign-release.py \
+            --dir dist \
+            --repo "${{ github.repository }}" \
+            --version "${{ needs.prepare.outputs.version }}" \
+            --tag "${{ needs.prepare.outputs.tag }}" \
+            --platform "linux-x86_64=vscp-${{ needs.prepare.outputs.version }}-linux-x86_64.tar.gz" \
+            --platform "macos-aarch64=vSCP-${{ needs.prepare.outputs.version }}-macos-aarch64.tar.gz"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+          DRAFT: ${{ needs.prepare.outputs.draft }}
+          TARGET_SHA: ${{ github.sha }}
+        run: |
+          flags=(--title "vSCP ${TAG}" --generate-notes)
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            flags+=(--target "$TARGET_SHA")
+          fi
+          if [ "$PRERELEASE" = "true" ]; then
+            flags+=(--prerelease)
+          fi
+          if [ "$DRAFT" = "true" ]; then
+            flags+=(--draft)
+          fi
+          gh release create "$TAG" dist/* "${flags[@]}"

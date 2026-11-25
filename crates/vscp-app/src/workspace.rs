@@ -3149,7 +3149,7 @@ mod tests {
         cx.run_until_parked();
         assert!(watched.is_cancelled());
         workspace.update(cx, |this, _| {
-            assert!(this.connections.get(&id).is_none());
+            assert!(!this.connections.contains_key(&id));
             assert!(this.password_attempts.is_empty());
             assert!(this.prompts.is_empty());
             assert!(this.dialog.is_none());

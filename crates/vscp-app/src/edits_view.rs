@@ -787,15 +787,17 @@ impl Workspace {
                 }),
             )
             .h(px(26.))
-            .child(
-                div()
-                    .px_1()
-                    .rounded(px(4.))
-                    .bg(theme.hover)
-                    .text_size(px(12.))
-                    .text_color(theme.secondary_text)
-                    .child(count.to_string()),
-            ),
+            .when(count > 0, |button| {
+                button.child(
+                    div()
+                        .px_1()
+                        .rounded(px(4.))
+                        .bg(theme.hover)
+                        .text_size(px(12.))
+                        .text_color(theme.secondary_text)
+                        .child(count.to_string()),
+                )
+            }),
         )
     }
 

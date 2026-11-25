@@ -514,7 +514,7 @@ fn drop_zone(label: &'static str, active: bool, theme: Theme) -> Div {
 
 fn status(connection: Option<&Connection>, theme: Theme) -> (&'static str, gpui::Rgba) {
     match connection {
-        Some(Connection::Connecting) => ("Conectando", theme.warning),
+        Some(Connection::Connecting { .. }) => ("Conectando", theme.warning),
         Some(Connection::Disconnecting) => ("Desconectando", theme.warning),
         Some(Connection::Connected { .. }) => ("Conectado", theme.success),
         Some(Connection::Error(_)) => ("Error", theme.danger),
@@ -547,7 +547,7 @@ fn labels(server: &Server, theme: Theme, end_padding: bool) -> Div {
 fn floating_card(server: &Server, top: f32, workspace: &Workspace, theme: Theme) -> Div {
     let connection = workspace.connections.get(&server.id);
     let (_, color) = status(connection, theme);
-    let pulse = matches!(connection, Some(Connection::Connecting)).then(|| server.id.clone());
+    let pulse = matches!(connection, Some(Connection::Connecting { .. })).then(|| server.id.clone());
     div()
         .absolute()
         .top(px(top))
@@ -583,7 +583,7 @@ fn row(
         .is_some_and(|menu| &menu.id == id);
     let connection = workspace.connections.get(id);
     let (status, color) = status(connection, theme);
-    let pulse = matches!(connection, Some(Connection::Connecting)).then(|| id.clone());
+    let pulse = matches!(connection, Some(Connection::Connecting { .. })).then(|| id.clone());
     let select_id = id.clone();
     let menu_id = id.clone();
     let pin_id = id.clone();
@@ -735,7 +735,7 @@ pub fn row_menu(
     let connected = matches!(connection, Some(Connection::Connected { .. }));
     let working = matches!(
         connection,
-        Some(Connection::Connecting | Connection::Disconnecting)
+        Some(Connection::Connecting { .. } | Connection::Disconnecting)
     );
     let items: [(RowAction, IconName, &'static str, bool, bool); 5] = [
         (

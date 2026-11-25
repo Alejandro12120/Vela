@@ -21,10 +21,11 @@ use std::{
 
 use gpui::{
     AnyElement, AppContext, Context, Entity, FocusHandle, Focusable, FontWeight, KeyBinding,
-    PathPromptOptions, Render, Window, WindowBackgroundAppearance, actions, div, prelude::*, px,
+    PathPromptOptions, Render, Role, Window, WindowBackgroundAppearance, actions, div, prelude::*,
+    px,
 };
 use vscp_core::{
-    Auth, Client, ConnectionSpec, Error, Session,
+    Auth, Client, ConnectCancel, ConnectionSpec, Error, Session,
     agent::{self, AgentError, AgentKey},
     askpass,
     config::{self, Server},
@@ -40,7 +41,7 @@ use crate::{
     dev,
     file_workspace::{Panes, SessionView, session_switch},
     form::{Errors, Field, Form},
-    icons::IconName,
+    icons::{IconName, icon},
     pane::{PaneMemory, icon_button},
     sidebar::{self, RowAction, RowMenu, ServerReorder},
     terminal::{copy_on_select, font_size, kitty::Kitty},
@@ -87,8 +88,16 @@ pub fn bind_keys(cx: &mut gpui::App) {
     ]);
 }
 
+/// A connection stays cancellable for seven seconds, so a failed host does not
+/// show a destructive action before the user has had time to read the state.
+const CONNECT_CANCEL_DELAY: Duration = Duration::from_secs(7);
+
 pub enum Connection {
-    Connecting,
+    Connecting {
+        attempt: u64,
+        cancel: ConnectCancel,
+        can_cancel: bool,
+    },
     Connected { session: Session, panes: Panes },
     Disconnecting,
     Error(Error),
@@ -133,6 +142,7 @@ pub struct Workspace {
     pane_memory: HashMap<String, PaneMemory>,
     quitting: bool,
     config_error: Option<&'static str>,
+    connect_attempts: u64,
     client: Option<Client>,
     agent_socket: String,
     warnings: HashMap<String, String>,
@@ -297,6 +307,34 @@ impl Workspace {
                         this.servers = servers;
                         this.agent_socket = agent.map_or_else(String::new, |path| path.to_string_lossy().into_owned());
                         this.migrate_default_socket(window, cx);
+                        if let Some(state) = dev::server_state()
+                            && let Some(id) = this.selected.clone()
+                        {
+                            let connection = match state {
+                                dev::ServerState::Connecting => Connection::Connecting {
+                                    attempt: 0,
+                                    cancel: ConnectCancel::new(),
+                                    can_cancel: false,
+                                },
+                                dev::ServerState::ConnectingCancel => Connection::Connecting {
+                                    attempt: 0,
+                                    cancel: ConnectCancel::new(),
+                                    can_cancel: true,
+                                },
+                                dev::ServerState::Error | dev::ServerState::ErrorDetails => {
+                                    this.show_stderr = state == dev::ServerState::ErrorDetails;
+                                    Connection::Error(Error::ConnectFailed {
+                                        status: None,
+                                        stderr: "ssh: connect to host 127.0.0.1 port 2222: Connection refused\n\nDepuración del maestro SSH simulado\nSegunda línea de diagnóstico".into(),
+                                    })
+                                }
+                                dev::ServerState::ErrorAuth => Connection::Error(Error::AuthFailed {
+                                    status: <std::process::ExitStatus as std::os::unix::process::ExitStatusExt>::from_raw(256),
+                                    stderr: "Permission denied (publickey,password).".into(),
+                                }),
+                            };
+                            this.connections.insert(id, connection);
+                        }
                         if let Some(name) = dev::autoconnect()
                             && let Some(server) = this.servers.iter().find(|server| server.display_name() == name)
                         {
@@ -409,6 +447,7 @@ impl Workspace {
             pane_memory: HashMap::new(),
             quitting: false,
             config_error: None,
+            connect_attempts: 0,
             client,
             agent_socket: String::new(),
             warnings: HashMap::new(),
@@ -702,7 +741,7 @@ impl Workspace {
             || matches!(
                 self.connections.get(id),
                 Some(
-                    Connection::Connecting
+                    Connection::Connecting { .. }
                         | Connection::Connected { .. }
                         | Connection::Disconnecting
                 )
@@ -716,12 +755,41 @@ impl Workspace {
         let Some(client) = self.client.clone() else {
             return;
         };
-        self.connections.insert(id.into(), Connection::Connecting);
+        self.connect_attempts += 1;
+        let attempt = self.connect_attempts;
+        let cancel = ConnectCancel::new();
+        self.connections.insert(
+            id.into(),
+            Connection::Connecting {
+                attempt,
+                cancel: cancel.clone(),
+                can_cancel: false,
+            },
+        );
         self.show_stderr = false;
         cx.notify();
         let mut spec = self.spec_for(&server);
         dev::isolate_known_hosts(&mut spec);
+        let destination = spec.destination();
         let executor = cx.background_executor().clone();
+        let timer_id = server.id.clone();
+        let timer = cx.background_executor().timer(CONNECT_CANCEL_DELAY);
+        cx.spawn_in(window, async move |this, cx| {
+            timer.await;
+            let _ = this.update_in(cx, |this, _, cx| {
+                if let Some(Connection::Connecting {
+                    attempt: current,
+                    can_cancel,
+                    ..
+                }) = this.connections.get_mut(&timer_id)
+                    && *current == attempt
+                {
+                    *can_cancel = true;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
         cx.spawn_in(window, async move |this, cx| {
             if let Some(socket) = redetect_socket(&mut spec, &executor).await {
                 let _ = this.update(cx, |this, _| {
@@ -729,8 +797,12 @@ impl Workspace {
                 });
             }
             let result = async {
-                let session = client.connect(spec).await?;
+                let session = client.connect_with_cancel(spec, cancel.clone()).await?;
                 dev::log(format_args!("connected {}", server.display_name()));
+                if cancel.is_cancelled() {
+                    let _ = session.disconnect().await;
+                    return Err(Error::Cancelled);
+                }
                 let path = match server.initial_remote_path.clone() {
                     Some(path) if path.is_absolute() => Ok(path),
                     Some(path) => session.home_dir().await.map(|home| home.join(path)),
@@ -745,7 +817,22 @@ impl Workspace {
                 }
             }.await;
             let _ = this.update_in(cx, |this, window, cx| {
+                let stale = match this.connections.get(&server.id) {
+                    Some(Connection::Connecting { attempt: current, .. }) => *current != attempt,
+                    _ => true,
+                };
+                if cancel.is_cancelled() || stale {
+                    if let Ok((session, _)) = &result {
+                        let session = session.clone();
+                        cx.spawn_in(window, async move |_, _| {
+                            let _ = session.disconnect().await;
+                        })
+                        .detach();
+                    }
+                    return;
+                }
                 this.clear_password_attempts(server.display_name());
+                this.clear_password_attempts(&destination);
                 if matches!(&this.dialog, Some(Dialog::Prompt(prompt)) if !prompt.request.is_pending()) {
                     this.finish_dialog(window, cx);
                 }
@@ -779,6 +866,30 @@ impl Workspace {
                 cx.notify();
             });
         }).detach();
+    }
+
+    /// Stops an in-flight connection without reporting an error. The core owns
+    /// the SSH processes, so cancelling its handle reaps them as well.
+    pub fn cancel_connect(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Connection::Connecting { cancel, .. }) = self.connections.remove(id) else {
+            return;
+        };
+        cancel.cancel();
+        let Some(server) = self.servers.iter().find(|server| server.id == id) else {
+            cx.notify();
+            return;
+        };
+        let display_name = server.display_name().to_owned();
+        let destination = self.spec_for(server).destination();
+        self.clear_password_attempts(&display_name);
+        self.clear_password_attempts(&destination);
+        self.prompts
+            .retain(|request| request.destination != destination);
+        let prompt_matches = matches!(&self.dialog, Some(Dialog::Prompt(prompt)) if prompt.request.destination == destination);
+        if prompt_matches {
+            self.finish_dialog(window, cx);
+        }
+        cx.notify();
     }
 
     fn connected(
@@ -1689,23 +1800,40 @@ impl Workspace {
             });
         };
         let id = &server.id;
+        let header = div()
+            .w_full()
+            .flex()
+            .items_start()
+            .justify_between()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_w_0()
+                    .flex_1()
+                    .child(
+                        div()
+                            .text_size(px(18.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .truncate()
+                            .child(server.display_name().to_owned()),
+                    )
+                    .child(
+                        div()
+                            .text_color(theme.secondary_text)
+                            .truncate()
+                            .child(format!("{}@{}", server.user, server.host)),
+                    ),
+            )
+            .child(div().flex_none().child(self.edit_header(id, theme, cx)));
         let mut details = div()
             .mt_2()
             .flex()
             .flex_col()
             .gap_3()
             .items_start()
-            .child(
-                div()
-                    .text_size(px(18.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(server.display_name().to_owned()),
-            )
-            .child(
-                div()
-                    .text_color(theme.secondary_text)
-                    .child(format!("{}@{}", server.user, server.host)),
-            );
+            .child(header);
         if let Some(warning) = self.warnings.get(id) {
             details = details.child(motion::appear(
                 div()
@@ -1726,83 +1854,200 @@ impl Workspace {
             let on_click = cx.listener(move |this, _, window, cx| {
                 this.connect(&id, window, cx);
             });
-            if label == "Conectar" {
-                icon_text_button(
-                    "connect",
-                    IconName::Plug,
-                    label,
-                    Variant::Primary,
-                    None,
-                    theme,
-                    on_click,
-                )
-            } else {
-                button("connect", label, Variant::Primary, theme, on_click)
-            }
+            icon_text_button(
+                "connect",
+                if label == "Reintentar" {
+                    IconName::RotateCcw
+                } else {
+                    IconName::Plug
+                },
+                label,
+                Variant::Primary,
+                None,
+                theme,
+                on_click,
+            )
         };
         let details = match self.connections.get(id) {
-            Some(Connection::Connecting) => details.child("Conectando…"),
-            Some(Connection::Disconnecting) => details.child("Desconectando…"),
+            Some(Connection::Connecting {
+                attempt,
+                can_cancel,
+                ..
+            }) => {
+                let mut state = details.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(motion::spin(
+                            icon(IconName::Spinner).text_color(theme.secondary_text),
+                            ("connecting-spinner", *attempt),
+                        ))
+                        .child(div().text_color(theme.secondary_text).child("Conectando…")),
+                );
+                if *can_cancel {
+                    let server_id = id.clone();
+                    state = state.child(motion::appear(
+                        icon_text_button(
+                            "cancel-connect",
+                            IconName::Close,
+                            "Cancelar",
+                            Variant::Secondary,
+                            None,
+                            theme,
+                            cx.listener(move |this, _, window, cx| {
+                                this.cancel_connect(&server_id, window, cx);
+                            }),
+                        ),
+                        ("cancel-connect-appear", *attempt),
+                        4.,
+                        motion::FAST,
+                    ));
+                }
+                state
+            }
+            Some(Connection::Disconnecting) => details.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(motion::spin(
+                        icon(IconName::Spinner).text_color(theme.secondary_text),
+                        "disconnecting-spinner",
+                    ))
+                    .child(div().text_color(theme.secondary_text).child("Desconectando…")),
+            ),
             Some(Connection::Connected { .. }) => unreachable!("rendered above"),
             Some(Connection::Error(error)) => {
-                let (message, extra, changed) = match error {
-                    Error::AuthFailed { .. } => ("Autenticación rechazada", None, false),
+                let (message, extra, changed, can_edit) = match error {
+                    Error::AuthFailed { .. } => ("Autenticación rechazada", None, false, true),
                     Error::HostKeyChanged { .. } => (
                         "La clave del servidor ha cambiado. La conexión se ha bloqueado.",
                         None,
                         true,
+                        true,
                     ),
                     Error::HostKeyRejected { .. } => {
-                        ("No se aceptó la clave del servidor.", None, false)
+                        ("No se aceptó la clave del servidor.", None, false, true)
                     }
                     Error::Io(_) => (
                         "No se pudo iniciar o mantener la conexión SSH.",
                         None,
+                        false,
                         false,
                     ),
                     Error::Sftp(_) => (
                         "No se pudo abrir la sesión SFTP o leer la carpeta remota.",
                         None,
                         false,
+                        false,
                     ),
-                    Error::ConnectFailed { stderr, .. } => {
-                        ("No se pudo conectar con el servidor.", Some(stderr), false)
+                    Error::ConnectFailed { stderr, .. } => (
+                        "No se pudo conectar con el servidor.",
+                        Some(stderr),
+                        false,
+                        false,
+                    ),
+                    Error::SizeLimit(_) => {
+                        ("Se superó el límite de transferencia.", None, false, false)
                     }
-                    Error::SizeLimit(_) => ("Se superó el límite de transferencia.", None, false),
-                    Error::Cancelled => ("Se canceló la conexión.", None, false),
+                    Error::Cancelled => ("Se canceló la conexión.", None, false, false),
                 };
-                details
+                let mut banner = div()
+                    .w_full()
+                    .p_3()
+                    .rounded(px(8.))
+                    .bg(theme.danger_bg)
+                    .flex()
+                    .flex_col()
+                    .gap_2()
                     .child(
                         div()
-                            .w_full()
-                            .p_3()
-                            .rounded(px(8.))
-                            .bg(theme.danger_bg)
+                            .flex()
+                            .items_start()
+                            .gap_2()
+                            .child(
+                                icon(IconName::Error)
+                                    .size(px(15.))
+                                    .mt(px(1.5))
+                                    .flex_none()
+                                    .text_color(theme.danger),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_color(theme.danger)
+                                    .when(changed, |message| {
+                                        message.font_weight(FontWeight::SEMIBOLD)
+                                    })
+                                    .child(message),
+                            ),
+                    );
+                if let Some(stderr) = extra {
+                    let show = self.show_stderr;
+                    banner = banner.child(
+                        div()
+                            .id("stderr")
+                            .role(Role::Button)
+                            .tab_index(0)
+                            .cursor_pointer()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .self_start()
+                            .px_1()
+                            .py(px(2.))
+                            .rounded(px(4.))
+                            .border_1()
+                            .border_color(theme.danger_bg)
+                            .text_size(px(12.))
                             .text_color(theme.danger)
-                            .when(changed, |alert| alert.font_weight(FontWeight::SEMIBOLD))
-                            .child(message),
-                    )
-                    .when_some(extra, |details, stderr| {
-                        details
-                            .child(button(
-                                "stderr",
-                                if self.show_stderr {
-                                    "Ocultar detalles de SSH"
+                            .child(
+                                icon(if show {
+                                    IconName::ChevronDown
                                 } else {
-                                    "Ver detalles de SSH"
-                                },
-                                Variant::Secondary,
-                                theme,
-                                cx.listener(|this, _, _, cx| {
-                                    this.show_stderr = !this.show_stderr;
-                                    cx.notify();
-                                }),
-                            ))
-                            .when(self.show_stderr, |details| {
-                                details.child(technical_text(stderr.clone(), theme))
+                                    IconName::ChevronRight
+                                })
+                                .size(px(13.))
+                                .text_color(theme.danger),
+                            )
+                            .child(if show {
+                                "Ocultar detalles de SSH"
+                            } else {
+                                "Ver detalles de SSH"
                             })
-                    })
-                    .child(action("Reintentar", cx))
+                            .hover(move |style| style.bg(theme.hover))
+                            .focus_visible(move |style| style.border_color(theme.accent))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show_stderr = !this.show_stderr;
+                                cx.notify();
+                            })),
+                    );
+                    if self.show_stderr {
+                        banner = banner.child(technical_text(stderr.clone(), theme));
+                    }
+                }
+                let mut actions = div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(action("Reintentar", cx));
+                if can_edit {
+                    let edit_id = id.clone();
+                    actions = actions.child(icon_text_button(
+                        "edit-server",
+                        IconName::Pencil,
+                        "Editar servidor",
+                        Variant::Secondary,
+                        None,
+                        theme,
+                        cx.listener(move |this, _, window, cx| {
+                            this.open_form(Some(&edit_id), window, cx)
+                        }),
+                    ));
+                }
+                details.child(banner).child(actions)
             }
             None if self.client.is_some() => details.child(action("Conectar", cx)),
             None => details.child(
@@ -1811,11 +2056,7 @@ impl Workspace {
                     .child("No se pudo iniciar el cliente SSH."),
             ),
         };
-        panel.child(
-            details
-                .child(self.edit_header(id, theme, cx))
-                .child(self.edit_status(id, theme, cx)),
-        )
+        panel.child(details.child(self.edit_status(id, theme, cx)))
     }
 }
 

@@ -64,6 +64,26 @@ pub fn settings_page() -> Option<String> {
     value("VSCP_DEV_SETTINGS")
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServerState {
+    Connecting,
+    ConnectingCancel,
+    Error,
+    ErrorDetails,
+    ErrorAuth,
+}
+
+pub fn server_state() -> Option<ServerState> {
+    match value("VSCP_DEV_SERVER_STATE").as_deref() {
+        Some("connecting") => Some(ServerState::Connecting),
+        Some("connecting-cancel") => Some(ServerState::ConnectingCancel),
+        Some("error") => Some(ServerState::Error),
+        Some("error-details") => Some(ServerState::ErrorDetails),
+        Some("error-auth") => Some(ServerState::ErrorAuth),
+        _ => None,
+    }
+}
+
 pub fn hide_sidebar() -> bool {
     value("VSCP_DEV_HIDE_SIDEBAR").as_deref() == Some("1")
 }

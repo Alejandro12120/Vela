@@ -53,7 +53,6 @@ pub enum IconName {
     Sun,
     #[allow(dead_code)]
     ChevronsUpDown,
-    #[allow(dead_code)]
     RotateCcw,
 }
 

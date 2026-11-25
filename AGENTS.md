@@ -81,6 +81,7 @@ Use an isolated configuration directory for development runs. The `dev` Cargo fe
 - `VSCP_DEV_EDIT=<absolute remote path>` opens a remote edit after autoconnect.
 - `VSCP_DEV_EDITOR=none` suppresses editor launches for unattended runs.
 - `VSCP_DEV_EDIT_VIEW=popover|settings` shows Ediciones on connection or opens Ajustes on startup for visual checks.
+- `VSCP_DEV_SERVER_STATE=connecting|connecting-cancel|error|error-details|error-auth` puts the selected server into a visual state after loading the list, without opening SSH: a spinner (with or without «Cancelar»), `ConnectFailed` with sample stderr collapsed or expanded inside the error banner, or `AuthFailed` with «Editar servidor». Use `VSCP_DEV_THEME=light|dark` and `VSCP_DEV_REDUCE_MOTION=1` for deterministic captures.
 - `VSCP_DEV_FORM=new` opens the new-server form at startup. `VSCP_DEV_FORM=edit:<display name>` opens the edit form of that server. `VSCP_DEV_FORM=duplicate:<display name>` opens the add-server form prefilled from that server with ` duplicate` appended to its name.
 - `VSCP_DEV_ROW_MENU=<display name>` selects that server and opens its floating right-click menu at the centre of its row.
 - `VSCP_DEV_DRAG=<display name>:<dy>` shows that server's card dragged `dy` px from its slot, with the other cards making room, and holds it there for visual checks.

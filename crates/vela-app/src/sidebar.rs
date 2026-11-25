@@ -543,19 +543,16 @@ fn update_button(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -
         .justify_center()
         .w(px(26.))
         .h(px(26.))
-        .rounded(px(6.))
-        .border_1();
+        .rounded(px(6.));
 
     match &workspace.update_state {
         UpdateState::Idle => base
             .aria_label("Buscar actualizaciones")
             .tab_index(0)
-            .border_color(theme.control_border)
             .bg(theme.panel)
             .cursor_pointer()
             .hover(move |style| style.bg(theme.hover))
             .active(move |style| style.bg(theme.selection))
-            .focus_visible(move |style| style.border_color(theme.accent))
             .child(
                 icon(IconName::RefreshCw)
                     .size(px(15.))
@@ -564,7 +561,6 @@ fn update_button(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -
             .on_click(cx.listener(|this, _, window, cx| this.check_for_updates(window, cx))),
         UpdateState::Checking => base
             .aria_label("Buscando actualizaciones…")
-            .border_color(theme.border)
             .bg(theme.selection)
             .opacity(0.75)
             .child(motion::spin(
@@ -576,12 +572,10 @@ fn update_button(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -
         UpdateState::Available { release, .. } => base
             .aria_label(format!("Descargar actualización {}", release.version))
             .tab_index(0)
-            .border_color(theme.control_border)
             .bg(theme.panel)
             .cursor_pointer()
             .hover(move |style| style.bg(theme.hover))
             .active(move |style| style.bg(theme.selection))
-            .focus_visible(move |style| style.border_color(theme.accent))
             .child(
                 icon(IconName::CircleArrowDown)
                     .size(px(15.))
@@ -590,7 +584,6 @@ fn update_button(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -
             .on_click(cx.listener(|this, _, window, cx| this.install_update(window, cx))),
         UpdateState::Installing { release, .. } => base
             .aria_label(format!("Instalando actualización {}…", release.version))
-            .border_color(theme.border)
             .bg(theme.selection)
             .opacity(0.75)
             .child(

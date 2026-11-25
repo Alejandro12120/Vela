@@ -2413,6 +2413,35 @@ impl Render for Workspace {
             self.render_settings(theme, window, cx).into_any_element()
         } else {
             let base = self.content(theme, window, cx);
+            let base = if theme.glassy && self.settings_page.is_opening() {
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .child(base)
+                    .with_animation(
+                        ("settings-base-open", generation),
+                        Animation::new(motion::BASE).with_easing(ease_out_quint()),
+                        |base, t| base.opacity(1. - t),
+                    )
+                    .into_any_element()
+            } else if theme.glassy && self.settings_page.is_closing() {
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .child(base)
+                    .with_animation(
+                        ("settings-base-close", generation),
+                        Animation::new(motion::FAST).with_easing(ease_out_quint()),
+                        |base, t| base.opacity(t),
+                    )
+                    .into_any_element()
+            } else {
+                base.into_any_element()
+            };
             let page = div()
                 .relative()
                 .flex()

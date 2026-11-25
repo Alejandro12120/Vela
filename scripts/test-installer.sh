@@ -99,7 +99,7 @@ sign_with_python_or_ssh() {
     if command -v python3 >/dev/null 2>&1 \
         && openssl version 2>/dev/null | grep -Eq '^OpenSSL [34]\.'
     then
-        say "Signing mock release via scripts/sign-release.py (OpenSSL + OpenSSH)"
+        say "Signing mock release via scripts/sign-release.py (OpenSSL PKCS#8 key)"
         openssl genpkey -algorithm ED25519 -out "${TMP}/priv.pem" >/dev/null 2>&1
         chmod 600 "${TMP}/priv.pem"
         VELA_SIGNING_KEY="$(cat "${TMP}/priv.pem")" \
@@ -111,6 +111,23 @@ sign_with_python_or_ssh() {
             --platform "${PLATFORM}=${ASSET}" > "${TMP}/sign.log"
         PUBKEY="$(awk -F': ' '/^Ed25519 public key \(OpenSSH\): /{print $2}' "${TMP}/sign.log")"
         [ -n "$PUBKEY" ] || fail "sign-release.py did not print OpenSSH public key"
+
+        say "Testing scripts/sign-release.py with OpenSSH Ed25519 private key"
+        OPENSSH_DIST="${TMP}/dist-openssh"
+        mkdir -p "$OPENSSH_DIST"
+        cp "${MOCK_DIST}/${ASSET}" "${OPENSSH_DIST}/${ASSET}"
+        ssh-keygen -q -t ed25519 -N "" -f "${TMP}/id_ed25519"
+        VELA_SIGNING_KEY="$(cat "${TMP}/id_ed25519")" \
+            python3 "${REPO_ROOT}/scripts/sign-release.py" \
+            --dir "$OPENSSH_DIST" \
+            --repo "Alejandro12120/Vela" \
+            --version "0.9.9" \
+            --tag "v0.9.9" \
+            --platform "${PLATFORM}=${ASSET}" > "${TMP}/sign-openssh.log"
+        OPENSSH_PUB="$(awk -F': ' '/^Ed25519 public key \(OpenSSH\): /{print $2}' "${TMP}/sign-openssh.log")"
+        EXPECTED_OPENSSH_PUB="$(awk '{print $1 " " $2}' "${TMP}/id_ed25519.pub")"
+        [ "$OPENSSH_PUB" = "$EXPECTED_OPENSSH_PUB" ] \
+            || fail "OpenSSH key public mismatch: ${OPENSSH_PUB} != ${EXPECTED_OPENSSH_PUB}"
     else
         say "Signing mock release via ssh-keygen -Y sign"
         ssh-keygen -q -t ed25519 -N "" -f "${TMP}/test_key"

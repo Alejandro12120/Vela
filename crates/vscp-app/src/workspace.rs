@@ -98,7 +98,10 @@ pub enum Connection {
         cancel: ConnectCancel,
         can_cancel: bool,
     },
-    Connected { session: Session, panes: Panes },
+    Connected {
+        session: Session,
+        panes: Panes,
+    },
     Disconnecting,
     Error(Error),
 }
@@ -1872,6 +1875,7 @@ impl Workspace {
                 theme,
                 on_click,
             )
+            .debug_selector(|| "connect".into())
         };
         let details = match self.connections.get(id) {
             Some(Connection::Connecting {
@@ -1920,7 +1924,11 @@ impl Workspace {
                         icon(IconName::Spinner).text_color(theme.secondary_text),
                         "disconnecting-spinner",
                     ))
-                    .child(div().text_color(theme.secondary_text).child("Desconectando…")),
+                    .child(
+                        div()
+                            .text_color(theme.secondary_text)
+                            .child("Desconectando…"),
+                    ),
             ),
             Some(Connection::Connected { .. }) => unreachable!("rendered above"),
             Some(Connection::Error(error)) => {
@@ -2040,17 +2048,20 @@ impl Workspace {
                     .child(action("Reintentar", cx));
                 if can_edit {
                     let edit_id = id.clone();
-                    actions = actions.child(icon_text_button(
-                        "edit-server",
-                        IconName::Pencil,
-                        "Editar servidor",
-                        Variant::Secondary,
-                        None,
-                        theme,
-                        cx.listener(move |this, _, window, cx| {
-                            this.open_form(Some(&edit_id), window, cx)
-                        }),
-                    ));
+                    actions = actions.child(
+                        icon_text_button(
+                            "edit-server",
+                            IconName::Pencil,
+                            "Editar servidor",
+                            Variant::Secondary,
+                            None,
+                            theme,
+                            cx.listener(move |this, _, window, cx| {
+                                this.open_form(Some(&edit_id), window, cx)
+                            }),
+                        )
+                        .debug_selector(|| "edit-server".into()),
+                    );
                 }
                 details.child(banner).child(actions)
             }
@@ -2185,7 +2196,8 @@ impl Render for Workspace {
         let settings_visible = self.settings_page.is_visible();
         let settings_animating = self.settings_page.is_opening() || self.settings_page.is_closing();
         let generation = self.settings_page.transition_generation();
-        let transfer_overlay = if !settings_visible && self.dialog.is_none() && !self.edits.popover {
+        let transfer_overlay = if !settings_visible && self.dialog.is_none() && !self.edits.popover
+        {
             match self
                 .selected
                 .as_ref()
@@ -3094,5 +3106,154 @@ mod tests {
         cx.simulate_keystrokes("tab");
         cx.run_until_parked();
         cx.update(|window, cx| assert_eq!(window.focused(cx), Some(first)));
+    }
+
+    #[gpui::test]
+    async fn cancelling_a_connection_clears_its_attempts_and_prompt(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(bind_keys);
+        let (workspace, cx) = open(dir.path(), cx);
+        let id = order(&workspace, cx)[0].0.clone();
+        let destination = workspace.read_with(cx, |this, _| {
+            this.servers
+                .iter()
+                .find(|server| server.id == id)
+                .unwrap()
+                .display_name()
+                .to_owned()
+        });
+        let cancel = ConnectCancel::new();
+        let watched = cancel.clone();
+        workspace.update_in(cx, |this, window, cx| {
+            this.connections.insert(
+                id.clone(),
+                Connection::Connecting {
+                    attempt: 3,
+                    cancel,
+                    can_cancel: true,
+                },
+            );
+            this.password_attempts.insert(destination.clone(), 2);
+            this.prompts.push_back(askpass::Request::fake(
+                &destination,
+                "Contraseña:",
+                askpass::Kind::Password,
+            ));
+            this.show_next_prompt(window, cx);
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |this, window, cx| {
+            assert!(matches!(&this.dialog, Some(Dialog::Prompt(_))));
+            this.cancel_connect(&id, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(watched.is_cancelled());
+        workspace.update(cx, |this, _| {
+            assert!(this.connections.get(&id).is_none());
+            assert!(this.password_attempts.is_empty());
+            assert!(this.prompts.is_empty());
+            assert!(this.dialog.is_none());
+        });
+    }
+
+    #[gpui::test]
+    async fn escape_does_not_cancel_a_connection(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(bind_keys);
+        let (workspace, cx) = open(dir.path(), cx);
+        let id = order(&workspace, cx)[0].0.clone();
+        workspace.update(cx, |this, _| {
+            this.connections.insert(
+                id.clone(),
+                Connection::Connecting {
+                    attempt: 1,
+                    cancel: ConnectCancel::new(),
+                    can_cancel: false,
+                },
+            );
+        });
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        workspace.update(cx, |this, _| {
+            assert!(
+                matches!(
+                    this.connections.get(&id),
+                    Some(Connection::Connecting { .. })
+                ),
+                "Escape must not cancel a connection"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn edit_server_only_appears_for_authentication_errors(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (workspace, cx) = open(dir.path(), cx);
+        let id = order(&workspace, cx)[0].0.clone();
+        let status =
+            || <std::process::ExitStatus as std::os::unix::process::ExitStatusExt>::from_raw(256);
+        let cases = vec![
+            (
+                Error::AuthFailed {
+                    status: status(),
+                    stderr: "x".into(),
+                },
+                true,
+            ),
+            (
+                Error::HostKeyChanged {
+                    status: status(),
+                    stderr: "x".into(),
+                },
+                true,
+            ),
+            (
+                Error::HostKeyRejected {
+                    status: status(),
+                    stderr: "x".into(),
+                },
+                true,
+            ),
+            (
+                Error::ConnectFailed {
+                    status: None,
+                    stderr: "x".into(),
+                },
+                false,
+            ),
+            (Error::Io(std::io::Error::other("x")), false),
+            (Error::Sftp("x".into()), false),
+        ];
+        for (error, expected) in cases {
+            workspace.update(cx, |this, cx| {
+                this.connections
+                    .insert(id.clone(), Connection::Error(error));
+                cx.notify();
+            });
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            assert_eq!(cx.debug_bounds("edit-server").is_some(), expected);
+            assert!(cx.debug_bounds("connect").is_some());
+        }
+    }
+
+    #[gpui::test]
+    async fn mouse_click_does_not_arm_the_keyboard_focus_ring_but_tab_does(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (workspace, cx) = open(dir.path(), cx);
+        cx.update(|_, cx| bind_keys(cx));
+        let row = cx.debug_bounds("server-row-id-bravo").unwrap();
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(cx, |this, _| this.selected.clone()),
+            Some("id-bravo".into())
+        );
+        cx.update(|window, _| assert!(!window.last_input_was_keyboard()));
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+        cx.update(|window, _| assert!(window.last_input_was_keyboard()));
     }
 }

@@ -547,7 +547,8 @@ fn labels(server: &Server, theme: Theme, end_padding: bool) -> Div {
 fn floating_card(server: &Server, top: f32, workspace: &Workspace, theme: Theme) -> Div {
     let connection = workspace.connections.get(&server.id);
     let (_, color) = status(connection, theme);
-    let pulse = matches!(connection, Some(Connection::Connecting { .. })).then(|| server.id.clone());
+    let pulse =
+        matches!(connection, Some(Connection::Connecting { .. })).then(|| server.id.clone());
     div()
         .absolute()
         .top(px(top))

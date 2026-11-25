@@ -757,6 +757,10 @@ impl Workspace {
         .into_any_element()
     }
 
+    fn show_edit_count(count: usize) -> bool {
+        count > 0
+    }
+
     pub(super) fn edit_header(
         &self,
         id: &str,
@@ -787,9 +791,10 @@ impl Workspace {
                 }),
             )
             .h(px(26.))
-            .when(count > 0, |button| {
+            .when(Self::show_edit_count(count), |button| {
                 button.child(
                     div()
+                        .id("edits-count")
                         .px_1()
                         .rounded(px(4.))
                         .bg(theme.hover)
@@ -1248,5 +1253,17 @@ pub(super) fn reveal(path: &Path) -> io::Result<()> {
         } else {
             Err(io::Error::other("No se pudo mostrar la carpeta"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Workspace;
+
+    #[test]
+    fn edit_header_hides_the_count_until_there_is_an_edit() {
+        assert!(!Workspace::show_edit_count(0));
+        assert!(Workspace::show_edit_count(1));
+        assert!(Workspace::show_edit_count(4));
     }
 }

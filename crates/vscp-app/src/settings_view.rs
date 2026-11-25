@@ -2915,4 +2915,72 @@ mod tests {
         );
         assert_eq!(saved.terminal_font_size, Some(12.));
     }
+
+    #[gpui::test]
+    fn opening_and_closing_settings_passes_through_transient_states(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        crate::dev::TEST_CONFIG.with(|config| *config.borrow_mut() = Some(dir.path().to_owned()));
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::new(None, None, None, window, cx));
+        cx.run_until_parked();
+
+        workspace.update_in(cx, |this, window, cx| {
+            this.open_settings(window, cx);
+            assert!(this.settings_page.is_open());
+            assert!(this.settings_page.is_opening());
+            assert!(this.settings_page.is_visible());
+        });
+        cx.executor().advance_clock(crate::components::motion::BASE);
+        cx.run_until_parked();
+        workspace.update(cx, |this, _| {
+            assert!(this.settings_page.is_open());
+            assert!(!this.settings_page.is_opening());
+        });
+
+        workspace.update_in(cx, |this, window, cx| {
+            this.close_settings(window, cx);
+            assert!(!this.settings_page.is_open());
+            assert!(this.settings_page.is_closing());
+            assert!(this.settings_page.is_visible());
+            assert_eq!(window.focused(cx), Some(this.focus_handle()));
+        });
+        // Reopening mid-close invalidates the fade-out timer.
+        let generation =
+            workspace.read_with(cx, |this, _| this.settings_page.transition_generation());
+        workspace.update_in(cx, |this, window, cx| {
+            this.open_settings(window, cx);
+            assert!(this.settings_page.is_open());
+            assert!(!this.settings_page.is_closing());
+            assert_eq!(this.settings_page.transition_generation(), generation + 1);
+        });
+        cx.executor()
+            .advance_clock(crate::components::motion::FAST * 2);
+        cx.run_until_parked();
+        workspace.update(cx, |this, _| {
+            assert!(this.settings_page.is_open());
+            assert!(!this.settings_page.is_closing());
+            assert!(!this.settings_page.is_opening());
+            assert!(this.settings_page.is_visible());
+        });
+    }
+
+    #[gpui::test]
+    fn reduce_motion_switches_settings_instantly(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        crate::dev::TEST_CONFIG.with(|config| *config.borrow_mut() = Some(dir.path().to_owned()));
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::new(None, None, None, window, cx));
+        cx.run_until_parked();
+        workspace.update_in(cx, |this, window, cx| {
+            this.open_settings(window, cx);
+            assert!(this.settings_page.is_open());
+            assert!(!this.settings_page.is_opening());
+            assert!(this.settings_page.is_visible());
+            this.close_settings(window, cx);
+            assert!(!this.settings_page.is_open());
+            assert!(!this.settings_page.is_closing());
+            assert!(!this.settings_page.is_visible());
+        });
+    }
 }

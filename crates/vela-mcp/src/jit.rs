@@ -103,6 +103,23 @@ impl JitGrants {
         })
     }
 
+    /// Comprueba las concesiones vivas aplicando un predicado al ámbito guardado.
+    /// Permite al motor normalizar rutas antes de compararlas con el ámbito.
+    pub fn any_scoped_allow(
+        &self,
+        server_id: &str,
+        action: &str,
+        now: SystemTime,
+        mut matches_scope: impl FnMut(&str) -> bool,
+    ) -> bool {
+        self.scoped.iter().any(|grant| {
+            grant.server_id == server_id
+                && grant.action == action
+                && grant.expires_at > now
+                && matches_scope(&grant.scope)
+        })
+    }
+
     /// Número de concesiones vivas en el instante indicado, para introspección.
     pub fn active_count(&self, now: SystemTime) -> usize {
         self.profiles
@@ -185,6 +202,21 @@ mod tests {
         assert!(!grants.has_scoped_allow("prod", "fs_read", "/tmp/other", at(100)));
         assert!(!grants.has_scoped_allow("dev", "fs_read", "/tmp/app.log", at(100)));
         assert!(!grants.has_scoped_allow("prod", "fs_read", "/tmp/app.log", at(900)));
+    }
+
+    #[test]
+    fn any_scoped_allow_applies_a_predicate_to_the_granted_scope() {
+        let mut grants = JitGrants::new();
+        grants.grant_scoped_allow("prod", "fs_read", "/srv//api/./app.js", at(500));
+        assert!(
+            grants.any_scoped_allow("prod", "fs_read", at(100), |scope| scope
+                .split('/')
+                .filter(|part| !part.is_empty() && *part != ".")
+                .collect::<Vec<_>>()
+                .join("/")
+                == "srv/api/app.js")
+        );
+        assert!(!grants.any_scoped_allow("prod", "fs_read", at(500), |_| true));
     }
 
     #[test]

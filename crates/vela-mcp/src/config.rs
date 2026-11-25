@@ -60,6 +60,7 @@ pub enum ExecMode {
 
 /// Límites de la copia de seguridad previa a una escritura remota.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
 pub struct RollbackConfig {
     pub enabled: bool,
     pub max_file_bytes: u64,
@@ -194,9 +195,13 @@ impl McpConfig {
         self.approval_timeout_secs = self.approval_timeout_secs.clamp(30, 600);
         self.profiles
             .retain(|profile| !profile.id.trim().is_empty());
+        // Recorremos al revés para que, en caso de identificadores repetidos,
+        // gane la última definición y se conserve el orden de las supervivientes.
         let mut seen = HashSet::new();
+        self.profiles.reverse();
         self.profiles
             .retain(|profile| seen.insert(profile.id.clone()));
+        self.profiles.reverse();
     }
 }
 
@@ -414,5 +419,65 @@ mod tests {
         assert_eq!(config.profiles.len(), 1);
         assert_eq!(config.profiles[0].id, "readonly");
         assert!(config.servers.is_empty());
+    }
+
+    #[test]
+    fn load_partial_sections_use_defaults() {
+        let dir = temp_dir();
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[rollback]\nenabled = false\n\n[[profiles]]\nid = \"custom\"\nname = \"Personal\"\n",
+        )
+        .unwrap();
+        let config = load(dir.path()).unwrap();
+        let defaults = RollbackConfig::default();
+        assert!(!config.rollback.enabled);
+        assert_eq!(config.rollback.max_file_bytes, defaults.max_file_bytes);
+        assert_eq!(config.rollback.max_total_bytes, defaults.max_total_bytes);
+        assert_eq!(config.rollback.retention_hours, defaults.retention_hours);
+        assert_eq!(config.profiles.len(), 1);
+        assert_eq!(config.profiles[0].id, "custom");
+        assert_eq!(config.profiles[0].fs_read, Decision::Ask);
+        assert_eq!(
+            config.profiles[0].default_denied_remote_paths,
+            crate::presets::critical_denied_paths()
+        );
+    }
+
+    #[test]
+    fn validate_keeps_the_last_duplicate_profile() {
+        let mut config = McpConfig {
+            profiles: vec![
+                PermissionProfile {
+                    id: "custom".to_owned(),
+                    name: "primero".to_owned(),
+                    ..PermissionProfile::default()
+                },
+                PermissionProfile {
+                    id: "otro".to_owned(),
+                    name: "otro".to_owned(),
+                    ..PermissionProfile::default()
+                },
+                PermissionProfile {
+                    id: "custom".to_owned(),
+                    name: "ultimo".to_owned(),
+                    ..PermissionProfile::default()
+                },
+            ],
+            ..McpConfig::default()
+        };
+        config.validate();
+        let ids: Vec<&str> = config
+            .profiles
+            .iter()
+            .map(|profile| profile.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["otro", "custom"]);
+        assert_eq!(
+            crate::presets::resolve_profile(&config, "custom")
+                .unwrap()
+                .name,
+            "ultimo"
+        );
     }
 }

@@ -3,6 +3,7 @@
 use thiserror::Error;
 
 use crate::config::{Decision, ExecMode};
+use crate::path::normalize_lexical;
 
 /// Tipo de operador shell encontrado fuera de comillas.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -12,7 +13,7 @@ pub enum OperatorKind {
     Subshell,
 }
 
-/// Test con información de si es un operador shell.
+/// Token con información de si es un operador shell.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Token {
     pub text: String,
@@ -83,6 +84,22 @@ pub fn tokenize(command: &str) -> Result<Vec<Token>, CommandError> {
                     }
                     None => return Err(CommandError::UnclosedQuote),
                 },
+                // Las comillas dobles no desactivan la sustitución de comandos en sh.
+                '`' => {
+                    flush(&mut tokens, &mut current);
+                    tokens.push(Token {
+                        text: "`".to_owned(),
+                        operator: Some(OperatorKind::Subshell),
+                    });
+                }
+                '$' if chars.peek() == Some(&'(') => {
+                    chars.next();
+                    flush(&mut tokens, &mut current);
+                    tokens.push(Token {
+                        text: "$(".to_owned(),
+                        operator: Some(OperatorKind::Subshell),
+                    });
+                }
                 other => current.push(other),
             },
             None => match ch {
@@ -242,14 +259,32 @@ fn command_positions(tokens: &[Token]) -> Vec<usize> {
         }
         if expect_command {
             positions.push(index);
-            // `env FOO=bar ...` y las opciones no cambian el comando esperado.
-            if token.text == "env" || token.text.starts_with('-') || token.text.contains('=') {
+            // `env FOO=bar ...` y los wrappers no cambian el comando esperado.
+            if matches!(basename(&token.text), "env" | "command" | "nohup" | "nice")
+                || token.text.starts_with('-')
+                || token.text.contains('=')
+            {
                 continue;
             }
             expect_command = false;
         }
     }
     positions
+}
+
+/// Sub-comandos separados por operadores, empezando en cada posición de comando.
+fn subcommands(tokens: &[Token]) -> Vec<Vec<String>> {
+    command_positions(tokens)
+        .iter()
+        .map(|&start| {
+            tokens[start..]
+                .iter()
+                .take_while(|token| token.operator.is_none())
+                .map(|token| token.text.clone())
+                .collect()
+        })
+        .filter(|subcommand: &Vec<String>| !subcommand.is_empty())
+        .collect()
 }
 
 fn basename(token: &str) -> &str {
@@ -279,18 +314,22 @@ fn hard_denylist_match(command: &str, tokens: &[Token]) -> Option<String> {
             .collect();
         match name {
             "rm" => {
-                let recursive_force = args.iter().any(|arg| {
-                    arg.starts_with('-')
-                        && !arg.starts_with("--")
-                        && arg.contains('r')
-                        && arg.contains('f')
-                }) || (args
+                let is_flag = |arg: &&str| arg.starts_with('-') && !arg.starts_with("--");
+                let recursive = args
                     .iter()
-                    .any(|arg| arg.starts_with('-') && arg.contains('r'))
-                    && args
-                        .iter()
-                        .any(|arg| arg.starts_with('-') && arg.contains('f')));
-                if recursive_force && args.iter().any(|arg| *arg == "/" || *arg == "/*") {
+                    .any(|arg| is_flag(arg) && (arg.contains('r') || arg.contains('R')));
+                let force = args.iter().any(|arg| is_flag(arg) && arg.contains('f'));
+                let root_target = args.iter().any(|arg| {
+                    if !arg.starts_with('/') {
+                        return false;
+                    }
+                    match normalize_lexical(arg) {
+                        Ok(normalized) => matches!(normalized.as_str(), "/" | "/*"),
+                        // `/*` no es una ruta normalizable como tal, pero es raíz.
+                        Err(_) => *arg == "/*",
+                    }
+                });
+                if recursive && force && root_target {
                     return Some("rm -rf /".to_owned());
                 }
             }
@@ -423,7 +462,14 @@ pub fn evaluate_command(
     }
 
     let plain = plain_tokens(&tokens);
-    if let Some(pattern) = any_match(&plain, denied) {
+    // La denylist se aplica al comando completo y a cada sub-comando por
+    // separado: `true && systemctl stop api` no puede eludirla encadenando.
+    let mut denied_segments = vec![plain.clone()];
+    denied_segments.extend(subcommands(&tokens));
+    if let Some(pattern) = denied_segments
+        .iter()
+        .find_map(|segment| any_match(segment, denied))
+    {
         return CommandCheck {
             outcome: Decision::Deny,
             warnings,
@@ -790,5 +836,112 @@ mod tests {
             Decision::Allow,
         );
         assert_eq!(result.outcome, Decision::Ask);
+    }
+
+    #[test]
+    fn substitution_inside_double_quotes_is_a_subshell() {
+        for command in ["ls \"$(id)\"", "ls \"`id`\""] {
+            let tokens = tokenize(command).unwrap();
+            assert!(
+                tokens
+                    .iter()
+                    .any(|token| token.operator == Some(OperatorKind::Subshell)),
+                "{command}"
+            );
+            let result = check(command, ExecMode::Allowlist, &["ls *"], &[], Decision::Deny);
+            assert_eq!(result.outcome, Decision::Ask, "{command}");
+            assert!(
+                result.warnings.contains(&CommandWarning::Subshell),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn escaped_and_single_quoted_substitutions_are_inert() {
+        for command in [
+            "ls '$(id)'",
+            "ls '`id`'",
+            "ls \"\\$(id)\"",
+            "ls \"\\`id\\`\"",
+        ] {
+            let result = check(command, ExecMode::Allowlist, &["ls *"], &[], Decision::Deny);
+            assert_eq!(result.outcome, Decision::Allow, "{command}");
+            assert!(
+                !result.warnings.contains(&CommandWarning::Subshell),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn denied_command_is_matched_in_every_subcommand() {
+        for mode in [
+            ExecMode::Allowlist,
+            ExecMode::AskAll,
+            ExecMode::AllowExceptDenylist,
+        ] {
+            for command in [
+                "true && systemctl stop api",
+                "ls; systemctl stop api",
+                "systemctl status api && systemctl stop api",
+            ] {
+                let result = check(command, mode, &["*"], &["systemctl stop *"], Decision::Deny);
+                assert_eq!(result.outcome, Decision::Deny, "{command} {mode:?}");
+                assert_eq!(result.matched_rule, "systemctl stop *", "{command}");
+            }
+        }
+        let allowed = check(
+            "true && systemctl status api",
+            ExecMode::Allowlist,
+            &["*"],
+            &["systemctl stop *"],
+            Decision::Deny,
+        );
+        assert_ne!(allowed.outcome, Decision::Deny);
+    }
+
+    #[test]
+    fn sudo_is_detected_after_absolute_path_and_common_wrappers() {
+        for command in [
+            "/usr/bin/env sudo id",
+            "command sudo id",
+            "nohup sudo id",
+            "nice sudo id",
+        ] {
+            let result = check(command, ExecMode::AskAll, &[], &[], Decision::Deny);
+            assert_eq!(result.outcome, Decision::Deny, "{command}");
+            assert!(
+                result.warnings.contains(&CommandWarning::ContainsSudo),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn catastrophic_rm_normalizes_flags_and_root_target() {
+        for command in [
+            "rm -Rf /",
+            "rm -rf //",
+            "rm -rf /.",
+            "rm -rf /*",
+            "rm -R -f /",
+            "rm -rf ///*",
+        ] {
+            let result = check(command, ExecMode::AskAll, &[], &[], Decision::Allow);
+            assert_eq!(result.outcome, Decision::Deny, "{command}");
+            assert!(
+                result.matched_rule.starts_with("hard_denylist:"),
+                "{command}"
+            );
+        }
+        let safe = check(
+            "rm -rf /srv/api",
+            ExecMode::AskAll,
+            &[],
+            &[],
+            Decision::Allow,
+        );
+        assert_eq!(safe.outcome, Decision::Ask);
     }
 }

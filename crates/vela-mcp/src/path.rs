@@ -130,7 +130,7 @@ pub fn glob_match(pattern: &str, path: &str) -> bool {
 }
 
 /// Expande `~/` al directorio personal indicado.
-fn expand_tilde(value: &str, home: Option<&Path>) -> Option<String> {
+pub(crate) fn expand_tilde(value: &str, home: Option<&Path>) -> Option<String> {
     if value == "~" || value.starts_with("~/") {
         let home = home?;
         let rest = value.strip_prefix("~/").unwrap_or("");
@@ -259,7 +259,9 @@ pub fn check_local_path(
     vela_config_dir: Option<&Path>,
     allowed: &[String],
 ) -> PathAccess {
-    let mut fixed_denied = Vec::new();
+    // Se aplica siempre, también sin directorio personal conocido: rutas como
+    // `/home/alice/.ssh/id_rsa` o `/root/.ssh/config` siguen bloqueadas.
+    let mut fixed_denied = vec!["**/.ssh/**".to_owned()];
     if let Some(home) = home_dir {
         fixed_denied.push(expand_tilde("~/.ssh/**", Some(home)).unwrap());
     }
@@ -464,6 +466,23 @@ mod tests {
             ),
             PathAccess::Denied { .. }
         ));
+    }
+
+    #[test]
+    fn local_ssh_paths_are_denied_even_without_a_home_directory() {
+        for path in [
+            "/home/alice/.ssh/id_rsa",
+            "/home/alice/.ssh",
+            "/root/.ssh/config",
+        ] {
+            assert!(
+                matches!(
+                    check_local_path(path, None, None, None, &["/**".to_owned()]),
+                    PathAccess::Denied { .. }
+                ),
+                "{path}"
+            );
+        }
     }
 
     #[test]

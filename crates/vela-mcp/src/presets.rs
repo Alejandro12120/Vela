@@ -28,6 +28,7 @@ pub fn critical_denied_paths() -> Vec<String> {
 
 /// Un perfil de permisos, ya sea integrado o definido por la persona.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
 pub struct PermissionProfile {
     pub id: String,
     pub name: String,

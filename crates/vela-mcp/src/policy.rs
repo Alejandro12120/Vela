@@ -259,6 +259,63 @@ struct PathTarget<'a> {
     local: bool,
 }
 
+/// Normaliza el ámbito de una concesión efímera igual que se normalizan las rutas.
+fn normalized_scope(value: &str, home: Option<&std::path::Path>) -> Option<String> {
+    let expanded = path::expand_tilde(value, home)?;
+    path::normalize_lexical(&expanded).ok()
+}
+
+/// Una concesión sobre una ruta no puede aprovechar un symlink que apunta a
+/// otra: si se conoce la ruta canónica, el permiso debe coincidir con ambas.
+fn scoped_allow_for_target(
+    jit: &JitGrants,
+    server_id: &str,
+    operation: &str,
+    target: &PathTarget<'_>,
+    ctx: &EvalContext,
+) -> bool {
+    let Some(requested) = normalized_scope(target.requested, ctx.home_dir.as_deref()) else {
+        return false;
+    };
+    let granted_scope = |scope: &str| {
+        normalized_scope(scope, ctx.home_dir.as_deref()).as_deref() == Some(requested.as_str())
+    };
+    if !jit.any_scoped_allow(server_id, operation, ctx.now, granted_scope) {
+        return false;
+    }
+    if let Some(canonical) = target.canonical {
+        let Some(canonical) = normalized_scope(canonical, ctx.home_dir.as_deref()) else {
+            return false;
+        };
+        let granted_canonical = |scope: &str| {
+            normalized_scope(scope, ctx.home_dir.as_deref()).as_deref() == Some(canonical.as_str())
+        };
+        if !jit.any_scoped_allow(server_id, operation, ctx.now, granted_canonical) {
+            return false;
+        }
+    }
+    true
+}
+
+fn profile_decision(profile: &PermissionProfile, action: &McpAction) -> (Decision, String, String) {
+    match profile.decision_for(action.operation_name()) {
+        Some(base) => (
+            base,
+            action.operation_name().to_owned(),
+            match base {
+                Decision::Allow => "El perfil permite esta operación.".to_owned(),
+                Decision::Ask => "Esta operación requiere aprobación.".to_owned(),
+                Decision::Deny => "El perfil deniega esta operación.".to_owned(),
+            },
+        ),
+        None => (
+            Decision::Deny,
+            "unsupported_action".to_owned(),
+            "Esta acción no está disponible en v1.".to_owned(),
+        ),
+    }
+}
+
 /// Estado del entorno que afecta a una decisión.
 #[derive(Clone, Debug)]
 pub struct EvalContext {
@@ -289,6 +346,7 @@ pub enum PolicyWarning {
     OutOfScopePath { path: String, reason: String },
     EditsConflict,
     Command(CommandWarning),
+    FileExceedsRollbackLimit { size: u64, max_bytes: u64 },
 }
 
 /// Decisión devuelta por el motor de políticas.
@@ -416,27 +474,30 @@ impl PolicyEngine {
 
         // Las acciones globales (ListServers) no tienen política de servidor:
         // solo quedan sujetas al interruptor general `enabled`.
+        // `DescribePermissions` solo lee metadatos locales: no abre SSH, así que
+        // no depende de que el servidor esté conectado.
         let has_server = server_id.is_some();
-        if has_server {
-            match policy.availability {
-                ServerAvailability::Disabled => {
-                    return PolicyDecision::new(
-                        Decision::Deny,
-                        "server_disabled",
-                        "Este servidor no está disponible para el agente.",
-                    );
-                }
-                ServerAvailability::ConnectedOnly if !ctx.server_connected => {
-                    return PolicyDecision::new(
-                        Decision::Deny,
-                        "server_disconnected",
-                        "El servidor no está conectado.",
-                    );
-                }
-                _ => {}
-            }
+        let is_metadata = matches!(action, McpAction::DescribePermissions { .. });
+        if has_server && policy.availability == ServerAvailability::Disabled {
+            return PolicyDecision::new(
+                Decision::Deny,
+                "server_disabled",
+                "Este servidor no está disponible para el agente.",
+            );
+        }
+        if has_server
+            && !is_metadata
+            && policy.availability == ServerAvailability::ConnectedOnly
+            && !ctx.server_connected
+        {
+            return PolicyDecision::new(
+                Decision::Deny,
+                "server_disconnected",
+                "El servidor no está conectado.",
+            );
         }
         let availability_ask = has_server
+            && !is_metadata
             && policy.availability == ServerAvailability::OnDemandAsk
             && !ctx.server_connected;
 
@@ -483,20 +544,19 @@ impl PolicyEngine {
                 reason = check.reason;
                 warnings.extend(check.warnings.into_iter().map(PolicyWarning::Command));
             }
-            _ => {
-                if let Some(base) = profile.decision_for(action.operation_name()) {
-                    decision = base;
-                    matched_rule = action.operation_name().to_owned();
-                    reason = match base {
-                        Decision::Allow => "El perfil permite esta operación.".to_owned(),
-                        Decision::Ask => "Esta operación requiere aprobación.".to_owned(),
-                        Decision::Deny => "El perfil deniega esta operación.".to_owned(),
-                    };
-                } else {
-                    decision = Decision::Deny;
-                    matched_rule = "unsupported_action".to_owned();
-                    reason = "Esta acción no está disponible en v1.".to_owned();
+            McpAction::FsWrite { size, .. } | McpAction::FsPatch { size, .. } => {
+                (decision, matched_rule, reason) = profile_decision(&profile, action);
+                if self.config.rollback.enabled
+                    && (*size).is_some_and(|size| size > self.config.rollback.max_file_bytes)
+                {
+                    warnings.push(PolicyWarning::FileExceedsRollbackLimit {
+                        size: (*size).unwrap(),
+                        max_bytes: self.config.rollback.max_file_bytes,
+                    });
                 }
+            }
+            _ => {
+                (decision, matched_rule, reason) = profile_decision(&profile, action);
             }
         }
 
@@ -536,11 +596,12 @@ impl PolicyEngine {
                         break;
                     }
                     PathAccess::OutsideScope { reason: why } => {
-                        let scoped = self.jit.has_scoped_allow(
+                        let scoped = scoped_allow_for_target(
+                            &self.jit,
                             server_id.unwrap_or(""),
                             action.operation_name(),
-                            target.requested,
-                            ctx.now,
+                            &target,
+                            ctx,
                         );
                         if !scoped {
                             warnings.push(PolicyWarning::OutOfScopePath {
@@ -556,6 +617,32 @@ impl PolicyEngine {
                     }
                     PathAccess::Allowed { .. } => {}
                 }
+            }
+        }
+
+        // Las concesiones efímeras solo pueden convertir un `Ask` en `Allow`:
+        // nunca sortean un `Deny`, un conflicto de ediciones ni la aprobación
+        // exigida por una conexión bajo demanda.
+        if decision == Decision::Ask && !availability_ask && !ctx.open_in_edits_dirty {
+            let server = server_id.unwrap_or("");
+            let operation = action.operation_name();
+            let granted = match action {
+                McpAction::ExecCommand { command, .. } => {
+                    self.jit
+                        .has_scoped_allow(server, operation, command.trim(), ctx.now)
+                }
+                _ => {
+                    let targets = action.path_targets();
+                    !targets.is_empty()
+                        && targets.iter().all(|target| {
+                            scoped_allow_for_target(&self.jit, server, operation, target, ctx)
+                        })
+                }
+            };
+            if granted {
+                decision = Decision::Allow;
+                matched_rule = "jit_scoped_allow".to_owned();
+                reason = "Una concesión efímera permite esta operación.".to_owned();
             }
         }
 
@@ -591,6 +678,9 @@ impl PolicyEngine {
         now: SystemTime,
     ) -> Option<AgentServerInfo> {
         let policy = self.config.servers.get(server_id)?;
+        if !self.config.enabled || policy.availability == ServerAvailability::Disabled {
+            return None;
+        }
         let effective_profile = self
             .jit
             .active_profile_override(server_id, now)
@@ -625,7 +715,12 @@ impl PolicyEngine {
         };
         let mut config = self.config.clone();
         config.enabled = true;
-        let server_id = if config.servers.contains_key(profile_or_server) {
+        let server_id = if let Some(policy) = config.servers.get_mut(profile_or_server) {
+            // Ajustes debe poder previsualizar las reglas de un servidor
+            // desactivado antes de activarlo.
+            if policy.availability == ServerAvailability::Disabled {
+                policy.availability = ServerAvailability::ConnectedOnly;
+            }
             profile_or_server.to_owned()
         } else {
             let id = "__sim__".to_owned();
@@ -1298,5 +1393,299 @@ mod tests {
         let policy_engine = engine(ServerAvailability::ConnectedOnly, "diagnostics");
         let decision = policy_engine.simulate("srv", "exec systemctl status api");
         assert_eq!(decision.outcome, Decision::Allow);
+    }
+
+    #[test]
+    fn scoped_allow_does_not_follow_symlinks_to_another_path() {
+        let mut policy_engine = engine(ServerAvailability::ConnectedOnly, "readonly");
+        policy_engine
+            .jit_mut()
+            .grant_scoped_allow("srv", "fs_read", "/srv/api/tmp.log", at(900));
+        let action = McpAction::FsRead {
+            server_id: "srv".to_owned(),
+            path: "/srv/api/tmp.log".to_owned(),
+            canonical_path: Some("/var/backups/db.sql".to_owned()),
+        };
+        let decision = policy_engine.evaluate(&action, &ctx());
+        assert_eq!(decision.outcome, Decision::Ask);
+        assert_eq!(decision.matched_rule, "out_of_scope_path");
+        assert!(
+            decision
+                .warnings
+                .iter()
+                .any(|warning| matches!(warning, PolicyWarning::OutOfScopePath { .. }))
+        );
+
+        // Tampoco basta conceder solo la ruta real: la solicitada no coincide.
+        let mut policy_engine = engine(ServerAvailability::ConnectedOnly, "readonly");
+        policy_engine.jit_mut().grant_scoped_allow(
+            "srv",
+            "fs_read",
+            "/var/backups/db.sql",
+            at(900),
+        );
+        assert_eq!(
+            policy_engine.evaluate(&action, &ctx()).outcome,
+            Decision::Ask
+        );
+    }
+
+    #[test]
+    fn scoped_allow_promotes_in_scope_write_ask() {
+        let mut policy_engine = engine(ServerAvailability::ConnectedOnly, "production_protected");
+        policy_engine.jit_mut().grant_scoped_allow(
+            "srv",
+            "fs_write",
+            "/srv//api/./app.js",
+            at(900),
+        );
+        let action = McpAction::FsWrite {
+            server_id: "srv".to_owned(),
+            path: "/srv/api/app.js".to_owned(),
+            canonical_path: None,
+            size: Some(10),
+        };
+        let decision = policy_engine.evaluate(&action, &ctx());
+        assert_eq!(decision.outcome, Decision::Allow);
+        assert_eq!(decision.matched_rule, "jit_scoped_allow");
+        let mut later = ctx();
+        later.now = at(900);
+        assert_eq!(
+            policy_engine.evaluate(&action, &later).outcome,
+            Decision::Ask
+        );
+    }
+
+    #[test]
+    fn scoped_allow_promotes_exact_exec_command() {
+        let mut policy_engine = engine(ServerAvailability::ConnectedOnly, "development");
+        let exec = |command: &str| McpAction::ExecCommand {
+            server_id: "srv".to_owned(),
+            command: command.to_owned(),
+        };
+        assert_eq!(
+            policy_engine.evaluate(&exec("uname -a"), &ctx()).outcome,
+            Decision::Ask
+        );
+        policy_engine
+            .jit_mut()
+            .grant_scoped_allow("srv", "exec_command", "uname -a", at(900));
+        let decision = policy_engine.evaluate(&exec("uname -a"), &ctx());
+        assert_eq!(decision.outcome, Decision::Allow);
+        assert_eq!(decision.matched_rule, "jit_scoped_allow");
+        assert_eq!(
+            policy_engine.evaluate(&exec("uname -b"), &ctx()).outcome,
+            Decision::Ask
+        );
+    }
+
+    #[test]
+    fn scoped_allow_never_bypasses_a_deny() {
+        let mut policy_engine = engine(ServerAvailability::ConnectedOnly, "development");
+        policy_engine
+            .config_mut()
+            .servers
+            .get_mut("srv")
+            .unwrap()
+            .sudo = Some(Decision::Deny);
+        policy_engine
+            .jit_mut()
+            .grant_scoped_allow("srv", "fs_read", "/etc/shadow", at(900));
+        policy_engine
+            .jit_mut()
+            .grant_scoped_allow("srv", "exec_command", "sudo nginx -t", at(900));
+        policy_engine
+            .jit_mut()
+            .grant_scoped_allow("srv", "exec_command", "rm -rf /", at(900));
+        policy_engine
+            .jit_mut()
+            .grant_scoped_allow("srv", "fs_write", "/srv/api/app.js", at(900));
+
+        let shadow = McpAction::FsRead {
+            server_id: "srv".to_owned(),
+            path: "/etc/shadow".to_owned(),
+            canonical_path: None,
+        };
+        assert_eq!(
+            policy_engine.evaluate(&shadow, &ctx()).outcome,
+            Decision::Deny
+        );
+        let sudo = McpAction::ExecCommand {
+            server_id: "srv".to_owned(),
+            command: "sudo nginx -t".to_owned(),
+        };
+        assert_eq!(
+            policy_engine.evaluate(&sudo, &ctx()).outcome,
+            Decision::Deny
+        );
+        let catastrophic = McpAction::ExecCommand {
+            server_id: "srv".to_owned(),
+            command: "rm -rf /".to_owned(),
+        };
+        assert_eq!(
+            policy_engine.evaluate(&catastrophic, &ctx()).outcome,
+            Decision::Deny
+        );
+        let mut conflict = ctx();
+        conflict.open_in_edits_dirty = true;
+        let write = McpAction::FsWrite {
+            server_id: "srv".to_owned(),
+            path: "/srv/api/app.js".to_owned(),
+            canonical_path: None,
+            size: Some(10),
+        };
+        assert_eq!(
+            policy_engine.evaluate(&write, &conflict).outcome,
+            Decision::Deny
+        );
+
+        let mut on_demand = engine(ServerAvailability::OnDemandAsk, "readonly");
+        on_demand
+            .jit_mut()
+            .grant_scoped_allow("srv", "fs_read", "/tmp/app.log", at(900));
+        let outside = McpAction::FsRead {
+            server_id: "srv".to_owned(),
+            path: "/tmp/app.log".to_owned(),
+            canonical_path: None,
+        };
+        let mut disconnected = ctx();
+        disconnected.server_connected = false;
+        let decision = on_demand.evaluate(&outside, &disconnected);
+        assert_eq!(decision.outcome, Decision::Ask);
+        assert_eq!(decision.matched_rule, "on_demand_ask");
+    }
+
+    #[test]
+    fn describe_server_for_agent_hides_disabled_servers() {
+        let identity = ServerIdentity {
+            host: "ejemplo.com".to_owned(),
+            port: 22,
+            user: "root".to_owned(),
+        };
+        let mut policy_engine = engine(ServerAvailability::ConnectedOnly, "readonly");
+        assert!(
+            policy_engine
+                .describe_server_for_agent("srv", &identity, true, at(100))
+                .is_some()
+        );
+        policy_engine
+            .config_mut()
+            .servers
+            .get_mut("srv")
+            .unwrap()
+            .availability = ServerAvailability::Disabled;
+        assert!(
+            policy_engine
+                .describe_server_for_agent("srv", &identity, true, at(100))
+                .is_none()
+        );
+
+        let mut disabled_globally = engine(ServerAvailability::ConnectedOnly, "readonly");
+        disabled_globally.config_mut().enabled = false;
+        assert!(
+            disabled_globally
+                .describe_server_for_agent("srv", &identity, true, at(100))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn describe_permissions_does_not_require_a_connection() {
+        let action = McpAction::DescribePermissions {
+            server_id: "srv".to_owned(),
+        };
+        for availability in [
+            ServerAvailability::ConnectedOnly,
+            ServerAvailability::OnDemandAsk,
+        ] {
+            let policy_engine = engine(availability, "readonly");
+            let mut context = ctx();
+            context.server_connected = false;
+            let decision = policy_engine.evaluate(&action, &context);
+            assert_eq!(decision.outcome, Decision::Allow, "{availability:?}");
+            assert_eq!(decision.matched_rule, "info_allowed");
+        }
+        let disabled = engine(ServerAvailability::Disabled, "readonly");
+        assert_eq!(disabled.evaluate(&action, &ctx()).outcome, Decision::Deny);
+        let mut globally_disabled = engine(ServerAvailability::ConnectedOnly, "readonly");
+        globally_disabled.config_mut().enabled = false;
+        assert_eq!(
+            globally_disabled.evaluate(&action, &ctx()).outcome,
+            Decision::Deny
+        );
+    }
+
+    #[test]
+    fn rollback_warns_only_for_large_files_when_enabled() {
+        let mut policy_engine = engine(ServerAvailability::ConnectedOnly, "development");
+        policy_engine.config_mut().rollback.max_file_bytes = 100;
+        let write = |size| McpAction::FsWrite {
+            server_id: "srv".to_owned(),
+            path: "/srv/api/app.js".to_owned(),
+            canonical_path: None,
+            size: Some(size),
+        };
+        let big = policy_engine.evaluate(&write(101), &ctx());
+        assert_eq!(big.outcome, Decision::Allow);
+        assert!(
+            big.warnings
+                .contains(&PolicyWarning::FileExceedsRollbackLimit {
+                    size: 101,
+                    max_bytes: 100,
+                })
+        );
+        assert!(
+            !policy_engine
+                .evaluate(&write(100), &ctx())
+                .warnings
+                .iter()
+                .any(|warning| matches!(warning, PolicyWarning::FileExceedsRollbackLimit { .. }))
+        );
+
+        policy_engine.config_mut().rollback.enabled = false;
+        assert!(
+            !policy_engine
+                .evaluate(&write(101), &ctx())
+                .warnings
+                .iter()
+                .any(|warning| matches!(warning, PolicyWarning::FileExceedsRollbackLimit { .. }))
+        );
+
+        policy_engine.config_mut().rollback.enabled = true;
+        let patch = McpAction::FsPatch {
+            server_id: "srv".to_owned(),
+            path: "/srv/api/app.js".to_owned(),
+            canonical_path: None,
+            size: Some(101),
+        };
+        assert!(policy_engine.evaluate(&patch, &ctx()).warnings.contains(
+            &PolicyWarning::FileExceedsRollbackLimit {
+                size: 101,
+                max_bytes: 100,
+            }
+        ));
+    }
+
+    #[test]
+    fn simulator_previews_rules_of_a_disabled_server() {
+        let policy_engine = engine(ServerAvailability::Disabled, "development");
+        let action = McpAction::ExecCommand {
+            server_id: "srv".to_owned(),
+            command: "uname -a".to_owned(),
+        };
+        assert_eq!(
+            policy_engine.evaluate(&action, &ctx()).outcome,
+            Decision::Deny
+        );
+        assert_eq!(
+            policy_engine.simulate("srv", "exec uname -a").outcome,
+            Decision::Ask
+        );
+        assert_eq!(
+            policy_engine
+                .simulate("development", "exec uname -a")
+                .outcome,
+            Decision::Ask
+        );
     }
 }

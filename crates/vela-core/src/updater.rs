@@ -157,11 +157,7 @@ impl InstallHandle {
 }
 
 /// Runs [`download_and_install`] on a dedicated background thread and streams progress events.
-pub fn spawn_install(
-    config: Config,
-    release: ReleaseInfo,
-    target: InstallTarget,
-) -> InstallHandle {
+pub fn spawn_install(config: Config, release: ReleaseInfo, target: InstallTarget) -> InstallHandle {
     let (tx, rx) = async_channel::unbounded();
     thread::spawn(move || {
         let result = download_and_install(&config, &release, &target, |progress| {
@@ -281,11 +277,16 @@ pub fn check(config: &Config) -> Result<CheckOutcome, UpdateError> {
         strict_https,
     )?;
 
-    verify_sshsig(&manifest_path, &manifest_sig, &allowed_signers, "manifest.json")?;
+    verify_sshsig(
+        &manifest_path,
+        &manifest_sig,
+        &allowed_signers,
+        "manifest.json",
+    )?;
 
     let raw = fs::read_to_string(&manifest_path)?;
-    let manifest: Manifest = serde_json::from_str(&raw)
-        .map_err(|err| UpdateError::InvalidManifest(err.to_string()))?;
+    let manifest: Manifest =
+        serde_json::from_str(&raw).map_err(|err| UpdateError::InvalidManifest(err.to_string()))?;
 
     if manifest.schema != 1 {
         return Err(UpdateError::InvalidManifest(format!(
@@ -384,7 +385,12 @@ pub fn download_and_install(
     }
 
     download_small_file(&release.sig_url, &archive_sig, MAX_SIG_BYTES, strict_https)?;
-    verify_sshsig(&archive_path, &archive_sig, &allowed_signers, &release.asset)?;
+    verify_sshsig(
+        &archive_path,
+        &archive_sig,
+        &allowed_signers,
+        &release.asset,
+    )?;
 
     on_progress(Progress {
         stage: Stage::Installing,
@@ -1200,7 +1206,11 @@ mod tests {
             }
         });
         let manifest_path = dist.join("manifest.json");
-        fs::write(&manifest_path, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
         sign_sshsig(&key_path, &manifest_path);
 
         (tmp, pubkey, dist, platform.to_owned())

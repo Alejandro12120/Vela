@@ -556,7 +556,11 @@ fn update_button(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -
             .hover(move |style| style.bg(theme.hover))
             .active(move |style| style.bg(theme.selection))
             .focus_visible(move |style| style.border_color(theme.accent))
-            .child(icon(IconName::RefreshCw).size(px(15.)).text_color(theme.text))
+            .child(
+                icon(IconName::RefreshCw)
+                    .size(px(15.))
+                    .text_color(theme.text),
+            )
             .on_click(cx.listener(|this, _, window, cx| this.check_for_updates(window, cx))),
         UpdateState::Checking => base
             .aria_label("Buscando actualizaciones…")
@@ -564,7 +568,9 @@ fn update_button(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -
             .bg(theme.selection)
             .opacity(0.75)
             .child(motion::spin(
-                icon(IconName::RefreshCw).size(px(15.)).text_color(theme.secondary_text),
+                icon(IconName::RefreshCw)
+                    .size(px(15.))
+                    .text_color(theme.secondary_text),
                 "update-check-spin",
             )),
         UpdateState::Available { release, .. } => base
@@ -576,14 +582,22 @@ fn update_button(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -
             .hover(move |style| style.bg(theme.hover))
             .active(move |style| style.bg(theme.selection))
             .focus_visible(move |style| style.border_color(theme.accent))
-            .child(icon(IconName::CircleArrowDown).size(px(15.)).text_color(theme.accent))
+            .child(
+                icon(IconName::CircleArrowDown)
+                    .size(px(15.))
+                    .text_color(theme.accent),
+            )
             .on_click(cx.listener(|this, _, window, cx| this.install_update(window, cx))),
         UpdateState::Installing { release, .. } => base
             .aria_label(format!("Instalando actualización {}…", release.version))
             .border_color(theme.border)
             .bg(theme.selection)
             .opacity(0.75)
-            .child(icon(IconName::CircleArrowDown).size(px(15.)).text_color(theme.secondary_text)),
+            .child(
+                icon(IconName::CircleArrowDown)
+                    .size(px(15.))
+                    .text_color(theme.secondary_text),
+            ),
     }
 }
 

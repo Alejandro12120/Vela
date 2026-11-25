@@ -595,7 +595,10 @@ impl Workspace {
                 }
                 match result {
                     Ok(vela_core::updater::CheckOutcome::UpdateAvailable(release)) => {
-                        dev::log(format_args!("actualización disponible: v{}", release.version));
+                        dev::log(format_args!(
+                            "actualización disponible: v{}",
+                            release.version
+                        ));
                         this.update_state = UpdateState::Available {
                             release,
                             error: None,

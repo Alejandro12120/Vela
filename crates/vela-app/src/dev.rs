@@ -34,6 +34,12 @@ pub fn config_directory() -> io::Result<PathBuf> {
     config_override().map_or_else(config::default_directory, Ok)
 }
 
+/// Only the real configuration directory may be migrated from vSCP. Isolated
+/// dev and test runs must never touch the user's legacy files.
+pub fn uses_default_config() -> bool {
+    config_override().is_none()
+}
+
 pub fn isolate_known_hosts(spec: &mut ConnectionSpec) {
     if let Some(dir) = config_override() {
         spec.known_hosts = Some(dir.join("known_hosts"));

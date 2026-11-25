@@ -73,9 +73,19 @@ fn main() {
 
             cx.set_global(appearance::Appearance::default());
             let dir = dev::config_directory().ok();
-            let loading = cx
-                .background_executor()
-                .spawn(async move { dir.as_deref().map(appearance::Loaded::read) });
+            let migrate_legacy = dev::uses_default_config();
+            let loading = cx.background_executor().spawn(async move {
+                if migrate_legacy {
+                    match vela_core::config::migrate_legacy_directory() {
+                        Ok(true) => dev::log("migrated the vSCP configuration directory"),
+                        Ok(false) => {}
+                        Err(error) => dev::log(format_args!(
+                            "no se pudo migrar la configuración de vSCP: {error}"
+                        )),
+                    }
+                }
+                dir.as_deref().map(appearance::Loaded::read)
+            });
             cx.spawn(async move |cx| {
                 let loaded = loading.await;
                 cx.update(move |cx| {

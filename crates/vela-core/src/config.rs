@@ -228,8 +228,7 @@ pub fn migrate_legacy_directory() -> io::Result<bool> {
 /// rewrites keys that point into the old directory, and only removes `legacy`
 /// once everything else succeeded. A failure leaves `legacy` untouched.
 pub fn migrate_directory(legacy: &Path, target: &Path) -> io::Result<bool> {
-    if legacy == target
-        || !fs::symlink_metadata(legacy).is_ok_and(|meta| meta.file_type().is_dir())
+    if legacy == target || !fs::symlink_metadata(legacy).is_ok_and(|meta| meta.file_type().is_dir())
     {
         return Ok(false);
     }
@@ -299,7 +298,9 @@ fn rewrite_migrated_key_paths(legacy: &Path, target: &Path) -> io::Result<()> {
     let mut changed = false;
     for server in &mut servers {
         if let Auth::Agent { identity_pub, .. } = &mut server.auth
-            && let Ok(relative) = identity_pub.strip_prefix(&legacy_keys).map(Path::to_path_buf)
+            && let Ok(relative) = identity_pub
+                .strip_prefix(&legacy_keys)
+                .map(Path::to_path_buf)
         {
             *identity_pub = target_keys.join(relative);
             changed = true;
@@ -772,7 +773,10 @@ mod tests {
             fs::read_to_string(target.join("known_hosts")).unwrap(),
             "legacy hosts"
         );
-        assert_eq!(fs::read(target.join("keys/legacy.pub")).unwrap(), b"legacy key");
+        assert_eq!(
+            fs::read(target.join("keys/legacy.pub")).unwrap(),
+            b"legacy key"
+        );
         assert_eq!(
             fs::read_to_string(target.join("themes/bosque.toml")).unwrap(),
             "id = \"bosque\""
@@ -780,8 +784,16 @@ mod tests {
 
         let migrated = load(&target).unwrap();
         assert_eq!(migrated.len(), 3);
-        assert!(migrated.iter().any(|s| s.id == "new" && s.name == "De Vela"));
-        assert!(migrated.iter().any(|s| s.id == "shared" && s.name == "Vela shared"));
+        assert!(
+            migrated
+                .iter()
+                .any(|s| s.id == "new" && s.name == "De Vela")
+        );
+        assert!(
+            migrated
+                .iter()
+                .any(|s| s.id == "shared" && s.name == "Vela shared")
+        );
         let old = migrated.iter().find(|server| server.id == "old").unwrap();
         assert_eq!(old.name, "De vSCP");
         assert_eq!(

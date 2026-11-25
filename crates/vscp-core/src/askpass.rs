@@ -70,12 +70,14 @@ impl Request {
 }
 
 fn classify(prompt: &str) -> Kind {
-    if let Some(fingerprint) = prompt
-        .lines()
-        .find_map(|line| line.split_once("key fingerprint is: "))
-    {
+    if let Some(fingerprint) = prompt.lines().find_map(|line| {
+        line.split_once("key fingerprint is:")
+            .or_else(|| line.split_once("key fingerprint is "))
+            .map(|(_, value)| value.trim().trim_end_matches('.'))
+            .filter(|value| !value.is_empty())
+    }) {
         Kind::HostKeyConfirm {
-            fingerprint: fingerprint.1.trim().to_owned(),
+            fingerprint: fingerprint.to_owned(),
         }
     } else if prompt.starts_with("Enter passphrase for key ") {
         Kind::Passphrase
@@ -382,6 +384,12 @@ mod tests {
         );
         assert_eq!(
             classify("ED25519 key fingerprint is: SHA256:abcdefgh\nContinue?"),
+            Kind::HostKeyConfirm {
+                fingerprint: "SHA256:abcdefgh".into(),
+            }
+        );
+        assert_eq!(
+            classify("ED25519 key fingerprint is SHA256:abcdefgh.\nContinue?"),
             Kind::HostKeyConfirm {
                 fingerprint: "SHA256:abcdefgh".into(),
             }

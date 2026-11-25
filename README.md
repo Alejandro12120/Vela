@@ -61,7 +61,7 @@ Download the archive for your system from [Releases](https://github.com/Alejandr
 - **macOS.** Extract `Vela-<version>-macos-aarch64.tar.gz` and move `Vela.app` into `/Applications`.
 - **Linux.** Extract `vela-<version>-linux-x86_64.tar.gz`, place `vela` in a directory on your `PATH` such as `~/.local/bin/vela`, and copy `vela.desktop` to `~/.local/share/applications/`.
 
-Every release includes detached `.sig` files, `SHA256SUMS.txt`, and a signed `manifest.json`. See [docs/RELEASES.md](docs/RELEASES.md) for manual verification commands with `openssl`.
+Every release includes detached `.sig` and `.sshsig` files, `SHA256SUMS.txt`, and a signed `manifest.json`. See [docs/RELEASES.md](docs/RELEASES.md) for manual verification commands.
 
 ## Updating
 

@@ -2,8 +2,10 @@
 """Sign Vela release archives with Ed25519 and generate manifest.json for the updater.
 
 Reads the private key from the VELA_SIGNING_KEY environment variable (raw PEM or
-base64-encoded PEM), writes detached raw Ed25519 `.sig` files, SHA256SUMS.txt,
-and manifest.json, then verifies every signature against the derived public key.
+base64-encoded PEM), writes both detached raw Ed25519 `.sig` files (for the in-app
+updater and OpenSSL 3+) and OpenSSH `.sshsig` files (for `install.sh` on macOS and
+Linux via `ssh-keygen -Y verify`), SHA256SUMS.txt, and manifest.json, then verifies
+every signature against the derived public key.
 """
 
 from __future__ import annotations
@@ -15,9 +17,16 @@ import hashlib
 import json
 import os
 import pathlib
+import secrets
+import struct
 import subprocess
 import sys
 import tempfile
+
+SSHSIG_IDENTITY = "vela@release"
+SSHSIG_NAMESPACE = "vela-release"
+PKCS8_ED25519_PREFIX = bytes.fromhex("302e020100300506032b657004220420")
+SPKI_ED25519_PREFIX = bytes.fromhex("302a300506032b6570032100")
 
 
 def decode_private_key(raw: str) -> bytes:
@@ -46,20 +55,73 @@ def sha256_hex(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
-def run_openssl(args: list[str]) -> bytes:
+def run_cmd(cmd: list[str], stdin_bytes: bytes | None = None) -> bytes:
     proc = subprocess.run(
-        ["openssl", *args],
+        cmd,
+        input=stdin_bytes,
         check=False,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
     if proc.returncode != 0:
         stderr = proc.stderr.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(f"openssl {' '.join(args)} failed: {stderr}")
+        raise RuntimeError(f"{' '.join(cmd)} failed: {stderr}")
     return proc.stdout
 
 
-def sign_file(target: pathlib.Path, key_path: pathlib.Path) -> pathlib.Path:
+def run_openssl(args: list[str]) -> bytes:
+    return run_cmd(["openssl", *args])
+
+
+def ssh_string(data: bytes) -> bytes:
+    return struct.pack(">I", len(data)) + data
+
+
+def build_openssh_ed25519_keys(raw_seed: bytes, raw_pub: bytes) -> tuple[bytes, str]:
+    """Build an unencrypted OpenSSH Ed25519 private key PEM and matching .pub line."""
+    if len(raw_seed) != 32 or len(raw_pub) != 32:
+        raise ValueError("Ed25519 seed and public key must each be 32 bytes")
+
+    pub_blob = ssh_string(b"ssh-ed25519") + ssh_string(raw_pub)
+    pub_line = f"ssh-ed25519 {base64.b64encode(pub_blob).decode('ascii')}"
+
+    check = secrets.randbits(32)
+    priv = bytearray()
+    priv += struct.pack(">II", check, check)
+    priv += ssh_string(b"ssh-ed25519")
+    priv += ssh_string(raw_pub)
+    priv += ssh_string(raw_seed + raw_pub)
+    priv += ssh_string(SSHSIG_IDENTITY.encode("ascii"))
+    pad = 1
+    while len(priv) % 8 != 0:
+        priv.append(pad)
+        pad += 1
+
+    body = bytearray(b"openssh-key-v1\x00")
+    body += ssh_string(b"none")  # ciphername
+    body += ssh_string(b"none")  # kdfname
+    body += ssh_string(b"")      # kdfoptions
+    body += struct.pack(">I", 1)  # number of keys
+    body += ssh_string(pub_blob)
+    body += ssh_string(bytes(priv))
+
+    b64 = base64.b64encode(bytes(body)).decode("ascii")
+    lines = [b64[i : i + 70] for i in range(0, len(b64), 70)]
+    pem = (
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        + "\n".join(lines)
+        + "\n-----END OPENSSH PRIVATE KEY-----\n"
+    ).encode("ascii")
+    return pem, pub_line
+
+
+def write_secret_file(path: pathlib.Path, data: bytes) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+
+
+def sign_file_raw(target: pathlib.Path, key_path: pathlib.Path) -> pathlib.Path:
     sig_path = target.with_name(target.name + ".sig")
     run_openssl(
         [
@@ -77,7 +139,7 @@ def sign_file(target: pathlib.Path, key_path: pathlib.Path) -> pathlib.Path:
     return sig_path
 
 
-def verify_file(
+def verify_file_raw(
     target: pathlib.Path, sig_path: pathlib.Path, pub_path: pathlib.Path
 ) -> None:
     run_openssl(
@@ -94,6 +156,73 @@ def verify_file(
             str(sig_path),
         ]
     )
+
+
+def sign_file_sshsig(target: pathlib.Path, ssh_key_path: pathlib.Path) -> pathlib.Path:
+    sig_path = target.with_name(target.name + ".sshsig")
+    with target.open("rb") as fh:
+        proc = subprocess.run(
+            [
+                "ssh-keygen",
+                "-Y",
+                "sign",
+                "-f",
+                str(ssh_key_path),
+                "-n",
+                SSHSIG_NAMESPACE,
+            ],
+            stdin=fh,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"ssh-keygen -Y sign failed for {target.name}: {stderr}")
+    sig_path.write_bytes(proc.stdout)
+    return sig_path
+
+
+def verify_file_sshsig(
+    target: pathlib.Path, sig_path: pathlib.Path, allowed_signers: pathlib.Path
+) -> None:
+    with target.open("rb") as fh:
+        proc = subprocess.run(
+            [
+                "ssh-keygen",
+                "-Y",
+                "verify",
+                "-f",
+                str(allowed_signers),
+                "-I",
+                SSHSIG_IDENTITY,
+                "-n",
+                SSHSIG_NAMESPACE,
+                "-s",
+                str(sig_path),
+            ],
+            stdin=fh,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"ssh-keygen -Y verify failed for {target.name}: {stderr}")
+
+
+def sign_and_verify_all(
+    target: pathlib.Path,
+    key_path: pathlib.Path,
+    pub_path: pathlib.Path,
+    ssh_key_path: pathlib.Path,
+    allowed_signers: pathlib.Path,
+) -> tuple[pathlib.Path, pathlib.Path]:
+    raw_sig = sign_file_raw(target, key_path)
+    verify_file_raw(target, raw_sig, pub_path)
+    ssh_sig = sign_file_sshsig(target, ssh_key_path)
+    verify_file_sshsig(target, ssh_sig, allowed_signers)
+    return raw_sig, ssh_sig
 
 
 def parse_args() -> argparse.Namespace:
@@ -133,12 +262,14 @@ def main() -> int:
         tmp_dir = pathlib.Path(tmp)
         os.chmod(tmp_dir, 0o700)
         key_path = tmp_dir / "private.pem"
+        priv_der_path = tmp_dir / "private.der"
         pub_path = tmp_dir / "public.pem"
-        pub_der = tmp_dir / "public.der"
+        pub_der_path = tmp_dir / "public.der"
+        ssh_key_path = tmp_dir / "openssh_ed25519"
+        ssh_pub_path = tmp_dir / "openssh_ed25519.pub"
+        allowed_signers = tmp_dir / "allowed_signers"
 
-        fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(key_pem)
+        write_secret_file(key_path, key_pem)
 
         # Derive public key and validate the key is Ed25519.
         key_text = run_openssl(
@@ -147,6 +278,9 @@ def main() -> int:
         if "ED25519" not in key_text.upper():
             sys.exit("VELA_SIGNING_KEY must be an Ed25519 private key")
 
+        run_openssl(
+            ["pkey", "-in", str(key_path), "-outform", "DER", "-out", str(priv_der_path)]
+        )
         run_openssl(
             ["pkey", "-in", str(key_path), "-pubout", "-out", str(pub_path)]
         )
@@ -159,19 +293,40 @@ def main() -> int:
                 "-outform",
                 "DER",
                 "-out",
-                str(pub_der),
+                str(pub_der_path),
             ]
         )
-        # SubjectPublicKeyInfo for Ed25519 is 12-byte ASN.1 header + 32-byte raw key.
-        der_bytes = pub_der.read_bytes()
-        if len(der_bytes) != 44:
+
+        priv_der = priv_der_path.read_bytes()
+        if len(priv_der) != 48 or not priv_der.startswith(PKCS8_ED25519_PREFIX):
             sys.exit(
-                f"Unexpected Ed25519 SubjectPublicKeyInfo DER length ({len(der_bytes)} bytes)"
+                f"Unexpected Ed25519 PKCS#8 DER format ({len(priv_der)} bytes)"
             )
-        raw_pub = der_bytes[-32:]
+        raw_seed = priv_der[-32:]
+
+        pub_der = pub_der_path.read_bytes()
+        if len(pub_der) != 44 or not pub_der.startswith(SPKI_ED25519_PREFIX):
+            sys.exit(
+                f"Unexpected Ed25519 SubjectPublicKeyInfo DER format ({len(pub_der)} bytes)"
+            )
+        raw_pub = pub_der[-32:]
+
+        ssh_key_pem, ssh_pub_line = build_openssh_ed25519_keys(raw_seed, raw_pub)
+        write_secret_file(ssh_key_path, ssh_key_pem)
+        ssh_pub_path.write_text(ssh_pub_line + "\n", encoding="ascii")
+        derived_ssh_pub = run_cmd(["ssh-keygen", "-y", "-f", str(ssh_key_path)]).decode(
+            "ascii"
+        ).strip()
+        if derived_ssh_pub != ssh_pub_line:
+            sys.exit("Derived OpenSSH public key does not match OpenSSL Ed25519 key")
+        allowed_signers.write_text(
+            f"{SSHSIG_IDENTITY} {ssh_pub_line}\n", encoding="ascii"
+        )
+
         pub_b64 = base64.b64encode(raw_pub).decode("ascii")
         pub_fp = hashlib.sha256(raw_pub).hexdigest()
         print(f"Ed25519 public key (base64, 32 bytes): {pub_b64}")
+        print(f"Ed25519 public key (OpenSSH): {ssh_pub_line}")
         print(f"Ed25519 public key SHA-256: {pub_fp}")
 
         download_base = f"https://github.com/{args.repo}/releases/download/{args.tag}"
@@ -181,8 +336,9 @@ def main() -> int:
         for platform, asset_path in sorted(platform_assets, key=lambda x: x[0]):
             digest = sha256_hex(asset_path)
             size = asset_path.stat().st_size
-            sig_path = sign_file(asset_path, key_path)
-            verify_file(asset_path, sig_path, pub_path)
+            sig_path, _ = sign_and_verify_all(
+                asset_path, key_path, pub_path, ssh_key_path, allowed_signers
+            )
             sig_bytes = sig_path.read_bytes()
             if len(sig_bytes) != 64:
                 sys.exit(
@@ -200,8 +356,9 @@ def main() -> int:
 
         sums_path = dist_dir / "SHA256SUMS.txt"
         sums_path.write_text("\n".join(sums_lines) + "\n", encoding="utf-8")
-        sums_sig = sign_file(sums_path, key_path)
-        verify_file(sums_path, sums_sig, pub_path)
+        sign_and_verify_all(
+            sums_path, key_path, pub_path, ssh_key_path, allowed_signers
+        )
 
         manifest = {
             "schema": 1,
@@ -219,10 +376,14 @@ def main() -> int:
             json.dumps(manifest, indent=2, sort_keys=False) + "\n",
             encoding="utf-8",
         )
-        manifest_sig = sign_file(manifest_path, key_path)
-        verify_file(manifest_path, manifest_sig, pub_path)
+        sign_and_verify_all(
+            manifest_path, key_path, pub_path, ssh_key_path, allowed_signers
+        )
 
-        print(f"Signed and verified {len(platform_assets)} platform archive(s), SHA256SUMS.txt and manifest.json.")
+        print(
+            f"Signed and verified {len(platform_assets)} platform archive(s), "
+            "SHA256SUMS.txt and manifest.json (.sig + .sshsig)."
+        )
 
     return 0
 

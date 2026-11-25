@@ -85,6 +85,38 @@ jobs:
               out.write(f"draft={draft}\n")
           PY
 
+      - name: Render app icons
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends librsvg2-bin
+          mkdir -p dist-icons/linux/hicolor/scalable/apps
+          cp packaging/icons/vela.svg dist-icons/linux/hicolor/scalable/apps/vela.svg
+          for size in 48 64 128 256 512; do
+            mkdir -p "dist-icons/linux/hicolor/${size}x${size}/apps"
+            rsvg-convert -w "$size" -h "$size" packaging/icons/vela.svg \
+              -o "dist-icons/linux/hicolor/${size}x${size}/apps/vela.png"
+          done
+          iconset="dist-icons/macos/Vela.iconset"
+          mkdir -p "$iconset"
+          rsvg-convert -w 16   -h 16   packaging/icons/vela-macos.svg -o "$iconset/icon_16x16.png"
+          rsvg-convert -w 32   -h 32   packaging/icons/vela-macos.svg -o "$iconset/icon_16x16@2x.png"
+          rsvg-convert -w 32   -h 32   packaging/icons/vela-macos.svg -o "$iconset/icon_32x32.png"
+          rsvg-convert -w 64   -h 64   packaging/icons/vela-macos.svg -o "$iconset/icon_32x32@2x.png"
+          rsvg-convert -w 128  -h 128  packaging/icons/vela-macos.svg -o "$iconset/icon_128x128.png"
+          rsvg-convert -w 256  -h 256  packaging/icons/vela-macos.svg -o "$iconset/icon_128x128@2x.png"
+          rsvg-convert -w 256  -h 256  packaging/icons/vela-macos.svg -o "$iconset/icon_256x256.png"
+          rsvg-convert -w 512  -h 512  packaging/icons/vela-macos.svg -o "$iconset/icon_256x256@2x.png"
+          rsvg-convert -w 512  -h 512  packaging/icons/vela-macos.svg -o "$iconset/icon_512x512.png"
+          rsvg-convert -w 1024 -h 1024 packaging/icons/vela-macos.svg -o "$iconset/icon_512x512@2x.png"
+
+      - name: Upload rendered icons
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-icons
+          path: dist-icons
+          retention-days: 1
+          if-no-files-found: error
+
   build:
     name: Build (${{ matrix.platform }})
     needs: prepare
@@ -141,6 +173,12 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked
 
+      - name: Download rendered icons
+        uses: actions/download-artifact@v4
+        with:
+          name: release-icons
+          path: dist-icons
+
       - name: Package Linux archive
         if: runner.os == 'Linux'
         env:
@@ -148,15 +186,17 @@ jobs:
           ASSET: ${{ matrix.asset }}
         run: |
           stage="dist/vela-${VERSION}-linux-x86_64"
-          mkdir -p "$stage"
+          mkdir -p "$stage/icons"
           cp target/release/vela "$stage/vela"
           cp LICENSE "$stage/LICENSE"
+          cp -R dist-icons/linux/hicolor "$stage/icons/hicolor"
           cat > "$stage/vela.desktop" <<'EOF'
           [Desktop Entry]
           Type=Application
           Name=Vela
           Comment=Lightweight SSH and SFTP client
           Exec=vela
+          Icon=vela
           Terminal=false
           Categories=Network;FileTransfer;Utility;
           StartupWMClass=vela
@@ -175,6 +215,7 @@ jobs:
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
           cp target/release/vela "$app/Contents/MacOS/vela"
           cp LICENSE "$app/Contents/Resources/LICENSE"
+          iconutil -c icns dist-icons/macos/Vela.iconset -o "$app/Contents/Resources/Vela.icns"
           chmod 0755 "$app/Contents/MacOS/vela"
           cat > "$app/Contents/Info.plist" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
@@ -187,6 +228,8 @@ jobs:
             <string>Vela</string>
             <key>CFBundleExecutable</key>
             <string>vela</string>
+            <key>CFBundleIconFile</key>
+            <string>Vela</string>
             <key>CFBundleIdentifier</key>
             <string>com.alejandro12120.vela</string>
             <key>CFBundleInfoDictionaryVersion</key>

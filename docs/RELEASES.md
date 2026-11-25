@@ -42,14 +42,26 @@ En el repositorio: **Settings → Secrets and variables → Actions → New repo
 
 ### Artefactos generados
 
-- `Vela-<versión>-macos-aarch64.tar.gz` (`Vela.app` con `Info.plist` y firma ad-hoc) + `.sig`
-- `vela-<versión>-linux-x86_64.tar.gz` (`vela`, `LICENSE`, `vela.desktop`) + `.sig`
-- `SHA256SUMS.txt` + `SHA256SUMS.txt.sig`
-- `manifest.json` + `manifest.json.sig` (esquema `1` pensado para el futuro auto-updater, consultable vía `.../releases/latest/download/manifest.json`)
+- `Vela-<versión>-macos-aarch64.tar.gz` (`Vela.app` con `Info.plist`, icono `Vela.icns` y firma ad-hoc) + `.sig` + `.sshsig`
+- `vela-<versión>-linux-x86_64.tar.gz` (`vela`, `LICENSE`, `vela.desktop` con `Icon=vela` e iconos `hicolor` SVG/PNG) + `.sig` + `.sshsig`
+- `SHA256SUMS.txt` + `SHA256SUMS.txt.sig` + `SHA256SUMS.txt.sshsig`
+- `manifest.json` + `manifest.json.sig` + `manifest.json.sshsig` (esquema `1` pensado para `install.sh` y el futuro auto-updater, consultable vía `.../releases/latest/download/manifest.json`)
+
+Las firmas `.sig` (Ed25519 raw de 64 bytes) y `.sshsig` (OpenSSH SSHSIG, namespace `vela-release`) se generan a partir del mismo secreto `VELA_SIGNING_KEY`. Las claves públicas correspondientes están en [packaging/vela-release.pub](../packaging/vela-release.pub) y [packaging/vela-release-public.pem](../packaging/vela-release-public.pem).
 
 ### Verificar una descarga manualmente
 
+Con OpenSSH (funciona igual en macOS y Linux, usado por `install.sh`):
+
 ```sh
-openssl pkeyutl -verify -pubin -inkey vela-release-public.pem \
+printf 'vela@release %s\n' "$(cat packaging/vela-release.pub)" > allowed_signers
+ssh-keygen -Y verify -f allowed_signers -I vela@release -n vela-release \
+  -s manifest.json.sshsig < manifest.json
+```
+
+Con OpenSSL 3+ (Linux):
+
+```sh
+openssl pkeyutl -verify -pubin -inkey packaging/vela-release-public.pem \
   -rawin -in manifest.json -sigfile manifest.json.sig
 ```

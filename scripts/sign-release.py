@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Sign vSCP release archives with Ed25519 and generate manifest.json for the updater.
+"""Sign Vela release archives with Ed25519 and generate manifest.json for the updater.
 
-Reads the private key from the VSCP_SIGNING_KEY environment variable (raw PEM or
+Reads the private key from the VELA_SIGNING_KEY environment variable (raw PEM or
 base64-encoded PEM), writes detached raw Ed25519 `.sig` files, SHA256SUMS.txt,
 and manifest.json, then verifies every signature against the derived public key.
 """
@@ -23,18 +23,18 @@ import tempfile
 def decode_private_key(raw: str) -> bytes:
     cleaned = raw.strip()
     if not cleaned:
-        raise ValueError("VSCP_SIGNING_KEY is empty")
+        raise ValueError("VELA_SIGNING_KEY is empty")
     if "BEGIN " in cleaned:
         return (cleaned + "\n").encode("utf-8")
     try:
         decoded = base64.b64decode(cleaned, validate=True)
     except Exception as exc:
         raise ValueError(
-            "VSCP_SIGNING_KEY must be an Ed25519 private key in PEM format "
+            "VELA_SIGNING_KEY must be an Ed25519 private key in PEM format "
             "(raw PEM or base64-encoded PEM)"
         ) from exc
     if b"BEGIN " not in decoded:
-        raise ValueError("Decoded VSCP_SIGNING_KEY does not contain a PEM header")
+        raise ValueError("Decoded VELA_SIGNING_KEY does not contain a PEM header")
     return decoded
 
 
@@ -117,7 +117,7 @@ def main() -> int:
     if not dist_dir.is_dir():
         sys.exit(f"Directory not found: {dist_dir}")
 
-    key_pem = decode_private_key(os.environ.get("VSCP_SIGNING_KEY", ""))
+    key_pem = decode_private_key(os.environ.get("VELA_SIGNING_KEY", ""))
 
     platform_assets: list[tuple[str, pathlib.Path]] = []
     for entry in args.platform:
@@ -129,7 +129,7 @@ def main() -> int:
             sys.exit(f"Missing release asset for {platform}: {asset_path}")
         platform_assets.append((platform, asset_path))
 
-    with tempfile.TemporaryDirectory(prefix="vscp-sign-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="vela-sign-") as tmp:
         tmp_dir = pathlib.Path(tmp)
         os.chmod(tmp_dir, 0o700)
         key_path = tmp_dir / "private.pem"
@@ -145,7 +145,7 @@ def main() -> int:
             ["pkey", "-in", str(key_path), "-pubout", "-text", "-noout"]
         ).decode("utf-8", errors="replace")
         if "ED25519" not in key_text.upper():
-            sys.exit("VSCP_SIGNING_KEY must be an Ed25519 private key")
+            sys.exit("VELA_SIGNING_KEY must be an Ed25519 private key")
 
         run_openssl(
             ["pkey", "-in", str(key_path), "-pubout", "-out", str(pub_path)]

@@ -8,7 +8,7 @@ if [ "$user" = root ]; then
     exit 1
 fi
 
-dir=$(mktemp -d /tmp/vscp-dev-sshd.XXXXXX)
+dir=$(mktemp -d /tmp/vela-dev-sshd.XXXXXX)
 server_pid=
 agent_pid=
 cleanup() {

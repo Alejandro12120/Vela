@@ -48,14 +48,14 @@ jobs:
           python3 - <<'PY'
           import os, re, sys, tomllib
 
-          with open("crates/vscp-app/Cargo.toml", "rb") as f:
+          with open("crates/vela-app/Cargo.toml", "rb") as f:
               app_version = tomllib.load(f)["package"]["version"]
-          with open("crates/vscp-core/Cargo.toml", "rb") as f:
+          with open("crates/vela-core/Cargo.toml", "rb") as f:
               core_version = tomllib.load(f)["package"]["version"]
 
           if app_version != core_version:
               sys.exit(
-                  f"Version mismatch: vscp-app={app_version} != vscp-core={core_version}"
+                  f"Version mismatch: vela-app={app_version} != vela-core={core_version}"
               )
 
           event = os.environ["GITHUB_EVENT_NAME"]
@@ -95,10 +95,10 @@ jobs:
         include:
           - platform: linux-x86_64
             os: ubuntu-latest
-            asset: vscp-${{ needs.prepare.outputs.version }}-linux-x86_64.tar.gz
+            asset: vela-${{ needs.prepare.outputs.version }}-linux-x86_64.tar.gz
           - platform: macos-aarch64
             os: macos-15
-            asset: vSCP-${{ needs.prepare.outputs.version }}-macos-aarch64.tar.gz
+            asset: Vela-${{ needs.prepare.outputs.version }}-macos-aarch64.tar.gz
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -147,22 +147,22 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
           ASSET: ${{ matrix.asset }}
         run: |
-          stage="dist/vscp-${VERSION}-linux-x86_64"
+          stage="dist/vela-${VERSION}-linux-x86_64"
           mkdir -p "$stage"
-          cp target/release/vscp "$stage/vscp"
+          cp target/release/vela "$stage/vela"
           cp LICENSE "$stage/LICENSE"
-          cat > "$stage/vscp.desktop" <<'EOF'
+          cat > "$stage/vela.desktop" <<'EOF'
           [Desktop Entry]
           Type=Application
-          Name=vSCP
+          Name=Vela
           Comment=Lightweight SSH and SFTP client
-          Exec=vscp
+          Exec=vela
           Terminal=false
           Categories=Network;FileTransfer;Utility;
-          StartupWMClass=vscp
+          StartupWMClass=vela
           EOF
-          chmod 0755 "$stage/vscp"
-          tar -C dist -czf "dist/${ASSET}" "vscp-${VERSION}-linux-x86_64"
+          chmod 0755 "$stage/vela"
+          tar -C dist -czf "dist/${ASSET}" "vela-${VERSION}-linux-x86_64"
           rm -rf "$stage"
 
       - name: Package macOS app bundle
@@ -171,11 +171,11 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
           ASSET: ${{ matrix.asset }}
         run: |
-          app="dist/vSCP.app"
+          app="dist/Vela.app"
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-          cp target/release/vscp "$app/Contents/MacOS/vscp"
+          cp target/release/vela "$app/Contents/MacOS/vela"
           cp LICENSE "$app/Contents/Resources/LICENSE"
-          chmod 0755 "$app/Contents/MacOS/vscp"
+          chmod 0755 "$app/Contents/MacOS/vela"
           cat > "$app/Contents/Info.plist" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -184,15 +184,15 @@ jobs:
             <key>CFBundleDevelopmentRegion</key>
             <string>es</string>
             <key>CFBundleDisplayName</key>
-            <string>vSCP</string>
+            <string>Vela</string>
             <key>CFBundleExecutable</key>
-            <string>vscp</string>
+            <string>vela</string>
             <key>CFBundleIdentifier</key>
-            <string>com.alejandro12120.vscp</string>
+            <string>com.alejandro12120.vela</string>
             <key>CFBundleInfoDictionaryVersion</key>
             <string>6.0</string>
             <key>CFBundleName</key>
-            <string>vSCP</string>
+            <string>Vela</string>
             <key>CFBundlePackageType</key>
             <string>APPL</string>
             <key>CFBundleShortVersionString</key>
@@ -207,7 +207,7 @@ jobs:
           </plist>
           EOF
           codesign --force --deep --sign - "$app"
-          tar -C dist -czf "dist/${ASSET}" "vSCP.app"
+          tar -C dist -czf "dist/${ASSET}" "Vela.app"
           rm -rf "$app"
 
       - name: Upload platform archive
@@ -236,10 +236,10 @@ jobs:
 
       - name: Sign artifacts and build update manifest
         env:
-          VSCP_SIGNING_KEY: ${{ secrets.VSCP_SIGNING_KEY }}
+          VELA_SIGNING_KEY: ${{ secrets.VELA_SIGNING_KEY }}
         run: |
-          if [ -z "$VSCP_SIGNING_KEY" ]; then
-            echo "::error::Missing repository secret VSCP_SIGNING_KEY (Ed25519 private key in PEM format)."
+          if [ -z "$VELA_SIGNING_KEY" ]; then
+            echo "::error::Missing repository secret VELA_SIGNING_KEY (Ed25519 private key in PEM format)."
             exit 1
           fi
           python3 scripts/sign-release.py \
@@ -247,8 +247,8 @@ jobs:
             --repo "${{ github.repository }}" \
             --version "${{ needs.prepare.outputs.version }}" \
             --tag "${{ needs.prepare.outputs.tag }}" \
-            --platform "linux-x86_64=vscp-${{ needs.prepare.outputs.version }}-linux-x86_64.tar.gz" \
-            --platform "macos-aarch64=vSCP-${{ needs.prepare.outputs.version }}-macos-aarch64.tar.gz"
+            --platform "linux-x86_64=vela-${{ needs.prepare.outputs.version }}-linux-x86_64.tar.gz" \
+            --platform "macos-aarch64=Vela-${{ needs.prepare.outputs.version }}-macos-aarch64.tar.gz"
 
       - name: Publish GitHub Release
         env:
@@ -258,7 +258,7 @@ jobs:
           DRAFT: ${{ needs.prepare.outputs.draft }}
           TARGET_SHA: ${{ github.sha }}
         run: |
-          flags=(--title "vSCP ${TAG}" --generate-notes)
+          flags=(--title "Vela ${TAG}" --generate-notes)
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
             flags+=(--target "$TARGET_SHA")
           fi

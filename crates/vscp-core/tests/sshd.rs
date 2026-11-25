@@ -16,7 +16,7 @@ use std::{
 
 use tempfile::TempDir;
 use tokio::time::timeout;
-use vscp_core::{Auth, Client, ConnectionSpec, EntryKind, Error, Session, askpass};
+use vscp_core::{Auth, Client, ConnectCancel, ConnectionSpec, EntryKind, Error, Session, askpass};
 
 const SHORT_WAIT: Duration = Duration::from_secs(8);
 const CONNECT_WAIT: Duration = Duration::from_secs(40);
@@ -636,6 +636,18 @@ fn ssh_children(fixture: &Fixture) -> Vec<u32> {
         .collect()
 }
 
+fn ssh_using(marker: &str) -> Vec<u32> {
+    let procs = checked(Command::new("ps").args(["-axo", "pid=,command="]));
+    String::from_utf8_lossy(&procs)
+        .lines()
+        .filter_map(|line| {
+            let (pid, command) = line.trim().split_once(' ')?;
+            (command.trim_start().starts_with("/usr/bin/ssh ") && command.contains(marker))
+                .then(|| pid.parse().unwrap())
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn disconnect_and_drop_reap_ssh_processes_and_unlink_socket() {
     use std::os::unix::fs::FileTypeExt;
@@ -832,6 +844,92 @@ async fn client_shutdown_reaps_ssh_while_waiting_for_askpass() {
         )
     })
     .await;
+}
+
+#[tokio::test]
+async fn cancel_connect_reaps_ssh_before_readiness_timeout() {
+    let temp = tempfile::Builder::new()
+        .prefix("vscp-cancel-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let config = temp.path().join("config");
+    let known_hosts = temp.path().join("known_hosts");
+    File::create(&config).unwrap();
+    File::create(&known_hosts).unwrap();
+
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    listener.set_nonblocking(true).unwrap();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let held = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut stream = None;
+        while stream.is_none() && Instant::now() < deadline {
+            match listener.accept() {
+                Ok((accepted, _)) => stream = Some(accepted),
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = release_rx.recv_timeout(Duration::from_secs(10));
+        drop(stream);
+    });
+
+    let mut spec = ConnectionSpec::new("127.0.0.1".into(), port, "test".into(), Auth::Password);
+    spec.ssh_config = Some(config);
+    spec.known_hosts = Some(known_hosts.clone());
+    let marker = format!("UserKnownHostsFile={}", known_hosts.display());
+
+    let client = client();
+    let cancel = ConnectCancel::new();
+    let connection =
+        client.connect_with_timeout_and_cancel(spec, Duration::from_secs(30), cancel.clone());
+    tokio::pin!(connection);
+
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let mut early = None;
+    while ssh_using(&marker).is_empty() && Instant::now() < deadline {
+        tokio::select! {
+            result = &mut connection => {
+                early = Some(result.map(|_| "session"));
+                break;
+            }
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+    }
+    assert!(early.is_none(), "connect finished early: {early:?}");
+    assert!(
+        !ssh_using(&marker).is_empty(),
+        "ssh never started for the stalled listener; marker {marker:?}; processes {}",
+        String::from_utf8_lossy(&checked(Command::new("ps").args(["-axo", "pid=,command="])))
+    );
+
+    cancel.cancel();
+    let started = Instant::now();
+    let result = timeout(Duration::from_secs(3), &mut connection)
+        .await
+        .expect("cancelled connect did not finish within 3 s");
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert!(
+        matches!(result, Err(Error::Cancelled)),
+        "expected Cancelled, got another result"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !ssh_using(&marker).is_empty() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        ssh_using(&marker).is_empty(),
+        "ssh survived cancellation: {:?}",
+        ssh_using(&marker)
+    );
+
+    let _ = release_tx.send(());
+    held.join().unwrap();
+    client.shutdown().await;
 }
 
 use vscp_core::transfer::{

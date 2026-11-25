@@ -29,6 +29,38 @@ use crate::{
 type Job = Pin<Box<dyn Future<Output = ()> + Send>>;
 type Operation = Box<dyn FnOnce(Arc<Sftp>) -> Job + Send>;
 
+/// Cancels one connection attempt, including the `ssh` child it has already started.
+#[derive(Clone)]
+pub struct ConnectCancel {
+    tx: async_channel::Sender<()>,
+    rx: async_channel::Receiver<()>,
+}
+
+impl Default for ConnectCancel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ConnectCancel {
+    pub fn new() -> Self {
+        let (tx, rx) = async_channel::bounded(1);
+        Self { tx, rx }
+    }
+
+    pub fn cancel(&self) {
+        self.tx.close();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.tx.is_closed()
+    }
+
+    pub(crate) fn receiver(&self) -> async_channel::Receiver<()> {
+        self.rx.clone()
+    }
+}
+
 /// Owns the worker used by all sessions opened through this client and its clones.
 #[derive(Clone)]
 pub struct Client {
@@ -131,12 +163,48 @@ impl Client {
         spec: ConnectionSpec,
         readiness_timeout: Duration,
     ) -> Result<Session, Error> {
+        self.connect_inner(spec, readiness_timeout, None).await
+    }
+
+    pub async fn connect_with_cancel(
+        &self,
+        spec: ConnectionSpec,
+        cancel: ConnectCancel,
+    ) -> Result<Session, Error> {
+        self.connect_with_timeout_and_cancel(spec, ssh::CONNECT_TIMEOUT, cancel)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn connect_with_timeout_and_cancel(
+        &self,
+        spec: ConnectionSpec,
+        readiness_timeout: Duration,
+        cancel: ConnectCancel,
+    ) -> Result<Session, Error> {
+        self.connect_inner(spec, readiness_timeout, Some(cancel))
+            .await
+    }
+
+    async fn connect_inner(
+        &self,
+        spec: ConnectionSpec,
+        readiness_timeout: Duration,
+        cancel: Option<ConnectCancel>,
+    ) -> Result<Session, Error> {
         let (send, reply) = oneshot::channel();
         let app = self.app.clone();
         let requests = self.send_request.clone();
         let stopping = self.stopping.clone();
+        let cancel = cancel.map(|cancel| cancel.receiver());
         self.submit(async move {
-            match connect(spec, app, requests, readiness_timeout, &stopping).await {
+            // A connection without an explicit handle keeps its receiver open
+            // until the end of the job, so only `stopping` can interrupt it.
+            let (keep_open, unused_cancel) = async_channel::bounded(1);
+            let cancel = cancel.unwrap_or(unused_cancel);
+            let result = connect(spec, app, requests, readiness_timeout, &stopping, &cancel).await;
+            drop(keep_open);
+            match result {
                 Ok((master, channel, process)) => {
                     let (send_command, commands) = async_channel::bounded(16);
                     let terminal =
@@ -199,11 +267,18 @@ async fn connect(
     requests: async_channel::Sender<askpass::Request>,
     readiness_timeout: Duration,
     stopping: &async_channel::Receiver<()>,
+    cancel: &async_channel::Receiver<()>,
 ) -> Result<(ssh::Master, Sftp, ssh::Process), Error> {
+    if cancel.is_closed() {
+        return Err(Error::Cancelled);
+    }
     let server = askpass::Server::start(app, requests, spec.destination())?;
-    let mut master = ssh::Master::connect(spec, server, readiness_timeout, stopping).await?;
+    let mut master =
+        ssh::Master::connect(spec, server, readiness_timeout, stopping, cancel).await?;
     let channel = tokio::select! {
+        biased;
         _ = stopping.recv() => Err(Error::Cancelled),
+        _ = cancel.recv() => Err(Error::Cancelled),
         result = sftp::open(&master) => result,
     };
     match channel {

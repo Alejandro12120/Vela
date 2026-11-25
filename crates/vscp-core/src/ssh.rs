@@ -57,7 +57,7 @@ impl ConnectionSpec {
         }
     }
 
-    pub(crate) fn destination(&self) -> String {
+    pub fn destination(&self) -> String {
         self.display_name
             .clone()
             .unwrap_or_else(|| format!("{}@{}:{}", self.user, self.host, self.port))
@@ -440,8 +440,17 @@ impl Master {
         askpass: askpass::Server,
         readiness_timeout: Duration,
         stopping: &async_channel::Receiver<()>,
+        cancel: &async_channel::Receiver<()>,
     ) -> Result<Self, Error> {
-        let control_path = clear_stale_socket(&spec, &askpass).await;
+        let control_path = tokio::select! {
+            biased;
+            _ = stopping.recv() => return Err(Error::Cancelled),
+            _ = cancel.recv() => return Err(Error::Cancelled),
+            path = clear_stale_socket(&spec, &askpass) => path,
+        };
+        if cancel.is_closed() {
+            return Err(Error::Cancelled);
+        }
         let process =
             Process::spawn(command(&spec, &askpass, &MASTER_ARGS, &[]).stdout(Stdio::null()))?;
         let mut master = Self {
@@ -454,6 +463,7 @@ impl Master {
         let result = tokio::select! {
             biased;
             _ = stopping.recv() => Some(Err(Error::Cancelled)),
+            _ = cancel.recv() => Some(Err(Error::Cancelled)),
             result = master.wait_until_ready() => Some(result),
             _ = timer => None,
         };

@@ -65,7 +65,7 @@ Every release includes detached `.sig` and `.sshsig` files, `SHA256SUMS.txt`, an
 
 ## Updating
 
-Select **Check for Updates** from the app menu or Settings. Vela downloads the signed `manifest.json` from GitHub Releases, verifies the Ed25519 signature of both the manifest and the release archive, and installs the new version.
+Click the check-for-updates button on the right side of the sidebar footer. Vela downloads the signed `manifest.json` from GitHub Releases, verifies the Ed25519 signature of both the manifest and the release archive, shows download progress above the footer, installs the new version, and restarts the app automatically.
 
 You can also update by running the install script again or downloading a release by hand.
 

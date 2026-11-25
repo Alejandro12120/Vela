@@ -4,29 +4,28 @@ Read [continuity](.agent/CONTINUITY.md) for the current scope and pending decisi
 
 ## Build workflow
 
-- Use disposable containers for Linux compilation and checks. Run one build at a time. Keep build artifacts in the container or in a task-owned temporary directory, and remove them at the end.
-- For Rust, use `CARGO_BUILD_JOBS=1`, `CARGO_INCREMENTAL=0` and a disposable `CARGO_TARGET_DIR`. Once the framework is selected, pin the Rust toolchain and Linux dependencies in the build image.
+- Use disposable containers for Linux compilation and checks. Run one build at a time. Keep build artifacts in the container or in a single task-owned temporary directory, and remove it **only once the complete feature/task is finished** (never between commands or edit iterations).
+- For Rust, use all available CPU cores (Cargo's default, without limiting `CARGO_BUILD_JOBS`) and **reuse one `CARGO_TARGET_DIR` across the entire task** (e.g. `/tmp/vscp-target-<task>`) with Cargo's default incremental compilation so dependencies and workspace crates are not rebuilt from scratch on every command. Only apply `CARGO_INCREMENTAL=0` if doing a final clean release build, and delete `CARGO_TARGET_DIR` once at the very end of the completed feature/task to reclaim disk space. Once the framework is selected, pin the Rust toolchain and Linux dependencies in the build image.
 - Run desktop integration checks from a regular graphical session on the target OS. Use the macOS SDK on macOS for AppKit compilation. Linux headless checks cannot establish Dolphin or Finder compatibility.
 - See the [file handoff probe](probes/file-handoff/README.md) for current build and test commands.
 - Design and review all UI with the [Heyrico UI skill](.agent/skills/heyrico-ui/SKILL.md). Read it before changing any view, and pass it to delegated UI work.
 - See the [MVP plan](docs/PLAN.md) for the selected stack, phases and open questions.
 
-Run these commands from the repository root in a macOS graphical session. The release executable runs before the temporary build directory is removed.
+Run these commands from the repository root in a macOS graphical session, reusing the same task-level `CARGO_TARGET_DIR` throughout the feature and deleting it only when the whole task is done:
 
 ```sh
-(
-  set -e
-  CARGO_TARGET_DIR="$(mktemp -d /tmp/vscp-target.XXXXXX)"
-  export CARGO_TARGET_DIR CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0
-  trap 'rm -rf -- "$CARGO_TARGET_DIR"' EXIT
+# Create once per feature/task and reuse across all edit/check/test/build commands:
+export CARGO_TARGET_DIR="/tmp/vscp-target-<task>"
 
-  cargo check --workspace
-  cargo fmt --all --check
-  cargo clippy --workspace --all-targets -- -D warnings
-  cargo test --workspace
-  cargo build --release
-  "$CARGO_TARGET_DIR/release/vscp"
-)
+cargo check --workspace
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo build --release
+"$CARGO_TARGET_DIR/release/vscp"
+
+# Only after the complete feature/task is finished and verified:
+rm -rf -- "$CARGO_TARGET_DIR"
 ```
 
 Set `VSCP_TRACE_STARTUP=1` on the executable command to print the first-frame startup time.
@@ -91,24 +90,22 @@ Use an isolated configuration directory for development runs. The `dev` Cargo fe
 - Server forms list the keys of the agent socket in their Socket field, or else the first Bitwarden socket under `$HOME`. To check the picker without the real Bitwarden, set `HOME` to a temporary directory holding a `.bitwarden-ssh-agent.sock` symlink to the fixture agent, or a stale socket for the unavailable state.
 - With a custom `VSCP_CONFIG_DIR`, remote edits use its `edit-cache/` directory.
 
-For example, from the repository root in a macOS graphical session:
+For example, from the repository root in a macOS graphical session (reusing the task's `CARGO_TARGET_DIR`, and deleting `CARGO_TARGET_DIR` and temporary configs only at the end of the complete task):
 
 ```sh
-(
-  set -e
-  config_dir="$(mktemp -d /tmp/vscp-config.XXXXXX)"
-  CARGO_TARGET_DIR="$(mktemp -d /tmp/vscp-target.XXXXXX)"
-  export CARGO_TARGET_DIR CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0
-  trap 'rm -rf -- "$config_dir" "$CARGO_TARGET_DIR"' EXIT
+export CARGO_TARGET_DIR="/tmp/vscp-target-<task>"
+config_dir="$(mktemp -d /tmp/vscp-config.XXXXXX)"
 
-  cargo build --release --features dev
-  VSCP_CONFIG_DIR="$config_dir" VSCP_DEV_LOG=1 "$CARGO_TARGET_DIR/release/vscp"
-)
+cargo build --release --features dev
+VSCP_CONFIG_DIR="$config_dir" VSCP_DEV_LOG=1 "$CARGO_TARGET_DIR/release/vscp"
+
+# Clean up temporary config after the run; remove $CARGO_TARGET_DIR only when the full task is done:
+rm -rf -- "$config_dir"
 ```
 
 ## Linux (Arch, Wayland)
 
-Build in a disposable `archlinux:latest` container when Podman or Docker is available, mounting the repository at `/src` and using a container-only target directory. The container needs `base-devel rustup pkgconf wayland libxkbcommon libxkbcommon-x11 vulkan-icd-loader vulkan-headers fontconfig freetype2 openssh openbsd-netcat python libx11 libxcb`; `rustup` then installs the toolchain from `rust-toolchain.toml`. Without a container runtime, build on the host with a disposable `CARGO_TARGET_DIR`, `CARGO_BUILD_JOBS=1` and `CARGO_INCREMENTAL=0`; the host needs the same runtime libraries plus a Vulkan ICD or Mesa EGL. The manual fixture needs `nc` from `openbsd-netcat` and Python 3; the GPUI renderer needs a Vulkan driver, such as `vulkan-intel` on Intel graphics, or Mesa EGL.
+Build in a disposable `archlinux:latest` container when Podman or Docker is available, mounting the repository at `/src` and using a container-only target directory. The container needs `base-devel rustup pkgconf wayland libxkbcommon libxkbcommon-x11 vulkan-icd-loader vulkan-headers fontconfig freetype2 openssh openbsd-netcat python libx11 libxcb`; `rustup` then installs the toolchain from `rust-toolchain.toml`. Without a container runtime, build on the host using all available CPU cores and a single task-owned `CARGO_TARGET_DIR` in `/tmp` reused across all commands during the feature (leaving Cargo's default incremental compilation enabled while iterating, and deleting `CARGO_TARGET_DIR` only once the complete feature/task is done); the host needs the same runtime libraries plus a Vulkan ICD or Mesa EGL. The manual fixture needs `nc` from `openbsd-netcat` and Python 3; the GPUI renderer needs a Vulkan driver, such as `vulkan-intel` on Intel graphics, or Mesa EGL.
 
 Local delete (Supr) moves items to the freedesktop Trash: the home trash, or `.Trash-<uid>` on another disk mounted from a block device. Items on tmpfs such as `/tmp`, or on a disk whose trash cannot be prepared, are copied into the home trash, as Dolphin does, because Dolphin does not list trashes on memory disks. Run the dev release binary in a Wayland session. `VSCP_CONFIG_DIR` isolates the configuration and `VSCP_DEV_LOG=1` prints the usual diagnostics. The window sets the `vscp` app id for Hyprland rules. On Linux, Cmd shortcuts are Ctrl (`secondary-`), and the integrated terminal uses Ctrl+Shift+C, Ctrl+Shift+V and Ctrl+Shift+A so Ctrl+C, Ctrl+V and Ctrl+A reach the shell. The terminal font shortcuts are Ctrl+Shift+`+` (grow), Ctrl+Shift+`-` (shrink) and Ctrl+Shift+0 (reset to `kitty.conf`); on a Spanish QWERTY layout those physical keys are encoded by GPUI as `ctrl-*`, `ctrl-_` and `ctrl-=`, with `ctrl-+` also bound for the US `=` key. Steps are 1 pt within 6–48, applied to every open terminal. Ctrl+`-` and Ctrl+0 without Shift are not bound. Files open with `xdg-open`, Kitty launches with `kitty --detach`, and «Mostrar en la carpeta» opens the parent folder. Dolphin drag-out and the file clipboard are still pending in F9.
 

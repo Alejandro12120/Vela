@@ -112,7 +112,7 @@ jobs:
       - name: Upload rendered icons
         uses: actions/upload-artifact@v4
         with:
-          name: release-icons
+          name: build-icons
           path: dist-icons
           retention-days: 1
           if-no-files-found: error
@@ -176,7 +176,7 @@ jobs:
       - name: Download rendered icons
         uses: actions/download-artifact@v4
         with:
-          name: release-icons
+          name: build-icons
           path: dist-icons
 
       - name: Package Linux archive
@@ -311,4 +311,10 @@ jobs:
           if [ "$DRAFT" = "true" ]; then
             flags+=(--draft)
           fi
-          gh release create "$TAG" dist/* "${flags[@]}"
+          assets=()
+          for file in dist/*; do
+            if [ -f "$file" ]; then
+              assets+=("$file")
+            fi
+          done
+          gh release create "$TAG" "${assets[@]}" "${flags[@]}"

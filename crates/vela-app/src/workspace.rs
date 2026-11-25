@@ -106,6 +106,21 @@ pub enum Connection {
     Error(Error),
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum UpdateState {
+    #[default]
+    Idle,
+    Checking,
+    Available {
+        release: vela_core::updater::ReleaseInfo,
+        error: Option<String>,
+    },
+    Installing {
+        release: vela_core::updater::ReleaseInfo,
+        progress: f32,
+    },
+}
+
 struct Prompt {
     request: askpass::Request,
     input: Option<Entity<TextInput>>,
@@ -128,6 +143,7 @@ pub struct Workspace {
     pub row_menu: Option<RowMenu>,
     pub dir: Option<PathBuf>,
     pub saving: bool,
+    pub update_state: UpdateState,
     /// The card being dragged in the server list, until the drag ends.
     pub reorder: Option<ServerReorder>,
     /// A card that just left a drag, with the y where it was let go and when.
@@ -338,6 +354,35 @@ impl Workspace {
                             };
                             this.connections.insert(id, connection);
                         }
+                        if let Some(preview) = dev::update_state() {
+                            let fake_release = || vela_core::updater::ReleaseInfo {
+                                version: "0.2.0".into(),
+                                tag: "v0.2.0".into(),
+                                asset: "vela-0.2.0-preview.tar.gz".into(),
+                                url: String::new(),
+                                sig_url: String::new(),
+                                sha256: "0".repeat(64),
+                                size: 1024,
+                                notes_url: None,
+                            };
+                            this.update_state = match preview {
+                                dev::UpdatePreview::Checking => UpdateState::Checking,
+                                dev::UpdatePreview::Available => UpdateState::Available {
+                                    release: fake_release(),
+                                    error: None,
+                                },
+                                dev::UpdatePreview::Installing(progress) => {
+                                    UpdateState::Installing {
+                                        release: fake_release(),
+                                        progress,
+                                    }
+                                }
+                                dev::UpdatePreview::Error => UpdateState::Available {
+                                    release: fake_release(),
+                                    error: Some("No se pudo descargar la actualización.".into()),
+                                },
+                            };
+                        }
                         if let Some(name) = dev::autoconnect()
                             && let Some(server) = this.servers.iter().find(|server| server.display_name() == name)
                         {
@@ -436,6 +481,7 @@ impl Workspace {
             row_menu: None,
             dir: None,
             saving: false,
+            update_state: UpdateState::Idle,
             reorder: None,
             settle: None,
             key_requests: 0,
@@ -511,6 +557,153 @@ impl Workspace {
             shutdown.await;
             let _ = cx.update(|_, cx| {
                 crate::pane::finder::quit_cleanup(cx)();
+                cx.quit();
+            });
+        })
+        .detach();
+    }
+
+    fn updater_config() -> vela_core::updater::Config {
+        let mut config = vela_core::updater::Config::default();
+        if let Some(url) = dev::update_base_url().filter(|url| !url.is_empty()) {
+            config.base_url = Some(url);
+        }
+        if let Some(pubkey) = dev::update_pubkey().filter(|key| !key.is_empty()) {
+            config.pubkey = pubkey;
+        }
+        if let Some(version) = dev::update_version().filter(|ver| !ver.is_empty()) {
+            config.current_version = version;
+        }
+        config
+    }
+
+    pub fn check_for_updates(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if !matches!(self.update_state, UpdateState::Idle) {
+            return;
+        }
+        self.update_state = UpdateState::Checking;
+        cx.notify();
+        let config = Self::updater_config();
+        let task = cx
+            .background_executor()
+            .spawn(async move { vela_core::updater::check(&config) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if !matches!(this.update_state, UpdateState::Checking) {
+                    return;
+                }
+                match result {
+                    Ok(vela_core::updater::CheckOutcome::UpdateAvailable(release)) => {
+                        dev::log(format_args!("actualización disponible: v{}", release.version));
+                        this.update_state = UpdateState::Available {
+                            release,
+                            error: None,
+                        };
+                    }
+                    Ok(vela_core::updater::CheckOutcome::UpToDate) => {
+                        dev::log("actualización: Vela está al día");
+                        this.update_state = UpdateState::Idle;
+                    }
+                    Err(err) => {
+                        dev::log(format_args!("actualización: {err}"));
+                        this.update_state = UpdateState::Idle;
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn set_update_progress(&mut self, value: f32, cx: &mut Context<Self>) {
+        if let UpdateState::Installing { progress, .. } = &mut self.update_state {
+            *progress = value.clamp(0., 1.);
+            cx.notify();
+        }
+    }
+
+    pub fn install_update(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let release = match &self.update_state {
+            UpdateState::Available { release, .. } => release.clone(),
+            _ => return,
+        };
+        let target = match vela_core::updater::InstallTarget::detect_current() {
+            Ok(target) => target,
+            Err(err) => {
+                self.update_state = UpdateState::Available {
+                    release,
+                    error: Some(err.to_string()),
+                };
+                cx.notify();
+                return;
+            }
+        };
+        self.update_state = UpdateState::Installing {
+            release: release.clone(),
+            progress: 0.03,
+        };
+        cx.notify();
+        let config = Self::updater_config();
+        let handle = vela_core::updater::spawn_install(config, release.clone(), target);
+        cx.spawn_in(window, async move |this, cx| {
+            while let Some(event) = handle.next().await {
+                match event {
+                    vela_core::updater::InstallEvent::Progress(progress) => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.set_update_progress(progress.fraction, cx);
+                        });
+                    }
+                    vela_core::updater::InstallEvent::Finished(Ok(outcome)) => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.set_update_progress(1., cx);
+                        });
+                        cx.background_executor()
+                            .timer(Duration::from_millis(120))
+                            .await;
+                        let _ = this.update_in(cx, |this, window, cx| {
+                            this.request_restart(outcome.relaunch, window, cx);
+                        });
+                        return;
+                    }
+                    vela_core::updater::InstallEvent::Finished(Err(err)) => {
+                        dev::log(format_args!("actualización: {err}"));
+                        let message = err.to_string();
+                        let _ = this.update(cx, |this, cx| {
+                            this.update_state = UpdateState::Available {
+                                release: release.clone(),
+                                error: Some(message),
+                            };
+                            cx.notify();
+                        });
+                        return;
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub fn request_restart(
+        &mut self,
+        relaunch: vela_core::updater::RelaunchTarget,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.quitting {
+            return;
+        }
+        self.quitting = true;
+        crate::pane::finder::begin_quit(cx);
+        let shutdown = self.shutdown(cx);
+        cx.notify();
+        cx.spawn_in(window, async move |_, cx| {
+            shutdown.await;
+            let _ = cx.update(|_, cx| {
+                crate::pane::finder::quit_cleanup(cx)();
+                if let Err(err) = vela_core::updater::relaunch(&relaunch) {
+                    eprintln!("Vela: No se pudo reiniciar tras actualizar: {err}");
+                }
                 cx.quit();
             });
         })
@@ -3266,5 +3459,61 @@ mod tests {
         cx.simulate_keystrokes("tab");
         cx.run_until_parked();
         cx.update(|window, _| assert!(window.last_input_was_keyboard()));
+    }
+
+    #[gpui::test]
+    async fn updater_button_and_progress_bar_reflect_update_states(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (workspace, cx) = open(dir.path(), cx);
+        let release = vela_core::updater::ReleaseInfo {
+            version: "0.2.0".into(),
+            tag: "v0.2.0".into(),
+            asset: "vela-0.2.0-linux-x86_64.tar.gz".into(),
+            url: String::new(),
+            sig_url: String::new(),
+            sha256: "0".repeat(64),
+            size: 1024,
+            notes_url: None,
+        };
+
+        assert!(cx.debug_bounds("update-button").is_some());
+        assert!(cx.debug_bounds("update-progress").is_none());
+
+        workspace.update(cx, |this, cx| {
+            this.update_state = UpdateState::Checking;
+            cx.notify();
+        });
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("update-button").is_some());
+        assert!(cx.debug_bounds("update-progress").is_none());
+
+        workspace.update(cx, |this, cx| {
+            this.update_state = UpdateState::Available {
+                release: release.clone(),
+                error: None,
+            };
+            cx.notify();
+        });
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("update-button").is_some());
+        assert!(cx.debug_bounds("update-progress").is_none());
+
+        workspace.update(cx, |this, cx| {
+            this.update_state = UpdateState::Installing {
+                release,
+                progress: 0.45,
+            };
+            cx.notify();
+        });
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let button_bounds = cx.debug_bounds("update-button").unwrap();
+        let progress_bounds = cx.debug_bounds("update-progress").unwrap();
+        assert!(
+            progress_bounds.origin.y < button_bounds.origin.y,
+            "the progress bar must appear above the footer row"
+        );
     }
 }

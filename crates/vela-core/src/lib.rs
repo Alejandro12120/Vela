@@ -22,3 +22,4 @@ pub use ssh::{
 };
 
 pub mod transfer;
+pub mod updater;

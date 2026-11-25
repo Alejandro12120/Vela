@@ -15,7 +15,7 @@ use crate::{
     },
     icons::{IconName, icon},
     theme::Theme,
-    workspace::{Connection, Workspace},
+    workspace::{Connection, UpdateState, Workspace},
 };
 
 pub const WIDTH: f32 = 232.;
@@ -328,25 +328,37 @@ fn body(
     let footer = || {
         div()
             .flex()
+            .flex_col()
             .flex_none()
-            .pt_2()
-            .border_t_1()
-            .border_color(theme.border)
+            .when_some(update_banner(workspace, theme), |col, banner| {
+                col.child(banner)
+            })
             .child(
-                icon_text_button(
-                    "settings",
-                    IconName::Settings,
-                    "Ajustes",
-                    if workspace.settings_open() {
-                        Variant::Selected
-                    } else {
-                        Variant::Secondary
-                    },
-                    None,
-                    theme,
-                    cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
-                )
-                .h(px(26.)),
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_between()
+                    .pt_2()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .child(
+                        icon_text_button(
+                            "settings",
+                            IconName::Settings,
+                            "Ajustes",
+                            if workspace.settings_open() {
+                                Variant::Selected
+                            } else {
+                                Variant::Secondary
+                            },
+                            None,
+                            theme,
+                            cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
+                        )
+                        .h(px(26.)),
+                    )
+                    .child(update_button(workspace, theme, cx)),
             )
     };
     if workspace.servers.is_empty() {
@@ -469,6 +481,110 @@ fn body(
                 .child(content),
         )
         .child(footer())
+}
+
+fn update_banner(workspace: &Workspace, theme: Theme) -> Option<AnyElement> {
+    match &workspace.update_state {
+        UpdateState::Installing { progress, .. } => {
+            let progress = progress.clamp(0., 1.);
+            let bar = div()
+                .debug_selector(|| "update-progress".into())
+                .flex_none()
+                .pb_2()
+                .child(
+                    div()
+                        .w_full()
+                        .h(px(6.))
+                        .rounded_full()
+                        .overflow_hidden()
+                        .bg(theme.selection)
+                        .child(
+                            div().h_full().rounded_full().bg(theme.accent).with_spring(
+                                "update-progress-fill",
+                                SpringAnimation::new(SPRING)
+                                    .to(progress)
+                                    .with_epsilon(0.0005),
+                                |fill, value| fill.w(gpui::relative(value.clamp(0., 1.))),
+                            ),
+                        ),
+                );
+            Some(motion::fade(bar, "update-progress-fade", FAST).into_any_element())
+        }
+        UpdateState::Available {
+            error: Some(message),
+            ..
+        } => Some(
+            motion::fade(
+                div()
+                    .debug_selector(|| "update-error".into())
+                    .flex_none()
+                    .pb_2()
+                    .text_size(px(12.))
+                    .text_color(theme.danger)
+                    .truncate()
+                    .child(message.clone()),
+                "update-error-fade",
+                FAST,
+            )
+            .into_any_element(),
+        ),
+        _ => None,
+    }
+}
+
+fn update_button(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -> Stateful<Div> {
+    let base = div()
+        .id("update-button")
+        .debug_selector(|| "update-button".into())
+        .role(Role::Button)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(26.))
+        .h(px(26.))
+        .rounded(px(6.))
+        .border_1();
+
+    match &workspace.update_state {
+        UpdateState::Idle => base
+            .aria_label("Buscar actualizaciones")
+            .tab_index(0)
+            .border_color(theme.control_border)
+            .bg(theme.panel)
+            .cursor_pointer()
+            .hover(move |style| style.bg(theme.hover))
+            .active(move |style| style.bg(theme.selection))
+            .focus_visible(move |style| style.border_color(theme.accent))
+            .child(icon(IconName::RefreshCw).size(px(15.)).text_color(theme.text))
+            .on_click(cx.listener(|this, _, window, cx| this.check_for_updates(window, cx))),
+        UpdateState::Checking => base
+            .aria_label("Buscando actualizaciones…")
+            .border_color(theme.border)
+            .bg(theme.selection)
+            .opacity(0.75)
+            .child(motion::spin(
+                icon(IconName::RefreshCw).size(px(15.)).text_color(theme.secondary_text),
+                "update-check-spin",
+            )),
+        UpdateState::Available { release, .. } => base
+            .aria_label(format!("Descargar actualización {}", release.version))
+            .tab_index(0)
+            .border_color(theme.control_border)
+            .bg(theme.panel)
+            .cursor_pointer()
+            .hover(move |style| style.bg(theme.hover))
+            .active(move |style| style.bg(theme.selection))
+            .focus_visible(move |style| style.border_color(theme.accent))
+            .child(icon(IconName::CircleArrowDown).size(px(15.)).text_color(theme.accent))
+            .on_click(cx.listener(|this, _, window, cx| this.install_update(window, cx))),
+        UpdateState::Installing { release, .. } => base
+            .aria_label(format!("Instalando actualización {}…", release.version))
+            .border_color(theme.border)
+            .bg(theme.selection)
+            .opacity(0.75)
+            .child(icon(IconName::CircleArrowDown).size(px(15.)).text_color(theme.secondary_text)),
+    }
 }
 
 fn group_header(label: &'static str, theme: Theme) -> Div {

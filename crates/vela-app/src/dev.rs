@@ -84,6 +84,41 @@ pub fn server_state() -> Option<ServerState> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum UpdatePreview {
+    Checking,
+    Available,
+    Installing(f32),
+    Error,
+}
+
+pub fn update_state() -> Option<UpdatePreview> {
+    let raw = value("VELA_DEV_UPDATE_STATE")?;
+    if let Some(pct) = raw.strip_prefix("installing:") {
+        let pct = pct.parse::<f32>().ok()?.clamp(0., 100.);
+        return Some(UpdatePreview::Installing(pct / 100.));
+    }
+    match raw.as_str() {
+        "checking" => Some(UpdatePreview::Checking),
+        "available" => Some(UpdatePreview::Available),
+        "installing" => Some(UpdatePreview::Installing(0.45)),
+        "error" => Some(UpdatePreview::Error),
+        _ => None,
+    }
+}
+
+pub fn update_base_url() -> Option<String> {
+    value("VELA_DEV_UPDATE_URL")
+}
+
+pub fn update_pubkey() -> Option<String> {
+    value("VELA_DEV_UPDATE_PUBKEY")
+}
+
+pub fn update_version() -> Option<String> {
+    value("VELA_DEV_UPDATE_VERSION")
+}
+
 pub fn hide_sidebar() -> bool {
     value("VELA_DEV_HIDE_SIDEBAR").as_deref() == Some("1")
 }

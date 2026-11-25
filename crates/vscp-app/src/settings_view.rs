@@ -108,6 +108,9 @@ struct EditorMenu {
 
 pub(super) struct SettingsPage {
     previous_focus: Option<FocusHandle>,
+    opening: bool,
+    closing: bool,
+    transition_generation: u64,
     focus: FocusHandle,
     scroll: ScrollHandle,
     schemes: [FocusHandle; 3],
@@ -132,6 +135,9 @@ impl SettingsPage {
     pub(super) fn new(cx: &mut Context<Workspace>) -> Self {
         Self {
             previous_focus: None,
+            opening: false,
+            closing: false,
+            transition_generation: 0,
             focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
             schemes: std::array::from_fn(|_| cx.focus_handle()),
@@ -156,6 +162,22 @@ impl SettingsPage {
     pub(super) fn is_open(&self) -> bool {
         self.previous_focus.is_some()
     }
+
+    pub(super) fn is_visible(&self) -> bool {
+        self.is_open() || self.closing
+    }
+
+    pub(super) fn is_opening(&self) -> bool {
+        self.is_open() && self.opening
+    }
+
+    pub(super) fn is_closing(&self) -> bool {
+        !self.is_open() && self.closing
+    }
+
+    pub(super) fn transition_generation(&self) -> u64 {
+        self.transition_generation
+    }
 }
 
 impl Workspace {
@@ -171,6 +193,11 @@ impl Workspace {
             self.close_settings(window, cx);
             return;
         }
+        // Reopening while the page is fading out cancels that timer by
+        // invalidating its generation.
+        self.settings_page.closing = false;
+        self.settings_page.transition_generation += 1;
+        let generation = self.settings_page.transition_generation;
         self.dismiss_row_menu(window, cx);
         self.edits.popover = false;
         self.settings_page.previous_focus =
@@ -182,6 +209,23 @@ impl Workspace {
         }
         self.probe_agent(window, cx);
         self.scan_edit_copies(window, cx);
+        if cx.reduce_motion() {
+            self.settings_page.opening = false;
+        } else {
+            self.settings_page.opening = true;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(crate::components::motion::BASE)
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.settings_page.transition_generation == generation {
+                        this.settings_page.opening = false;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
         cx.notify();
     }
 
@@ -360,9 +404,34 @@ impl Workspace {
     pub(super) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.finish_glass_drag(window, cx);
         self.close_theme_editor(window, cx);
+        self.close_editor_menu(false, window, cx);
         if let Some(previous) = self.settings_page.previous_focus.take() {
+            // Focus goes back at once; the page keeps painting while it fades.
             previous.focus(window, cx);
-            cx.notify();
+            self.settings_page.transition_generation += 1;
+            self.settings_page.opening = false;
+            let generation = self.settings_page.transition_generation;
+            if cx.reduce_motion() {
+                self.settings_page.closing = false;
+                cx.notify();
+            } else {
+                self.settings_page.closing = true;
+                cx.notify();
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(crate::components::motion::FAST)
+                        .await;
+                    let _ = this.update(cx, |this, cx| {
+                        if this.settings_page.closing
+                            && this.settings_page.transition_generation == generation
+                        {
+                            this.settings_page.closing = false;
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            }
         }
     }
 

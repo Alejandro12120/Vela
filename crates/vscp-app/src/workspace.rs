@@ -20,9 +20,9 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, AppContext, Context, Entity, FocusHandle, Focusable, FontWeight, KeyBinding,
-    PathPromptOptions, Render, Role, Window, WindowBackgroundAppearance, actions, div, prelude::*,
-    px,
+    Animation, AnimationExt, AnyElement, AppContext, Context, Entity, FocusHandle, Focusable,
+    FontWeight, KeyBinding, PathPromptOptions, Render, Role, Window, WindowBackgroundAppearance,
+    actions, div, ease_out_quint, prelude::*, px,
 };
 use vscp_core::{
     Auth, Client, ConnectCancel, ConnectionSpec, Error, Session,
@@ -1709,7 +1709,12 @@ impl Workspace {
         cx.notify();
     }
 
-    fn content(&self, theme: Theme, window: &Window, cx: &Context<Self>) -> impl IntoElement {
+    fn content(
+        &self,
+        theme: Theme,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
         if let Some(server) = self
             .servers
             .iter()
@@ -2177,7 +2182,10 @@ impl Render for Workspace {
             }
         }
         let settings_open = self.settings_page.is_open();
-        let transfer_overlay = if !settings_open && self.dialog.is_none() && !self.edits.popover {
+        let settings_visible = self.settings_page.is_visible();
+        let settings_animating = self.settings_page.is_opening() || self.settings_page.is_closing();
+        let generation = self.settings_page.transition_generation();
+        let transfer_overlay = if !settings_visible && self.dialog.is_none() && !self.edits.popover {
             match self
                 .selected
                 .as_ref()
@@ -2189,10 +2197,55 @@ impl Render for Workspace {
         } else {
             None
         };
-        let content = if settings_open {
+        let content = if !settings_visible {
+            self.content(theme, window, cx).into_any_element()
+        } else if settings_open && !settings_animating {
+            // A settled page is the only content, so glass never stacks two
+            // translucent backgrounds or paints hidden work underneath.
             self.render_settings(theme, window, cx).into_any_element()
         } else {
-            self.content(theme, window, cx).into_any_element()
+            let base = self.content(theme, window, cx);
+            let page = div()
+                .relative()
+                .flex()
+                .flex_1()
+                .min_h_0()
+                .child(self.render_settings(theme, window, cx));
+            let panel = if self.settings_page.is_opening() {
+                page.occlude()
+                    .with_animation(
+                        ("settings-open", generation),
+                        Animation::new(motion::BASE).with_easing(ease_out_quint()),
+                        move |panel, t| panel.opacity(t).top(px(8. * (1. - t))),
+                    )
+                    .into_any_element()
+            } else if self.settings_page.is_closing() {
+                page.with_animation(
+                    ("settings-close", generation),
+                    Animation::new(motion::FAST).with_easing(ease_out_quint()),
+                    |panel, t| panel.opacity(1. - t),
+                )
+                .into_any_element()
+            } else {
+                page.into_any_element()
+            };
+            div()
+                .relative()
+                .flex()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .child(base)
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .flex_col()
+                        .when(!theme.glassy, |layer| layer.bg(theme.background))
+                        .child(panel),
+                )
+                .into_any_element()
         };
         let titlebar_height = titlebar_height(window);
         // Each column paints its own portion of the strip. The sidebar's
@@ -2201,18 +2254,51 @@ impl Render for Workspace {
             let connected = self.selected.as_ref().is_some_and(|id| {
                 matches!(self.connections.get(id), Some(Connection::Connected { .. }))
             });
-            let color = if settings_open || (theme.glassy && !connected) {
+            let content_color = if theme.glassy && !connected {
                 theme.background
             } else {
                 theme.panel
             };
+            let mut strip = div()
+                .relative()
+                .h(titlebar_height)
+                .flex_none()
+                .bg(theme.chrome(content_color));
+            if settings_visible {
+                let strip_page = div()
+                    .absolute()
+                    .inset_0()
+                    .bg(theme.chrome(theme.background));
+                let overlay = if (settings_open && !settings_animating) || cx.reduce_motion() {
+                    strip_page.opacity(1.).into_any_element()
+                } else if self.settings_page.is_opening() {
+                    strip_page
+                        .with_animation(
+                            ("titlebar-settings-open", generation),
+                            Animation::new(motion::BASE).with_easing(ease_out_quint()),
+                            |overlay, t| overlay.opacity(t),
+                        )
+                        .into_any_element()
+                } else if self.settings_page.is_closing() {
+                    strip_page
+                        .with_animation(
+                            ("titlebar-settings-close", generation),
+                            Animation::new(motion::FAST).with_easing(ease_out_quint()),
+                            |overlay, t| overlay.opacity(1. - t),
+                        )
+                        .into_any_element()
+                } else {
+                    strip_page.into_any_element()
+                };
+                strip = strip.child(overlay);
+            }
             div()
                 .flex()
                 .flex_col()
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
-                .child(div().h(titlebar_height).flex_none().bg(theme.chrome(color)))
+                .child(strip)
                 .child(content)
                 .into_any_element()
         } else {

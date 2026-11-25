@@ -1,0 +1,134 @@
+<div align="center">
+
+# Vela
+
+A native SSH and SFTP client for macOS and Linux, written in Rust with GPUI.
+
+[![CI](https://github.com/Alejandro12120/Vela/actions/workflows/ci.yml/badge.svg)](https://github.com/Alejandro12120/Vela/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Alejandro12120/Vela?label=release)](https://github.com/Alejandro12120/Vela/releases)
+[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/files-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/files-light.png">
+  <img alt="Vela dual-pane SFTP workspace" src="docs/screenshots/files-dark.png" width="100%">
+</picture>
+
+</div>
+
+Vela puts a dual-pane SFTP file manager and an SSH terminal in one native binary. It runs your system `ssh` binary for connections, uses about 50 to 60 MB of RAM at idle on macOS, and opens in 100 to 150 ms.
+
+## What Vela does
+
+- **Dual-pane SFTP browser.** Local files sit on the left and remote files sit on the right. Folders expand in place like Finder inside virtualized lists. Dragging inside a pane moves items, and dragging to the opposite pane copies them through a transfer queue.
+- **System OpenSSH transport.** Vela honors `~/.ssh/config`, `ProxyJump`, and `known_hosts`. It keeps one `ControlMaster` connection per server, so OpenSSH asks for a password, passphrase, or agent approval once per session.
+- **Bitwarden SSH agent and password auth.** The server form lists keys from your Bitwarden SSH agent and passes `IdentitiesOnly=yes` with the chosen public key, so extra keys do not exhaust authentication attempts. Password authentication prompts at connection time and never writes passwords to disk.
+- **Remote editing with upload on save.** Double-clicking a remote text file downloads a working copy and opens it in your editor, including VS Code, Cursor, Zed, Sublime Text, or the OS default. When you save, Vela checks the remote file for conflicts and uploads in place, keeping the remote inode, owner, and permissions.
+- **Integrated SSH terminal.** Each session has a full-window terminal built on `alacritty_terminal` and GPUI. It reads font family, font size, and colors from `kitty.conf`, and you can also open the active session in Kitty.
+- **Desktop integration.** On macOS, you can drag files to and from Finder and copy or paste remote files with Finder. Deleting local files moves them to macOS Trash or freedesktop Trash on Linux.
+- **Themes and translucency.** Six built-in themes come with separate light and dark selections, a live color editor with contrast checks, and optional frosted glass.
+
+<table>
+  <tr>
+    <td width="50%">
+      <img alt="Integrated SSH terminal" src="docs/screenshots/terminal-dark.png">
+      <p align="center"><sub>The integrated SSH terminal imports font and colors from kitty.conf.</sub></p>
+    </td>
+    <td width="50%">
+      <img alt="Settings and themes" src="docs/screenshots/settings-dark.png">
+      <p align="center"><sub>Settings include built-in themes, separate light and dark picks, and frosted glass.</sub></p>
+    </td>
+  </tr>
+</table>
+
+## Install
+
+### Quick install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Alejandro12120/Vela/main/install.sh | sh
+```
+
+The install script detects your OS and CPU architecture, downloads the matching archive from [GitHub Releases](https://github.com/Alejandro12120/Vela/releases), and checks both its Ed25519 signature and SHA-256 checksum before installing.
+
+- **macOS.** On Apple Silicon, the script installs `Vela.app` into `/Applications` with its native app icon so Spotlight and the Dock find it.
+- **Linux.** On x86_64 Wayland systems, the script installs the `vela` binary, its `.desktop` file, and its icon so Rofi, Fuzzel, Walker, and other launchers list it.
+
+### Manual install
+
+Download the archive for your system from [Releases](https://github.com/Alejandro12120/Vela/releases).
+
+- **macOS.** Extract `Vela-<version>-macos-aarch64.tar.gz` and move `Vela.app` into `/Applications`.
+- **Linux.** Extract `vela-<version>-linux-x86_64.tar.gz`, place `vela` in a directory on your `PATH` such as `~/.local/bin/vela`, and copy `vela.desktop` to `~/.local/share/applications/`.
+
+Every release includes detached `.sig` files, `SHA256SUMS.txt`, and a signed `manifest.json`. See [docs/RELEASES.md](docs/RELEASES.md) for manual verification commands with `openssl`.
+
+## Updating
+
+Select **Check for Updates** from the app menu or Settings. Vela downloads the signed `manifest.json` from GitHub Releases, verifies the Ed25519 signature of both the manifest and the release archive, and installs the new version.
+
+You can also update by running the install script again or downloading a release by hand.
+
+## Requirements
+
+- **macOS.** Apple Silicon, macOS 14 or newer, and system OpenSSH.
+- **Linux.** An x86_64 machine running a Wayland compositor, a Vulkan driver such as `vulkan-intel` or `vulkan-radeon` or Mesa EGL, system OpenSSH, and `xdg-open`.
+
+Vela does not support Windows. On Linux, outbound file drag and file clipboard support for Dolphin are still pending.
+
+## Keyboard shortcuts
+
+<details>
+<summary>Show default shortcuts</summary>
+
+| Action | macOS | Linux |
+| --- | --- | --- |
+| Switch to Files or Terminal | `⌘1`, `⌘2` | `Ctrl+1`, `Ctrl+2` |
+| Toggle server sidebar | `⌘S` | `Ctrl+S` |
+| Open Settings | `⌘,` | `Ctrl+,` |
+| Refresh active pane | `⌘R` | `Ctrl+R` |
+| Toggle hidden files | `⌘⇧.` | `Ctrl+Shift+.` |
+| Back, forward, and parent folder | `⌘[`, `⌘]`, `⌘↑` | `Ctrl+[`, `Ctrl+]`, `Ctrl+↑` |
+| Open selected folder | `⌘↓` | `Ctrl+↓` |
+| Copy across panes | `F5` | `F5` |
+| Rename selected item | `Enter` | `Enter` |
+| Delete selected item | `⌘⌫` | `Delete` |
+| Terminal copy, paste, and select all | `⌘C`, `⌘V`, `⌘A` | `Ctrl+Shift+C`, `Ctrl+Shift+V`, `Ctrl+Shift+A` |
+| Terminal font size grow, shrink, and reset | `⌘+`, `⌘-`, `⌘0` | `Ctrl+Shift++`, `Ctrl+Shift+-`, `Ctrl+Shift+0` |
+
+</details>
+
+## Build from source
+
+Building from source requires Rust `1.98.1`, pinned in [`rust-toolchain.toml`](rust-toolchain.toml).
+
+<details>
+<summary>Show Linux packages and build commands</summary>
+
+On Arch Linux:
+
+```sh
+sudo pacman -S --needed base-devel pkgconf wayland libxkbcommon libxkbcommon-x11 \
+  vulkan-icd-loader vulkan-headers fontconfig freetype2 openssh libx11 libxcb
+```
+
+On Ubuntu or Debian:
+
+```sh
+sudo apt-get install -y pkg-config libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+  libvulkan-dev libfontconfig1-dev libfreetype-dev libx11-dev libxcb1-dev \
+  libxcb-shape0-dev libxcb-xfixes0-dev fontconfig openssh-client openssh-server
+```
+
+Build and run the release binary:
+
+```sh
+cargo build --release
+./target/release/vela
+```
+
+</details>
+
+## License
+
+Vela is licensed under the [GNU General Public License v3.0 or later](LICENSE).

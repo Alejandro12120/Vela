@@ -28,7 +28,7 @@ Guarda `vela-release-private.pem` en un gestor de contraseñas (por ejemplo Bitw
 En el repositorio: **Settings → Secrets and variables → Actions → New repository secret**:
 
 - **Nombre:** `VELA_SIGNING_KEY`
-- **Valor:** el contenido completo de `vela-release-private.pem` (desde `-----BEGIN PRIVATE KEY-----` hasta `-----END PRIVATE KEY-----`). También se acepta codificado en base64.
+- **Valor:** la clave privada Ed25519 **sin frase de paso** en formato PEM PKCS#8 (`-----BEGIN PRIVATE KEY-----`) o formato OpenSSH (`-----BEGIN OPENSSH PRIVATE KEY-----`). También se acepta codificada en base64.
 
 ## 3. Publicar una release (`.github/workflows/release.yml`)
 

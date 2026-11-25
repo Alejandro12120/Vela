@@ -77,6 +77,81 @@ def ssh_string(data: bytes) -> bytes:
     return struct.pack(">I", len(data)) + data
 
 
+def read_ssh_string(buf: bytes, offset: int) -> tuple[bytes, int]:
+    if offset + 4 > len(buf):
+        raise ValueError("Truncated OpenSSH private key")
+    length = struct.unpack(">I", buf[offset : offset + 4])[0]
+    offset += 4
+    if offset + length > len(buf):
+        raise ValueError("Truncated OpenSSH private key field")
+    return buf[offset : offset + length], offset + length
+
+
+def parse_openssh_ed25519_private_key(pem_bytes: bytes) -> tuple[bytes, bytes]:
+    """Parse an unencrypted OpenSSH Ed25519 private key into (raw_seed, raw_pub)."""
+    lines = [
+        line.strip()
+        for line in pem_bytes.decode("ascii").splitlines()
+        if line.strip() and not line.strip().startswith("-----")
+    ]
+    blob = base64.b64decode("".join(lines), validate=True)
+    magic = b"openssh-key-v1\x00"
+    if not blob.startswith(magic):
+        raise ValueError("Unsupported OpenSSH private key format (missing openssh-key-v1 header)")
+    offset = len(magic)
+    cipher, offset = read_ssh_string(blob, offset)
+    kdf, offset = read_ssh_string(blob, offset)
+    _kdf_opts, offset = read_ssh_string(blob, offset)
+    if cipher != b"none" or kdf != b"none":
+        raise ValueError(
+            "VELA_SIGNING_KEY is encrypted with a passphrase "
+            f"(cipher={cipher.decode('ascii', errors='replace')}, "
+            f"kdf={kdf.decode('ascii', errors='replace')}). "
+            "GitHub Actions requires an unencrypted Ed25519 private key."
+        )
+    if offset + 4 > len(blob):
+        raise ValueError("Truncated OpenSSH private key (missing key count)")
+    nkeys = struct.unpack(">I", blob[offset : offset + 4])[0]
+    offset += 4
+    if nkeys != 1:
+        raise ValueError(f"Expected 1 key in OpenSSH private key, found {nkeys}")
+    _pub_blob, offset = read_ssh_string(blob, offset)
+    priv_blob, offset = read_ssh_string(blob, offset)
+
+    if len(priv_blob) < 8:
+        raise ValueError("Truncated OpenSSH private section")
+    check1, check2 = struct.unpack(">II", priv_blob[:8])
+    if check1 != check2:
+        raise ValueError("Corrupt OpenSSH private key (checkint mismatch)")
+    poff = 8
+    key_type, poff = read_ssh_string(priv_blob, poff)
+    if key_type != b"ssh-ed25519":
+        raise ValueError(
+            f"VELA_SIGNING_KEY must be an Ed25519 key (got {key_type.decode('ascii', errors='replace')})"
+        )
+    raw_pub, poff = read_ssh_string(priv_blob, poff)
+    raw_priv64, poff = read_ssh_string(priv_blob, poff)
+    if len(raw_pub) != 32 or len(raw_priv64) != 64:
+        raise ValueError("Unexpected Ed25519 key lengths in OpenSSH private key")
+    raw_seed = raw_priv64[:32]
+    if raw_priv64[32:] != raw_pub:
+        raise ValueError("OpenSSH Ed25519 private key public-key suffix mismatch")
+    return raw_seed, raw_pub
+
+
+def build_pkcs8_ed25519_pem(raw_seed: bytes) -> bytes:
+    """Wrap a 32-byte raw Ed25519 seed in RFC 8410 PKCS#8 PEM."""
+    if len(raw_seed) != 32:
+        raise ValueError("Ed25519 seed must be 32 bytes")
+    b64 = base64.b64encode(PKCS8_ED25519_PREFIX + raw_seed).decode("ascii")
+    lines = [b64[i : i + 64] for i in range(0, len(b64), 64)]
+    return (
+        "-----BEGIN PRIVATE KEY-----\n"
+        + "\n".join(lines)
+        + "\n-----END PRIVATE KEY-----\n"
+    ).encode("ascii")
+
+
 def build_openssh_ed25519_keys(raw_seed: bytes, raw_pub: bytes) -> tuple[bytes, str]:
     """Build an unencrypted OpenSSH Ed25519 private key PEM and matching .pub line."""
     if len(raw_seed) != 32 or len(raw_pub) != 32:
@@ -269,7 +344,21 @@ def main() -> int:
         ssh_pub_path = tmp_dir / "openssh_ed25519.pub"
         allowed_signers = tmp_dir / "allowed_signers"
 
-        write_secret_file(key_path, key_pem)
+        if b"BEGIN ENCRYPTED PRIVATE KEY" in key_pem:
+            sys.exit(
+                "VELA_SIGNING_KEY is encrypted with a passphrase. "
+                "GitHub Actions requires an unencrypted Ed25519 private key."
+            )
+
+        if b"BEGIN OPENSSH PRIVATE KEY" in key_pem:
+            try:
+                raw_seed, expected_pub = parse_openssh_ed25519_private_key(key_pem)
+            except ValueError as exc:
+                sys.exit(str(exc))
+            write_secret_file(key_path, build_pkcs8_ed25519_pem(raw_seed))
+        else:
+            expected_pub = None
+            write_secret_file(key_path, key_pem)
 
         # Derive public key and validate the key is Ed25519.
         key_text = run_openssl(
@@ -310,6 +399,8 @@ def main() -> int:
                 f"Unexpected Ed25519 SubjectPublicKeyInfo DER format ({len(pub_der)} bytes)"
             )
         raw_pub = pub_der[-32:]
+        if expected_pub is not None and raw_pub != expected_pub:
+            sys.exit("Derived OpenSSL public key does not match OpenSSH private key")
 
         ssh_key_pem, ssh_pub_line = build_openssh_ed25519_keys(raw_seed, raw_pub)
         write_secret_file(ssh_key_path, ssh_key_pem)

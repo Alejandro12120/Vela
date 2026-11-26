@@ -158,15 +158,25 @@ impl InstallHandle {
 }
 
 /// Runs [`download_and_install`] on a dedicated background thread and streams progress events.
-pub fn spawn_install(config: Config, release: ReleaseInfo, target: InstallTarget) -> InstallHandle {
+pub fn prepare_install(
+    config: Config,
+    release: ReleaseInfo,
+    target: InstallTarget,
+) -> (impl FnOnce() + Send + 'static, InstallHandle) {
     let (tx, rx) = async_channel::unbounded();
-    thread::spawn(move || {
+    let run = move || {
         let result = download_and_install(&config, &release, &target, |progress| {
             let _ = tx.send_blocking(InstallEvent::Progress(progress));
         });
         let _ = tx.send_blocking(InstallEvent::Finished(result));
-    });
-    InstallHandle { events: rx }
+    };
+    (run, InstallHandle { events: rx })
+}
+
+pub fn spawn_install(config: Config, release: ReleaseInfo, target: InstallTarget) -> InstallHandle {
+    let (run, handle) = prepare_install(config, release, target);
+    thread::spawn(run);
+    handle
 }
 
 #[derive(Deserialize)]

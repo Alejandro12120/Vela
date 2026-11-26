@@ -659,7 +659,8 @@ impl Workspace {
         };
         cx.notify();
         let config = Self::updater_config();
-        let handle = vela_core::updater::spawn_install(config, release.clone(), target);
+        let (run, handle) = vela_core::updater::prepare_install(config, release.clone(), target);
+        cx.background_executor().spawn(async move { run() }).detach();
         cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = handle.next().await {
                 match event {

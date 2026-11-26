@@ -128,45 +128,185 @@ fn valid_component(id: &str) -> bool {
         && id != ".lock"
 }
 
+pub fn default_root(app_name: &str) -> io::Result<PathBuf> {
+    std::env::home_dir()
+        .map(|home| home.join("Library/Caches").join(app_name).join("edit"))
+        .ok_or_else(|| io::Error::other("Cache folder not found"))
+}
+
+fn lock_root(root: &Path) -> io::Result<File> {
+    let lock = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(root.join(".lock"))?;
+    lock.try_lock().map_err(io::Error::from)?;
+    Ok(lock)
+}
+
+impl Records {
+    fn load(dir: &Path) -> io::Result<Self> {
+        match fs::read_to_string(dir.join(INDEX)) {
+            Ok(text) => {
+                toml::from_str(&text).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn save(&self, dir: &Path) -> io::Result<()> {
+        let text = toml::to_string_pretty(self).map_err(io::Error::other)?;
+        crate::config::save_private(dir, INDEX, &text)
+    }
+
+    fn directories(&self, root: &Path) -> io::Result<HashSet<&Path>> {
+        let mut targets = HashSet::new();
+        let mut directories = HashSet::new();
+        for edit in &self.edits {
+            if edit.relative_path(root).is_none()
+                || !targets.insert(&edit.target)
+                || !directories.insert(edit.local_path.parent().unwrap())
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Invalid or duplicate edit path",
+                ));
+            }
+        }
+        Ok(directories)
+    }
+}
+
+impl Edit {
+    fn relative_path(&self, root: &Path) -> Option<&Path> {
+        let relative = self.local_path.strip_prefix(root).ok()?;
+        let path = relative.strip_prefix(&self.target.server_id).ok()?;
+        let mut parts = path.components();
+        (valid_component(&self.target.server_id)
+            && self.target.remote_path.is_absolute()
+            && self.canonical_remote.is_absolute()
+            && matches!(parts.next(), Some(Component::Normal(id)) if id.as_encoded_bytes().starts_with(b"edit-"))
+            && matches!(parts.next(), Some(Component::Normal(_)))
+            && parts.next().is_none()
+            && self.local_path.file_name() == self.target.remote_path.file_name())
+            .then_some(relative)
+    }
+}
+
+/// Rebase working copies without opening an Index, which would clean up files
+/// before they can be matched with their original records.
+pub(crate) fn migrate_index(
+    legacy: &Path,
+    target: &Path,
+    root: &Path,
+    legacy_cache: Option<&Path>,
+) -> io::Result<bool> {
+    let legacy_inline = legacy.join("edit-cache");
+    let target_inline = target.join("edit-cache");
+    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_owned());
+    let old_roots: Vec<_> = [
+        Some(legacy_inline.as_path()),
+        legacy_cache,
+        Some(target_inline.as_path()),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|path| (path, canonical(path)))
+    .collect();
+    let mut current = Records::load(target)?;
+    let imported = Records::load(legacy)?;
+    let current_root = canonical(root);
+    if imported.edits.is_empty()
+        && current
+            .edits
+            .iter()
+            .all(|edit| edit.relative_path(&current_root).is_some())
+    {
+        return Ok(false);
+    }
+
+    private_dir(root)?;
+    let root = root.canonicalize()?;
+    let mut locked = HashSet::from([root.clone()]);
+    let _target_lock = lock_root(&root)?;
+    let mut old_locks = Vec::new();
+    for (_, path) in &old_roots {
+        if path.is_dir() && locked.insert(path.clone()) {
+            old_locks.push(lock_root(path)?);
+        }
+    }
+
+    // Re-read after taking the same locks used by live edit indexes.
+    current = Records::load(target)?;
+    let imported = Records::load(legacy)?;
+    let mut merged = Records::default();
+    for mut edit in current.edits.into_iter().chain(imported.edits) {
+        if edit.relative_path(&root).is_none() {
+            let (original_root, source_root, relative) = old_roots
+                .iter()
+                .find_map(|(original, canonical)| {
+                    edit.relative_path(original)
+                        .or_else(|| edit.relative_path(canonical))
+                        .map(|relative| (*original, canonical, relative))
+                })
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "Invalid legacy edit path")
+                })?;
+            let mut source = source_root.join(relative);
+            if original_root == legacy_inline && !source.exists() {
+                // Recover files copied to the Vela configuration directory by
+                // the previous startup migration.
+                source = canonical(&target_inline).join(relative);
+            }
+            let destination = root.join(relative);
+            let destination_dir = destination.parent().unwrap();
+            private_dir(destination_dir.parent().unwrap())?;
+            private_dir(destination_dir)?;
+            for directory in [source.parent().unwrap(), destination_dir] {
+                if directory.canonicalize()? != directory {
+                    return Err(io::Error::other("Edit cache contains a linked directory"));
+                }
+            }
+            if source != destination {
+                if destination.exists() {
+                    if read_content(&source, io::sink())?.1
+                        != read_content(&destination, io::sink())?.1
+                    {
+                        return Err(io::Error::other("Working copies conflict during migration"));
+                    }
+                } else {
+                    crate::config::copy_file(&source, &destination)?;
+                }
+            }
+            edit.local_path = destination;
+        }
+        if let Some(existing) = merged
+            .edits
+            .iter()
+            .find(|existing| existing.target == edit.target)
+        {
+            if existing.local_path != edit.local_path || existing.baseline != edit.baseline {
+                return Err(io::Error::other("Edit records conflict during migration"));
+            }
+        } else {
+            merged.edits.push(edit);
+        }
+    }
+    merged.directories(&root)?;
+    merged.save(target)?;
+    Ok(true)
+}
+
 impl Index {
     pub fn load(dir: PathBuf, root: PathBuf) -> io::Result<Self> {
         private_dir(&root)?;
         let root = root.canonicalize()?;
-        let lock = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(root.join(".lock"))?;
-        lock.try_lock().map_err(io::Error::from)?;
-        let records: Records = match fs::read_to_string(dir.join(INDEX)) {
-            Ok(text) => toml::from_str(&text)
-                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Records::default(),
-            Err(err) => return Err(err),
-        };
-        let mut targets = HashSet::new();
-        let mut directories = HashSet::new();
-        for edit in &records.edits {
-            let parent = root.join(&edit.target.server_id);
-            let local = edit.local_path.strip_prefix(&parent).ok();
-            if !valid_component(&edit.target.server_id)
-                || !edit.target.remote_path.is_absolute()
-                || !edit.canonical_remote.is_absolute()
-                || !local.is_some_and(|path| {
-                    let mut parts = path.components();
-                    matches!(parts.next(), Some(Component::Normal(id)) if id.as_encoded_bytes().starts_with(b"edit-"))
-                        && parts.next().is_some_and(|part| matches!(part, Component::Normal(_)))
-                        && parts.next().is_none()
-                })
-                || edit.local_path.file_name() != edit.target.remote_path.file_name()
-                || !targets.insert(&edit.target)
-                || !directories.insert(edit.local_path.parent().unwrap())
-            {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid or duplicate edit path"));
-            }
-        }
+        let lock = lock_root(&root)?;
+        let records = Records::load(&dir)?;
+        let directories = records.directories(&root)?;
         for server in fs::read_dir(&root)? {
             let server = server?;
             if !server.file_type()?.is_dir() {
@@ -211,8 +351,7 @@ impl Index {
     }
 
     fn save(&self) -> io::Result<()> {
-        let text = toml::to_string_pretty(&self.records).map_err(io::Error::other)?;
-        crate::config::save_private(&self.dir, INDEX, &text)
+        self.records.save(&self.dir)
     }
 
     pub fn put(&mut self, edit: Edit) -> io::Result<()> {
@@ -708,6 +847,62 @@ mod tests {
             },
             state,
         }
+    }
+
+    #[test]
+    fn migration_rebases_pending_inline_edits_and_keeps_target_edits() {
+        let temp = tempfile::tempdir().unwrap();
+        let legacy = temp.path().join("vscp");
+        let target = temp.path().join("vela");
+        let root = target.join("edit-cache");
+        let mut old = Index::load(legacy.clone(), legacy.join("edit-cache")).unwrap();
+        let pending = local_edit(&old, "pending.txt", State::Pending);
+        old.put(pending.clone()).unwrap();
+        fs::write(&pending.local_path, b"pending changes").unwrap();
+        let mut current = Index::load(target.clone(), root.clone()).unwrap();
+        let synced = local_edit(&current, "synced.txt", State::Synced);
+        current.put(synced.clone()).unwrap();
+        drop(current);
+
+        assert!(crate::config::migrate_directory(&legacy, &target).is_err());
+        assert!(
+            legacy.exists(),
+            "a live legacy index must keep its working copies"
+        );
+        drop(old);
+        assert!(crate::config::migrate_directory(&legacy, &target).unwrap());
+        assert!(!legacy.exists());
+
+        let current = Index::load(target, root).unwrap();
+        assert_eq!(current.edits()[0], synced);
+        let migrated = current.get(&pending.target).unwrap();
+        assert_eq!(migrated.baseline, pending.baseline);
+        assert_eq!(migrated.state, State::Pending);
+        assert!(migrated.snapshot().unwrap().is_some());
+        assert_eq!(fs::read(&migrated.local_path).unwrap(), b"pending changes");
+    }
+
+    #[test]
+    fn migration_repairs_records_from_an_already_moved_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let legacy = temp.path().join("vscp");
+        let target = temp.path().join("vela");
+        let legacy_root = temp.path().join("old-cache");
+        let root = temp.path().join("new-cache");
+        let mut old = Index::load(legacy.clone(), legacy_root.clone()).unwrap();
+        let conflict = local_edit(&old, "conflict.txt", State::Conflict);
+        old.put(conflict.clone()).unwrap();
+        drop(old);
+        fs::rename(&legacy, &target).unwrap();
+
+        assert!(migrate_index(&legacy, &target, &root, Some(&legacy_root)).unwrap());
+        assert!(!migrate_index(&legacy, &target, &root, Some(&legacy_root)).unwrap());
+        let current = Index::load(target, root).unwrap();
+        let migrated = current.get(&conflict.target).unwrap();
+        assert_eq!(migrated.state, State::Conflict);
+        assert_eq!(migrated.baseline, conflict.baseline);
+        assert_ne!(migrated.local_path, conflict.local_path);
+        assert_eq!(fs::read(&migrated.local_path).unwrap(), b"original");
     }
 
     #[test]

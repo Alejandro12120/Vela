@@ -1,6 +1,6 @@
 use gpui::{
-    Animation, AnimationExt, AnyElement, Context, Div, FocusHandle, FontWeight, Rgba, SharedString,
-    actions, div, ease_out_quint, point, prelude::*, px,
+    Animation, AnimationExt, AnyElement, Context, Div, FocusHandle, FontWeight, MouseButton, Rgba,
+    SharedString, actions, div, ease_out_quint, point, prelude::*, px,
 };
 
 use super::motion;
@@ -25,6 +25,7 @@ pub fn overlay<T: 'static>(
     focus: &FocusHandle,
     last: &FocusHandle,
     theme: Theme,
+    dismiss_on_backdrop: bool,
     cx: &Context<T>,
 ) -> Div {
     let title = title.into();
@@ -39,15 +40,25 @@ pub fn overlay<T: 'static>(
         .occlude()
         .child(
             // The backdrop fades in on its own, so the dialog is not dimmed by it.
-            div().absolute().inset_0().with_animation(
-                "modal-backdrop",
-                Animation::new(motion::FAST).with_easing(ease_out_quint()),
-                move |backdrop, t| backdrop.bg(overlay.opacity(t)),
-            ),
+            div()
+                .absolute()
+                .inset_0()
+                .when(dismiss_on_backdrop, |backdrop| {
+                    backdrop.on_mouse_down(MouseButton::Left, |_, window, cx| {
+                        cx.stop_propagation();
+                        window.dispatch_action(Box::new(Cancel), cx);
+                    })
+                })
+                .with_animation(
+                    "modal-backdrop",
+                    Animation::new(motion::FAST).with_easing(ease_out_quint()),
+                    move |backdrop, t| backdrop.bg(overlay.opacity(t)),
+                ),
         )
         .child(motion::appear(
             div()
                 .id("modal")
+                .when(dismiss_on_backdrop, |panel| panel.occlude())
                 .role(gpui::Role::Dialog)
                 .aria_label(title.clone())
                 .tab_index(-1)

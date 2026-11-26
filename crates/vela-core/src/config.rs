@@ -4,13 +4,13 @@ use std::{
     collections::HashSet,
     env, fs,
     io::{self, Write},
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt, symlink},
     path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Auth, ConnectionSpec, askpass::random_hex};
+use crate::{Auth, ConnectionSpec, askpass::random_hex, edit, settings::Settings};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Server {
@@ -208,11 +208,15 @@ pub fn move_server(servers: &mut Vec<Server>, id: &str, pinned: bool, before: Op
 }
 
 pub(crate) fn save_private(dir: &Path, name: &str, text: &str) -> io::Result<()> {
+    save_private_bytes(dir, name, text.as_bytes())
+}
+
+fn save_private_bytes(dir: &Path, name: &str, contents: &[u8]) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     let mut temp = tempfile::NamedTempFile::new_in(dir)?;
     temp.as_file()
         .set_permissions(fs::Permissions::from_mode(0o600))?;
-    temp.write_all(text.as_bytes())?;
+    temp.write_all(contents)?;
     temp.as_file().sync_all()?;
     temp.persist(dir.join(name))?;
     Ok(())
@@ -221,94 +225,217 @@ pub(crate) fn save_private(dir: &Path, name: &str, text: &str) -> io::Result<()>
 /// Migrates the real vSCP configuration into the real Vela directory. Callers
 /// using an overridden configuration directory skip this entirely.
 pub fn migrate_legacy_directory() -> io::Result<bool> {
-    migrate_directory(&legacy_directory()?, &default_directory()?)
+    let legacy = legacy_directory()?;
+    let target = default_directory()?;
+    let legacy_cache = edit::default_root("vSCP")?;
+    let target_cache = edit::default_root("Vela")?;
+    migrate_with_cache(&legacy, &target, &target_cache, Some(&legacy_cache))
 }
 
-/// Copies `legacy` into `target`, merging server lists when both have one,
-/// rewrites keys that point into the old directory, and only removes `legacy`
-/// once everything else succeeded. A failure leaves `legacy` untouched.
+/// Imports the legacy configuration and its in-directory edit cache.
 pub fn migrate_directory(legacy: &Path, target: &Path) -> io::Result<bool> {
-    if legacy == target || !fs::symlink_metadata(legacy).is_ok_and(|meta| meta.file_type().is_dir())
-    {
+    migrate_with_cache(legacy, target, &target.join("edit-cache"), None)
+}
+
+fn migrate_with_cache(
+    legacy: &Path,
+    target: &Path,
+    edit_root: &Path,
+    legacy_cache: Option<&Path>,
+) -> io::Result<bool> {
+    if legacy == target {
         return Ok(false);
     }
+    match fs::symlink_metadata(legacy) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => return Ok(false),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            // The original directory migration copied edits.toml verbatim. Repair
+            // outdated paths even if that migration already removed the source config.
+            return edit::migrate_index(legacy, target, edit_root, legacy_cache);
+        }
+        Err(err) => return Err(err),
+    }
+    let source_dir = legacy.canonicalize()?;
+    let target_dir = target.canonicalize().unwrap_or_else(|_| target.to_owned());
+    if target.starts_with(legacy) || target_dir.starts_with(&source_dir) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Config directories overlap",
+        ));
+    }
+    // Two new Vela instances must not import and remove the same source at once.
+    let migration_lock = fs::File::open(legacy)?;
+    migration_lock.try_lock().map_err(io::Error::from)?;
 
-    // Refuse to touch the target when the source cannot be read at all.
-    load(legacy)?;
-
-    let target_existed = target.is_dir();
-    let target_had_servers = target_existed && target.join("servers.toml").exists();
-    fs::create_dir_all(target)?;
-    copy_entries(legacy, target)?;
-
-    if target_had_servers {
-        let mut servers = load(target)?;
-        let missing: Vec<_> = {
-            let ids: HashSet<_> = servers.iter().map(|server| server.id.as_str()).collect();
-            load(legacy)?
+    // Validate source and target before writing anything.
+    let previous = load(target)?;
+    let imported = load(legacy)?;
+    let current = Settings::load(target)?;
+    let old_settings = Settings::load(legacy)?;
+    let hosts = merge_known_hosts(legacy, target)?;
+    let mut servers = {
+        let ids: HashSet<_> = previous.iter().map(|server| server.id.as_str()).collect();
+        let mut servers = previous.clone();
+        servers.extend(
+            imported
                 .into_iter()
-                .filter(|server| !ids.contains(server.id.as_str()))
-                .collect()
-        };
-        if !missing.is_empty() {
-            servers.extend(missing);
-            save(target, servers)?;
+                .filter(|server| !ids.contains(server.id.as_str())),
+        );
+        servers
+    };
+    let legacy_keys = legacy.join("keys");
+    let target_keys = target.join("keys");
+    for server in &mut servers {
+        if let Auth::Agent {
+            identity_pub,
+            agent_socket,
+        } = &mut server.auth
+        {
+            rewrite_path(identity_pub, &legacy_keys, &target_keys);
+            if let Some(socket) = agent_socket {
+                rewrite_path(socket, legacy, target);
+            }
         }
     }
-
-    rewrite_migrated_key_paths(legacy, target)?;
-
-    if !target_existed {
-        fs::set_permissions(target, fs::metadata(legacy)?.permissions())?;
+    let mut settings = current.clone();
+    settings.import_defaults(old_settings);
+    for path in [&mut settings.editor, &mut settings.agent_socket]
+        .into_iter()
+        .flatten()
+    {
+        rewrite_path(path, legacy, target);
     }
+
+    private_directory(target)?;
+    copy_entries(legacy, target, legacy, target)?;
+    if servers != previous
+        || (legacy.join("servers.toml").exists() && !target.join("servers.toml").exists())
+    {
+        save(target, servers)?;
+    }
+    if settings != current
+        || (legacy.join("settings.toml").exists() && !target.join("settings.toml").exists())
+    {
+        settings.save(target)?;
+    }
+    if let Some(hosts) = hosts {
+        save_private_bytes(target, "known_hosts", &hosts)?;
+    }
+    edit::migrate_index(legacy, target, edit_root, legacy_cache)?;
 
     fs::remove_dir_all(legacy)?;
     Ok(true)
 }
 
-/// Recursively copies files that are not already in `to`, keeping the modes of
-/// the source directories and files.
-fn copy_entries(from: &Path, to: &Path) -> io::Result<()> {
+fn rewrite_path(path: &mut PathBuf, before: &Path, after: &Path) {
+    if let Ok(relative) = path.strip_prefix(before) {
+        *path = after.join(relative);
+    }
+}
+
+fn merge_known_hosts(legacy: &Path, target: &Path) -> io::Result<Option<Vec<u8>>> {
+    let read = |dir: &Path| match fs::read(dir.join("known_hosts")) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    };
+    let Some(legacy) = read(legacy)? else {
+        return Ok(None);
+    };
+    let mut target = read(target)?.unwrap_or_default();
+    let mut seen: HashSet<_> = target
+        .split(|byte| *byte == b'\n')
+        .map(<[u8]>::trim_ascii)
+        .collect();
+    let mut additions = Vec::new();
+    for line in legacy.split(|byte| *byte == b'\n').map(<[u8]>::trim_ascii) {
+        if !line.is_empty() && seen.insert(line) {
+            additions.extend_from_slice(line);
+            additions.push(b'\n');
+        }
+    }
+    if !additions.is_empty() && !target.is_empty() && !target.ends_with(b"\n") {
+        target.push(b'\n');
+    }
+    target.extend(additions);
+    Ok(Some(target))
+}
+
+fn private_directory(path: &Path) -> io::Result<()> {
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)?;
+    if !fs::symlink_metadata(path)?.is_dir() {
+        return Err(io::Error::other("Configuration path isn't a directory"));
+    }
+    Ok(())
+}
+
+/// Copies missing files and preserves their modes and modification times.
+fn copy_entries(from: &Path, to: &Path, legacy: &Path, target: &Path) -> io::Result<()> {
     for entry in fs::read_dir(from)? {
         let entry = entry?;
+        let name = entry.file_name();
+        if from == legacy
+            && name.to_str().is_some_and(|name| {
+                matches!(
+                    name,
+                    "servers.toml" | "settings.toml" | "known_hosts" | "edits.toml" | "edit-cache"
+                )
+            })
+        {
+            continue;
+        }
         let source = entry.path();
-        let destination = to.join(entry.file_name());
+        let destination = to.join(name);
         let kind = entry.file_type()?;
         if kind.is_dir() {
             let existed = destination.exists();
-            fs::create_dir_all(&destination)?;
-            copy_entries(&source, &destination)?;
+            private_directory(&destination)?;
+            copy_entries(&source, &destination, legacy, target)?;
             if !existed {
                 fs::set_permissions(&destination, entry.metadata()?.permissions())?;
             }
-        } else if kind.is_file() && !destination.exists() {
-            fs::copy(&source, &destination)?;
-            fs::set_permissions(&destination, entry.metadata()?.permissions())?;
+        } else {
+            match destination.symlink_metadata() {
+                Ok(_) => continue,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err),
+            }
+            if kind.is_file() {
+                copy_file(&source, &destination)?;
+            } else if kind.is_symlink() {
+                let mut link = fs::read_link(&source)?;
+                rewrite_path(&mut link, legacy, target);
+                symlink(link, &destination)?;
+            } else {
+                return Err(io::Error::other(format!(
+                    "Can't migrate {}",
+                    source.display()
+                )));
+            }
         }
     }
     Ok(())
 }
 
-/// Points agent identities copied from the legacy keys directory at their new
-/// location. `servers.toml` is rewritten only when a path actually changed.
-fn rewrite_migrated_key_paths(legacy: &Path, target: &Path) -> io::Result<()> {
-    let legacy_keys = legacy.join("keys");
-    let target_keys = target.join("keys");
-    let mut servers = load(target)?;
-    let mut changed = false;
-    for server in &mut servers {
-        if let Auth::Agent { identity_pub, .. } = &mut server.auth
-            && let Ok(relative) = identity_pub
-                .strip_prefix(&legacy_keys)
-                .map(Path::to_path_buf)
-        {
-            *identity_pub = target_keys.join(relative);
-            changed = true;
-        }
+pub(crate) fn copy_file(source: &Path, destination: &Path) -> io::Result<()> {
+    let mut source = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(source)?;
+    let metadata = source.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::other("Expected a regular file"));
     }
-    if changed {
-        save(target, servers)?;
-    }
+    let mut temp = tempfile::NamedTempFile::new_in(destination.parent().unwrap())?;
+    io::copy(&mut source, &mut temp)?;
+    temp.as_file().set_permissions(metadata.permissions())?;
+    temp.as_file().set_modified(metadata.modified()?)?;
+    temp.as_file().sync_all()?;
+    temp.persist_noclobber(destination)?;
     Ok(())
 }
 
@@ -642,8 +769,17 @@ mod tests {
         fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
 
         fs::create_dir_all(legacy.join("themes")).unwrap();
-        fs::write(legacy.join("themes/aurora.toml"), "id = \"aurora\"").unwrap();
-        fs::write(legacy.join("settings.toml"), "editor = '/usr/bin/nano'").unwrap();
+        fs::set_permissions(legacy.join("themes"), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(legacy.join("themes/aurora.toml"), "name = 'Aurora'").unwrap();
+        fs::set_permissions(
+            legacy.join("themes/aurora.toml"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        fs::write(legacy.join("settings.toml"), format!(
+            "editor = '/usr/bin/nano'\nagent_socket = '{}'\n[appearance]\ntheme = 'vscp'\nlight_theme = 'aurora'\n",
+            legacy.join("agent.sock").display(),
+        )).unwrap();
         fs::write(legacy.join("known_hosts"), "host key").unwrap();
 
         let servers = vec![
@@ -672,18 +808,23 @@ mod tests {
         assert!(migrate_directory(&legacy, &target).unwrap());
         assert!(!legacy.exists());
 
-        assert_eq!(
-            fs::read_to_string(target.join("settings.toml")).unwrap(),
-            "editor = '/usr/bin/nano'"
+        let settings = Settings::load(&target).unwrap();
+        assert_eq!(settings.editor, Some("/usr/bin/nano".into()));
+        assert_eq!(settings.agent_socket, Some(target.join("agent.sock")));
+        assert_eq!(settings.appearance.light_theme, "aurora");
+        assert_eq!(settings.appearance.dark_theme, "vela");
+        assert!(
+            !fs::read_to_string(target.join("settings.toml"))
+                .unwrap()
+                .contains("vscp")
         );
         assert_eq!(
             fs::read_to_string(target.join("known_hosts")).unwrap(),
-            "host key"
+            "host key\n"
         );
-        assert_eq!(
-            fs::read_to_string(target.join("themes/aurora.toml")).unwrap(),
-            "id = \"aurora\""
-        );
+        let (themes, errors) = crate::appearance::load_user_themes(&target);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(themes[0].id, "aurora");
         assert_eq!(
             fs::read(target.join("keys/identity.pub")).unwrap(),
             b"ssh-ed25519 AAAA"
@@ -691,6 +832,9 @@ mod tests {
         let mode = |path: PathBuf| fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(target.join("keys")), 0o700);
         assert_eq!(mode(target.join("keys/identity.pub")), 0o600);
+        assert_eq!(mode(target.join("themes")), 0o700);
+        assert_eq!(mode(target.join("themes/aurora.toml")), 0o600);
+        assert_eq!(mode(target.join("known_hosts")), 0o600);
 
         let migrated = load(&target).unwrap();
         assert_eq!(ids(&migrated), ["internal", "external", "password"]);
@@ -731,9 +875,31 @@ mod tests {
         fs::create_dir_all(legacy.join("keys")).unwrap();
         fs::write(legacy.join("keys/legacy.pub"), "legacy key").unwrap();
         fs::create_dir_all(legacy.join("themes")).unwrap();
-        fs::write(legacy.join("themes/bosque.toml"), "id = \"bosque\"").unwrap();
-        fs::write(legacy.join("known_hosts"), "legacy hosts").unwrap();
-        fs::write(legacy.join("settings.toml"), "legacy settings").unwrap();
+        fs::write(legacy.join("themes/aurora.toml"), "name = 'Legacy Aurora'").unwrap();
+        fs::write(
+            legacy.join("known_hosts"),
+            "shared key\n\nold key\nold key\n",
+        )
+        .unwrap();
+        fs::write(
+            legacy.join("settings.toml"),
+            "\
+editor = '/usr/bin/nano'
+agent_socket = '/opt/agent.sock'
+terminal_font_size = 15
+terminal_copy_on_select = true
+terminal_colors = 'kitty'
+[appearance]
+scheme = 'dark'
+light_theme = 'aurora'
+dark_theme = 'oceano'
+[appearance.glass]
+enabled = true
+chrome = 65
+content = 84
+",
+        )
+        .unwrap();
         save(
             &legacy,
             vec![
@@ -751,8 +917,21 @@ mod tests {
         )
         .unwrap();
 
-        fs::create_dir_all(&target).unwrap();
-        fs::write(target.join("settings.toml"), "target settings").unwrap();
+        fs::create_dir_all(target.join("themes")).unwrap();
+        fs::write(target.join("themes/aurora.toml"), "name = 'Vela Aurora'").unwrap();
+        fs::write(target.join("known_hosts"), "custom key\nshared key").unwrap();
+        fs::write(
+            target.join("settings.toml"),
+            "\
+editor = '/usr/bin/vim'
+terminal_copy_on_select = false
+[appearance]
+light_theme = 'lavanda'
+[appearance.glass]
+chrome = 60
+",
+        )
+        .unwrap();
         save(
             &target,
             vec![
@@ -765,21 +944,32 @@ mod tests {
         assert!(migrate_directory(&legacy, &target).unwrap());
         assert!(!legacy.exists());
 
+        let settings = Settings::load(&target).unwrap();
+        assert_eq!(settings.editor, Some("/usr/bin/vim".into()));
+        assert_eq!(settings.agent_socket, Some("/opt/agent.sock".into()));
+        assert_eq!(settings.terminal_font_size, Some(15.));
+        assert_eq!(settings.terminal_copy_on_select, Some(false));
         assert_eq!(
-            fs::read_to_string(target.join("settings.toml")).unwrap(),
-            "target settings"
+            settings.terminal_colors,
+            crate::settings::TerminalColorSource::Kitty
         );
+        assert_eq!(settings.appearance.scheme, crate::appearance::Scheme::Dark);
+        assert_eq!(settings.appearance.light_theme, "lavanda");
+        assert_eq!(settings.appearance.dark_theme, "oceano");
+        assert!(settings.appearance.glass.enabled);
+        assert_eq!(settings.appearance.glass.chrome, 60);
+        assert_eq!(settings.appearance.glass.content, 84);
         assert_eq!(
             fs::read_to_string(target.join("known_hosts")).unwrap(),
-            "legacy hosts"
+            "custom key\nshared key\nold key\n"
         );
         assert_eq!(
             fs::read(target.join("keys/legacy.pub")).unwrap(),
             b"legacy key"
         );
         assert_eq!(
-            fs::read_to_string(target.join("themes/bosque.toml")).unwrap(),
-            "id = \"bosque\""
+            fs::read_to_string(target.join("themes/aurora.toml")).unwrap(),
+            "name = 'Vela Aurora'"
         );
 
         let migrated = load(&target).unwrap();
@@ -812,12 +1002,63 @@ mod tests {
         let target = root.path().join("vela");
         fs::create_dir_all(&legacy).unwrap();
         fs::write(legacy.join("servers.toml"), "[broken").unwrap();
-        fs::write(legacy.join("settings.toml"), "legacy settings").unwrap();
+        Settings::default().save(&legacy).unwrap();
 
         let error = migrate_directory(&legacy, &target).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(legacy.exists());
         assert_eq!(fs::read(legacy.join("servers.toml")).unwrap(), b"[broken");
         assert!(!target.exists());
+    }
+
+    #[test]
+    fn corrupt_legacy_settings_leave_both_directories_intact() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join("vscp");
+        let target = root.path().join("vela");
+        save(&legacy, vec![entry("old", "Legacy", false)]).unwrap();
+        save(&target, vec![entry("new", "Vela", false)]).unwrap();
+        Settings::default().save(&target).unwrap();
+        fs::write(legacy.join("settings.toml"), "[appearance\n").unwrap();
+        fs::write(legacy.join("known_hosts"), "old key\n").unwrap();
+
+        assert_eq!(
+            migrate_directory(&legacy, &target).unwrap_err().kind(),
+            io::ErrorKind::InvalidData,
+        );
+        assert_eq!(load(&target).unwrap()[0].id, "new");
+        assert!(!target.join("known_hosts").exists());
+        assert_eq!(load(&legacy).unwrap()[0].id, "old");
+        assert_eq!(
+            fs::read(legacy.join("settings.toml")).unwrap(),
+            b"[appearance\n"
+        );
+    }
+
+    #[test]
+    fn import_into_a_saved_default_configuration() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join("vscp");
+        let target = root.path().join("vela");
+        fs::create_dir(&legacy).unwrap();
+        write_servers(
+            &legacy,
+            "version = 0\n",
+            &[("old", "Legacy", "favorite = true")],
+        );
+        let old_servers = load(&legacy).unwrap();
+        assert!(old_servers[0].pinned);
+        let old_settings = Settings {
+            editor: Some("/usr/bin/nano".into()),
+            terminal_copy_on_select: Some(true),
+            ..Settings::default()
+        };
+        old_settings.save(&legacy).unwrap();
+        Settings::default().save(&target).unwrap();
+        save(&target, vec![]).unwrap();
+
+        assert!(migrate_directory(&legacy, &target).unwrap());
+        assert_eq!(Settings::load(&target).unwrap(), old_settings);
+        assert_eq!(load(&target).unwrap(), old_servers);
     }
 }

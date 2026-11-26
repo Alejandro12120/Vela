@@ -134,6 +134,7 @@ enum Dialog {
     Edit(EditDialog),
     DeleteTheme(String),
     EmptyEdits,
+    Update,
 }
 
 pub struct Workspace {
@@ -364,10 +365,11 @@ impl Workspace {
                                 sha256: "0".repeat(64),
                                 size: 1024,
                                 notes_url: None,
+                                changelog: Some("## What's changed\n- Improved sidebar update controls\n- Imported preferences and pending edits from vSCP".into()),
                             };
                             this.update_state = match preview {
                                 dev::UpdatePreview::Checking => UpdateState::Checking,
-                                dev::UpdatePreview::Available => UpdateState::Available {
+                                dev::UpdatePreview::Available | dev::UpdatePreview::Confirm => UpdateState::Available {
                                     release: fake_release(),
                                     error: None,
                                 },
@@ -382,6 +384,9 @@ impl Workspace {
                                     error: Some("Couldn't download the update.".into()),
                                 },
                             };
+                            if preview == dev::UpdatePreview::Confirm {
+                                this.confirm_update(window, cx);
+                            }
                         }
                         if let Some(name) = dev::autoconnect()
                             && let Some(server) = this.servers.iter().find(|server| server.display_name() == name)
@@ -623,7 +628,16 @@ impl Workspace {
         }
     }
 
-    pub fn install_update(&mut self, window: &Window, cx: &mut Context<Self>) {
+    pub fn confirm_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog.is_none()
+            && !self.saving
+            && matches!(self.update_state, UpdateState::Available { .. })
+        {
+            self.open_dialog(Dialog::Update, window, cx);
+        }
+    }
+
+    fn install_update(&mut self, window: &Window, cx: &mut Context<Self>) {
         let release = match &self.update_state {
             UpdateState::Available { release, .. } => release.clone(),
             _ => return,
@@ -1448,9 +1462,11 @@ impl Workspace {
         let focus = match &dialog {
             Dialog::Form(form) => Some(form.input(Field::Name)),
             Dialog::Prompt(prompt) => prompt.input.as_ref(),
-            Dialog::Delete(_) | Dialog::Edit(_) | Dialog::DeleteTheme(_) | Dialog::EmptyEdits => {
-                None
-            }
+            Dialog::Delete(_)
+            | Dialog::Edit(_)
+            | Dialog::DeleteTheme(_)
+            | Dialog::EmptyEdits
+            | Dialog::Update => None,
         };
         let focus = focus
             .map(|input| input.read(cx).focus_handle(cx))
@@ -1597,6 +1613,10 @@ impl Workspace {
                 self.persist(None, Some(id), window, cx);
             }
             Some(Dialog::EmptyEdits) => self.empty_edit_copies(window, cx),
+            Some(Dialog::Update) => {
+                self.finish_dialog(window, cx);
+                self.install_update(window, cx);
+            }
             _ => {}
         }
     }
@@ -1787,6 +1807,28 @@ impl Workspace {
                 ),
                 "Clear",
             ),
+            Dialog::Update => {
+                let UpdateState::Available { release, .. } = &self.update_state else {
+                    return None;
+                };
+                let preview = release.changelog.as_deref()
+                    .map(vela_core::updater::changelog_preview)
+                    .unwrap_or_default();
+                let body = div().flex().flex_col().gap_2()
+                    .child("Vela will restart automatically once the update finishes.")
+                    .when(!preview.is_empty(), |body| body.child(
+                        div().debug_selector(|| "update-changelog".into())
+                            .flex().flex_col().gap_1().rounded(px(6.)).bg(theme.panel).p_2()
+                            .text_size(px(12.)).text_color(theme.secondary_text)
+                            .children(preview.into_iter().map(|line| div().child(line)))
+                    ));
+                (
+                    format!("Update to Vela v{}?", release.version).into(),
+                    Some((IconName::CircleArrowDown, theme.accent)),
+                    body,
+                    "Update",
+                )
+            }
             Dialog::Prompt(prompt) => {
                 let destination = &prompt.request.destination;
                 let body = div().flex().flex_col().gap_2().child(
@@ -1837,13 +1879,16 @@ impl Workspace {
             .flex_none()
             .justify_end()
             .gap_2()
-            .child(button(
-                "cancel",
-                "Cancel",
-                Variant::Secondary,
-                theme,
-                cx.listener(|this, _, window, cx| this.cancel_dialog(window, cx)),
-            ))
+            .child(
+                button(
+                    "cancel",
+                    "Cancel",
+                    Variant::Secondary,
+                    theme,
+                    cx.listener(|this, _, window, cx| this.cancel_dialog(window, cx)),
+                )
+                .debug_selector(|| "dialog-cancel".into()),
+            )
             .child({
                 let label = if self.saving { "Saving…" } else { confirm };
                 let on_click = cx.listener(|this, _, window, cx| this.confirm_dialog(window, cx));
@@ -1866,6 +1911,7 @@ impl Workspace {
                     button("confirm", label, Variant::Primary, theme, on_click)
                 }
                 .track_focus(&self.confirm_focus)
+                .debug_selector(|| "dialog-confirm".into())
             });
         Some(
             modal::overlay(
@@ -1876,6 +1922,7 @@ impl Workspace {
                 &self.dialog_focus,
                 &self.confirm_focus,
                 theme,
+                matches!(dialog, Dialog::Update),
                 cx,
             )
             .into_any_element(),
@@ -2594,9 +2641,13 @@ impl Render for Workspace {
                 this.edits.popover = false;
                 cx.notify();
             }))
-            .on_action(
-                cx.listener(|this, _: &modal::Confirm, window, cx| this.confirm_dialog(window, cx)),
-            )
+            .on_action(cx.listener(|this, _: &modal::Confirm, window, cx| {
+                if !matches!(this.dialog, Some(Dialog::Update))
+                    || this.confirm_focus.is_focused(window)
+                {
+                    this.confirm_dialog(window, cx);
+                }
+            }))
             .on_action(
                 cx.listener(|this, _: &modal::Cancel, window, cx| this.cancel_dialog(window, cx)),
             )
@@ -3490,57 +3541,146 @@ mod tests {
 
     #[gpui::test]
     async fn updater_button_and_progress_bar_reflect_update_states(cx: &mut TestAppContext) {
+        let executor = cx.executor();
         let dir = tempfile::tempdir().unwrap();
         let (workspace, cx) = open(dir.path(), cx);
-        let release = vela_core::updater::ReleaseInfo {
-            version: "0.2.0".into(),
-            tag: "v0.2.0".into(),
-            asset: "vela-0.2.0-linux-x86_64.tar.gz".into(),
-            url: String::new(),
-            sig_url: String::new(),
-            sha256: "0".repeat(64),
-            size: 1024,
-            notes_url: None,
-        };
 
-        assert!(cx.debug_bounds("update-button").is_some());
-        assert!(cx.debug_bounds("update-progress").is_none());
-
-        workspace.update(cx, |this, cx| {
-            this.update_state = UpdateState::Checking;
-            cx.notify();
-        });
-        cx.update(|window, _| window.refresh());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("update-button").is_some());
-        assert!(cx.debug_bounds("update-progress").is_none());
-
-        workspace.update(cx, |this, cx| {
-            this.update_state = UpdateState::Available {
-                release: release.clone(),
-                error: None,
-            };
-            cx.notify();
-        });
-        cx.update(|window, _| window.refresh());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("update-button").is_some());
-        assert!(cx.debug_bounds("update-progress").is_none());
-
-        workspace.update(cx, |this, cx| {
-            this.update_state = UpdateState::Installing {
-                release,
-                progress: 0.45,
-            };
-            cx.notify();
-        });
-        cx.update(|window, _| window.refresh());
-        cx.run_until_parked();
+        let release = test_release();
+        for (state, expected, notes) in [
+            (UpdateState::Idle, "Check for updates", false),
+            (UpdateState::Checking, "Checking for updates…", false),
+            (
+                UpdateState::Available {
+                    release: release.clone(),
+                    error: None,
+                },
+                "Updates available · v0.2.0",
+                true,
+            ),
+            (
+                UpdateState::Available {
+                    release: vela_core::updater::ReleaseInfo {
+                        changelog: None,
+                        ..release.clone()
+                    },
+                    error: None,
+                },
+                "Updates available · v0.2.0",
+                false,
+            ),
+            (
+                UpdateState::Installing {
+                    release,
+                    progress: 0.45,
+                },
+                "Installing update… 45%",
+                false,
+            ),
+        ] {
+            let (label, lines) = sidebar::update_tooltip(&state);
+            assert_eq!(label, expected);
+            assert_eq!(
+                lines,
+                if notes {
+                    vec!["Faster transfers"]
+                } else {
+                    vec![]
+                }
+            );
+            workspace.update(cx, |this, cx| {
+                this.update_state = state;
+                cx.notify();
+            });
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            let button = cx.debug_bounds("update-button").unwrap();
+            cx.simulate_mouse_move(button.center(), None, Modifiers::none());
+            executor.advance_clock(Duration::from_millis(600));
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("tooltip").is_some(), "{expected}");
+            assert_eq!(cx.debug_bounds("tooltip-details").is_some(), notes);
+            cx.simulate_mouse_move(point(px(1.), px(10.)), None, Modifiers::none());
+        }
         let button_bounds = cx.debug_bounds("update-button").unwrap();
         let progress_bounds = cx.debug_bounds("update-progress").unwrap();
         assert!(
             progress_bounds.origin.y < button_bounds.origin.y,
             "the progress bar must appear above the footer row"
         );
+    }
+
+    fn test_release() -> vela_core::updater::ReleaseInfo {
+        vela_core::updater::ReleaseInfo {
+            version: "0.2.0".into(),
+            tag: "v0.2.0".into(),
+            asset: "invalid/file".into(),
+            url: String::new(),
+            sig_url: String::new(),
+            sha256: "0".repeat(64),
+            size: 1024,
+            notes_url: None,
+            changelog: Some("## Changes\n- **Faster** transfers".into()),
+        }
+    }
+
+    #[gpui::test]
+    async fn available_update_requests_confirmation_and_can_be_dismissed(cx: &mut TestAppContext) {
+        cx.update(bind_keys);
+        let dir = tempfile::tempdir().unwrap();
+        let (workspace, cx) = open(dir.path(), cx);
+        let release = test_release();
+        workspace.update(cx, |this, cx| {
+            this.update_state = UpdateState::Available {
+                release,
+                error: None,
+            };
+            cx.notify();
+        });
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let update = cx.debug_bounds("update-button").unwrap().center();
+        for dismissal in ["Cancel", "Escape", "Backdrop"] {
+            cx.simulate_click(update, Modifiers::none());
+            assert!(cx.debug_bounds("update-changelog").is_some());
+            workspace.read_with(cx, |this, _| {
+                assert!(matches!(this.dialog, Some(Dialog::Update)));
+                assert!(matches!(
+                    this.update_state,
+                    UpdateState::Available { error: None, .. }
+                ));
+            });
+            match dismissal {
+                "Cancel" => {
+                    let button = cx.debug_bounds("dialog-cancel").unwrap().center();
+                    cx.simulate_click(button, Modifiers::none());
+                }
+                "Escape" => cx.simulate_keystrokes("escape"),
+                _ => cx.simulate_click(point(px(8.), px(48.)), Modifiers::none()),
+            }
+            workspace.read_with(cx, |this, _| {
+                assert!(this.dialog.is_none(), "{dismissal}");
+                assert!(matches!(
+                    this.update_state,
+                    UpdateState::Available { error: None, .. }
+                ));
+            });
+        }
+
+        cx.simulate_click(update, Modifiers::none());
+        let confirm = cx.debug_bounds("dialog-confirm").unwrap().center();
+        cx.simulate_click(confirm, Modifiers::none());
+        workspace.read_with(cx, |this, _| {
+            assert!(this.dialog.is_none());
+            // The mock release fails validation before any download or replacement.
+            match &this.update_state {
+                UpdateState::Installing { .. } => {}
+                UpdateState::Available {
+                    error: Some(error), ..
+                } => {
+                    assert!(error.contains("invalid filename"), "{error}");
+                }
+                state => panic!("expected the install to start, got {state:?}"),
+            }
+        });
     }
 }

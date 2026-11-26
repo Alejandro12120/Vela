@@ -237,7 +237,9 @@ pub struct Tooltip(pub gpui::SharedString);
 impl gpui::Render for Tooltip {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
         let theme = Theme::current(window, cx);
+        let (title, details) = self.0.split_once('\n').unwrap_or((&self.0, ""));
         div()
+            .debug_selector(|| "tooltip".into())
             .px_2()
             .py_1()
             .rounded(px(6.))
@@ -246,6 +248,16 @@ impl gpui::Render for Tooltip {
             .bg(theme.raised)
             .text_color(theme.text)
             .text_size(px(12.))
-            .child(self.0.clone())
+            .child(title.to_owned())
+            .when(!details.is_empty(), |tooltip| {
+                tooltip.child(
+                    div()
+                        .debug_selector(|| "tooltip-details".into())
+                        .mt_1()
+                        .max_w(px(280.))
+                        .text_color(theme.secondary_text)
+                        .children(details.lines().map(|line| div().child(line.to_owned()))),
+                )
+            })
     }
 }

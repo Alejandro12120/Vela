@@ -551,10 +551,18 @@ fn settings_button(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>)
 }
 
 fn update_button(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -> Stateful<Div> {
+    let (label, details) = update_tooltip(&workspace.update_state);
+    let tooltip: gpui::SharedString = std::iter::once(label.as_str())
+        .chain(details.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .into();
     let base = div()
         .id("update-button")
         .debug_selector(|| "update-button".into())
         .role(Role::Button)
+        .aria_label(label)
+        .tooltip(move |_, cx| cx.new(|_| Tooltip(tooltip.clone())).into())
         .flex_none()
         .flex()
         .items_center()
@@ -565,7 +573,6 @@ fn update_button(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -
 
     match &workspace.update_state {
         UpdateState::Idle => base
-            .aria_label("Check for Updates")
             .tab_index(0)
             .bg(theme.panel)
             .cursor_pointer()
@@ -577,18 +584,13 @@ fn update_button(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -
                     .text_color(theme.text),
             )
             .on_click(cx.listener(|this, _, window, cx| this.check_for_updates(window, cx))),
-        UpdateState::Checking => base
-            .aria_label("Checking for Updates…")
-            .bg(theme.selection)
-            .opacity(0.75)
-            .child(motion::spin(
-                icon(IconName::RefreshCw)
-                    .size(px(15.))
-                    .text_color(theme.secondary_text),
-                "update-check-spin",
-            )),
-        UpdateState::Available { release, .. } => base
-            .aria_label(format!("Download Update {}", release.version))
+        UpdateState::Checking => base.bg(theme.selection).opacity(0.75).child(motion::spin(
+            icon(IconName::RefreshCw)
+                .size(px(15.))
+                .text_color(theme.secondary_text),
+            "update-check-spin",
+        )),
+        UpdateState::Available { .. } => base
             .tab_index(0)
             .bg(theme.panel)
             .cursor_pointer()
@@ -599,16 +601,31 @@ fn update_button(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -
                     .size(px(15.))
                     .text_color(theme.accent),
             )
-            .on_click(cx.listener(|this, _, window, cx| this.install_update(window, cx))),
-        UpdateState::Installing { release, .. } => base
-            .aria_label(format!("Installing Update {}…", release.version))
-            .bg(theme.selection)
-            .opacity(0.75)
-            .child(
-                icon(IconName::CircleArrowDown)
-                    .size(px(15.))
-                    .text_color(theme.secondary_text),
-            ),
+            .on_click(cx.listener(|this, _, window, cx| this.confirm_update(window, cx))),
+        UpdateState::Installing { .. } => base.bg(theme.selection).opacity(0.75).child(
+            icon(IconName::CircleArrowDown)
+                .size(px(15.))
+                .text_color(theme.secondary_text),
+        ),
+    }
+}
+
+pub(crate) fn update_tooltip(state: &UpdateState) -> (String, Vec<String>) {
+    match state {
+        UpdateState::Idle => ("Check for updates".into(), Vec::new()),
+        UpdateState::Checking => ("Checking for updates…".into(), Vec::new()),
+        UpdateState::Available { release, .. } => (
+            format!("Updates available · v{}", release.version),
+            release
+                .changelog
+                .as_deref()
+                .map(vela_core::updater::changelog_preview)
+                .unwrap_or_default(),
+        ),
+        UpdateState::Installing { progress, .. } => (
+            format!("Installing update… {:.0}%", progress * 100.),
+            Vec::new(),
+        ),
     }
 }
 

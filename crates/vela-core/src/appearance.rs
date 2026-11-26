@@ -55,14 +55,24 @@ struct StoredAppearanceSettings {
 
 impl From<StoredAppearanceSettings> for AppearanceSettings {
     fn from(stored: StoredAppearanceSettings) -> Self {
-        let legacy = stored.theme.unwrap_or_else(|| "vela".into());
+        let legacy = stored
+            .theme
+            .map(normalize_theme_id)
+            .unwrap_or_else(|| "vela".into());
         Self {
             scheme: stored.scheme,
-            light_theme: stored.light_theme.unwrap_or_else(|| legacy.clone()),
-            dark_theme: stored.dark_theme.unwrap_or(legacy),
+            light_theme: stored
+                .light_theme
+                .map(normalize_theme_id)
+                .unwrap_or_else(|| legacy.clone()),
+            dark_theme: stored.dark_theme.map(normalize_theme_id).unwrap_or(legacy),
             glass: stored.glass,
         }
     }
+}
+
+fn normalize_theme_id(id: String) -> String {
+    if id == "vscp" { "vela".into() } else { id }
 }
 
 impl Default for AppearanceSettings {

@@ -91,6 +91,7 @@ pub struct ReleaseInfo {
     pub sha256: String,
     pub size: u64,
     pub notes_url: Option<String>,
+    pub changelog: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -175,6 +176,10 @@ struct Manifest {
     tag: String,
     #[serde(default)]
     notes_url: Option<String>,
+    #[serde(default, deserialize_with = "optional_notes")]
+    notes: Option<String>,
+    #[serde(default, deserialize_with = "optional_notes")]
+    changelog: Option<String>,
     platforms: HashMap<String, PlatformEntry>,
 }
 
@@ -320,6 +325,10 @@ pub fn check(config: &Config) -> Result<CheckOutcome, UpdateError> {
         (entry.url.clone(), format!("{}.sshsig", entry.url))
     };
 
+    let mut changelog = manifest.notes.or(manifest.changelog);
+    if changelog.is_none() && custom_base.is_none() {
+        changelog = github_release_notes(&manifest.tag, tmp.path());
+    }
     Ok(CheckOutcome::UpdateAvailable(ReleaseInfo {
         version: manifest.version,
         tag: manifest.tag,
@@ -329,7 +338,161 @@ pub fn check(config: &Config) -> Result<CheckOutcome, UpdateError> {
         sha256: entry.sha256.clone(),
         size: entry.size,
         notes_url: manifest.notes_url,
+        changelog,
     }))
+}
+
+// Display metadata is optional even when an older producer wrote it with
+// an unexpected JSON type.
+fn optional_notes<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Option<String>, D::Error> {
+    let value = serde_json::Value::deserialize(de)?;
+    Ok(value
+        .as_str()
+        .filter(|text| !text.trim().is_empty())
+        .map(str::to_owned))
+}
+
+fn github_release_notes(tag: &str, dir: &Path) -> Option<String> {
+    // Release tags can contain slashes and other reserved URL characters.
+    let tag: String = tag
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'~') {
+                char::from(byte).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect();
+    let url = format!("https://api.github.com/repos/{REPO}/releases/tags/{tag}");
+    let mut command = Command::new("curl");
+    command.args([
+        "-q",
+        "-fsSL",
+        "--proto",
+        "=https",
+        "--tlsv1.2",
+        "--max-time",
+        "3",
+        "--header",
+        "Accept: application/vnd.github+json",
+        "--user-agent",
+        "Vela",
+        "--",
+        &url,
+    ]);
+    let path = dir.join("release.json");
+    download_small_response(command, &path, MAX_MANIFEST_BYTES).ok()?;
+    parse_release_body(&fs::read(path).ok()?)
+}
+
+fn parse_release_body(raw: &[u8]) -> Option<String> {
+    #[derive(Deserialize)]
+    struct GithubRelease {
+        #[serde(default, deserialize_with = "optional_notes")]
+        body: Option<String>,
+    }
+    serde_json::from_slice::<GithubRelease>(raw).ok()?.body
+}
+
+/// Up to three short, plain-text lines suitable for a tooltip or dialog.
+pub fn changelog_preview(markdown: &str) -> Vec<String> {
+    let mut preview = Vec::new();
+    let mut fence = None;
+    let mut in_comment = false;
+    for line in markdown.lines().take(100) {
+        let line = line.trim();
+        let line = &line[..line.floor_char_boundary(512)];
+        if in_comment || line.starts_with("<!--") {
+            in_comment = !line.contains("-->");
+            continue;
+        }
+        if line.starts_with("```") || line.starts_with("~~~") {
+            let marker = line.as_bytes()[0];
+            if fence == Some(marker) {
+                fence = None;
+            } else if fence.is_none() {
+                fence = Some(marker);
+            }
+            continue;
+        }
+        if fence.is_some() {
+            continue;
+        }
+        if line.starts_with('#')
+            && line
+                .trim_matches('#')
+                .trim()
+                .eq_ignore_ascii_case("new contributors")
+        {
+            break;
+        }
+        if line.starts_with(['#', '<']) || line.starts_with("![") {
+            continue;
+        }
+        let line = line.trim_start_matches(['-', '*', '+', '>']).trim_start();
+        let line = line
+            .split_once(". ")
+            .filter(|(prefix, _)| !prefix.is_empty() && prefix.bytes().all(|b| b.is_ascii_digit()))
+            .map_or(line, |(_, text)| text);
+        let line = line
+            .split_once(" by @")
+            .filter(|(_, attribution)| attribution.contains(" in https://github.com/"))
+            .map_or(line, |(text, _)| text);
+        let text = strip_inline_markdown(line);
+        let text = text.trim();
+        if text.is_empty()
+            || text.eq_ignore_ascii_case("full changelog:")
+            || text.chars().all(|ch| ch.is_ascii_punctuation())
+        {
+            continue;
+        }
+        let mut characters = text.chars();
+        let mut shortened: String = characters.by_ref().take(84).collect();
+        if characters.next().is_some() {
+            shortened.push('…');
+        }
+        preview.push(shortened);
+        if preview.len() == 3 {
+            break;
+        }
+    }
+    preview
+}
+
+fn strip_inline_markdown(mut line: &str) -> String {
+    let mut text = String::new();
+    while let Some((before, rest)) = line.split_once('[') {
+        text.push_str(before.trim_end_matches('!'));
+        let Some((label, after)) = rest.split_once("](") else {
+            text.push('[');
+            line = rest;
+            continue;
+        };
+        let Some((_, remaining)) = after.split_once(')') else {
+            text.push('[');
+            line = rest;
+            continue;
+        };
+        if !before.ends_with('!') {
+            text.push_str(label);
+        }
+        line = remaining;
+    }
+    text.push_str(line);
+    text.replace("**", "")
+        .replace("__", "")
+        .replace("~~", "")
+        .replace('`', "")
+        .split_whitespace()
+        .filter(|word| {
+            let word = word.trim_start_matches('<');
+            !word.starts_with("https://") && !word.starts_with("http://")
+        })
+        .map(|word| word.trim_matches(['*', '_']))
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Downloads, verifies (SHA-256 + Ed25519), extracts and atomically installs `release`.
@@ -517,7 +680,16 @@ fn download_small_file(
     max_bytes: u64,
     strict_https: bool,
 ) -> Result<(), UpdateError> {
-    let mut child = curl_command(url, strict_https, "60")
+    download_small_response(curl_command(url, strict_https, "60"), dest, max_bytes)
+}
+
+fn download_small_response(
+    mut command: Command,
+    dest: &Path,
+    max_bytes: u64,
+) -> Result<(), UpdateError> {
+    let mut file = File::create(dest)?;
+    let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -525,33 +697,22 @@ fn download_small_file(
         .map_err(|err| UpdateError::DownloadFailed(format!("curl: {err}")))?;
 
     let stderr_handle = spawn_stderr_reader(child.stderr.take());
-    let mut stdout = child
+    let stdout = child
         .stdout
         .take()
         .ok_or_else(|| UpdateError::DownloadFailed("no output from curl".into()))?;
 
-    let mut file = File::create(dest)?;
-    let mut total: u64 = 0;
-    let mut buf = [0u8; 16 * 1024];
-    loop {
-        let read = stdout.read(&mut buf)?;
-        if read == 0 {
-            break;
-        }
-        total += read as u64;
-        if total > max_bytes {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(UpdateError::DownloadFailed(
-                "the response exceeded the size limit".into(),
-            ));
-        }
-        file.write_all(&buf[..read])?;
+    let copied = io::copy(&mut stdout.take(max_bytes + 1), &mut file);
+    if !matches!(copied, Ok(bytes) if bytes <= max_bytes) {
+        let _ = child.kill();
     }
-    file.flush()?;
-
     let status = child.wait()?;
     let stderr = join_stderr_reader(stderr_handle);
+    if copied? > max_bytes {
+        return Err(UpdateError::DownloadFailed(
+            "the response exceeded the size limit".into(),
+        ));
+    }
     if !status.success() {
         let detail = stderr.trim();
         return Err(UpdateError::DownloadFailed(if detail.is_empty() {
@@ -1050,6 +1211,47 @@ mod tests {
     }
 
     #[test]
+    fn release_body_parsing_is_best_effort() {
+        for (response, notes) in [
+            (r###"{"body": "## Changes"}"###, Some("## Changes")),
+            (r#"{"body": ""}"#, None),
+            (r#"{"body": null}"#, None),
+            (r#"{"body": 42}"#, None),
+            (r#"{"message": "rate limit"}"#, None),
+            ("invalid json", None),
+        ] {
+            assert_eq!(parse_release_body(response.as_bytes()).as_deref(), notes);
+        }
+    }
+
+    #[test]
+    fn changelog_preview_cleans_markdown_and_bounds_the_output() {
+        let long = "é".repeat(120);
+        let markdown = format!("\
+## What's Changed
+<!--
+hidden
+-->
+![logo](https://example.com/logo.png)
+- **Improved** [transfer speed](https://example.com) by @user in https://github.com/owner/repo/pull/1
+1. _Fixed_ `SSH` reconnection
+~~~sh
+echo hidden
+~~~
+- {long}
+- Fourth entry");
+        assert_eq!(
+            changelog_preview(&markdown),
+            [
+                "Improved transfer speed".into(),
+                "Fixed SSH reconnection".into(),
+                format!("{}…", "é".repeat(84))
+            ]
+        );
+        assert!(changelog_preview("## Changes\n**Full Changelog**: https://example.com\n## New Contributors\n- Someone").is_empty());
+    }
+
+    #[test]
     fn validates_asset_names_and_digests_and_urls() {
         assert!(validate_asset_name("vela-0.2.0-linux-x86_64.tar.gz").is_ok());
         assert!(validate_asset_name("Vela-0.2.0-macos-aarch64.tar.gz").is_ok());
@@ -1123,7 +1325,10 @@ mod tests {
         fs::write(format!("{}.sshsig", target.display()), out.stdout).unwrap();
     }
 
-    fn create_signed_fixture(version: &str) -> (tempfile::TempDir, String, PathBuf, String) {
+    fn create_signed_fixture(
+        version: &str,
+        notes: Option<(&str, &str)>,
+    ) -> (tempfile::TempDir, String, PathBuf, String) {
         let tmp = tempfile::tempdir().unwrap();
         let dist = tmp.path().join("dist");
         let stage = tmp.path().join("stage");
@@ -1189,7 +1394,7 @@ mod tests {
         let notes_url = format!("https://github.com/Alejandro12120/Vela/releases/tag/v{version}");
         let asset_url =
             format!("https://github.com/Alejandro12120/Vela/releases/download/v{version}/{asset}");
-        let manifest = serde_json::json!({
+        let mut manifest = serde_json::json!({
             "schema": 1,
             "version": version,
             "tag": format!("v{version}"),
@@ -1205,6 +1410,9 @@ mod tests {
                 }
             }
         });
+        if let Some((field, notes)) = notes {
+            manifest[field] = serde_json::Value::String(notes.to_owned());
+        }
         let manifest_path = dist.join("manifest.json");
         fs::write(
             &manifest_path,
@@ -1218,7 +1426,7 @@ mod tests {
 
     #[test]
     fn check_and_install_signed_update_end_to_end() {
-        let (tmp, pubkey, dist, platform) = create_signed_fixture("0.2.0");
+        let (tmp, pubkey, dist, platform) = create_signed_fixture("0.2.0", None);
         let config = Config {
             current_version: "0.1.0".into(),
             platform: Some(platform.clone()),
@@ -1232,6 +1440,7 @@ mod tests {
             CheckOutcome::UpToDate => panic!("expected update to be available"),
         };
         assert_eq!(release.version, "0.2.0");
+        assert_eq!(release.changelog, None, "custom mirrors don't query GitHub");
 
         // Same version reports UpToDate.
         let same_config = Config {
@@ -1265,8 +1474,28 @@ mod tests {
     }
 
     #[test]
+    fn signed_manifest_can_embed_changelog_for_a_custom_mirror() {
+        for field in ["notes", "changelog"] {
+            let notes = "## Changes\n- Faster reconnects";
+            let (_tmp, pubkey, dist, platform) =
+                create_signed_fixture("0.2.0", Some((field, notes)));
+            let outcome = check(&Config {
+                current_version: "0.1.0".into(),
+                platform: Some(platform),
+                base_url: Some(format!("file://{}", dist.display())),
+                pubkey,
+            })
+            .unwrap();
+            let CheckOutcome::UpdateAvailable(release) = outcome else {
+                panic!("expected an available update");
+            };
+            assert_eq!(release.changelog.as_deref(), Some(notes));
+        }
+    }
+
+    #[test]
     fn rejects_wrong_key_and_tampered_artifacts() {
-        let (tmp, pubkey, dist, platform) = create_signed_fixture("0.2.0");
+        let (tmp, pubkey, dist, platform) = create_signed_fixture("0.2.0", None);
 
         // 1. Wrong key fails closed.
         let wrong_key = tmp.path().join("wrong_key");

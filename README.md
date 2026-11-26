@@ -65,9 +65,15 @@ Every release includes detached `.sig` and `.sshsig` files, `SHA256SUMS.txt`, an
 
 ## Updating
 
-Click the check-for-updates button on the right side of the sidebar footer. Vela downloads the signed `manifest.json` from GitHub Releases, verifies the Ed25519 signature of both the manifest and the release archive, shows download progress above the footer, installs the new version, and restarts the app automatically.
+Click the check-for-updates button on the right side of the sidebar footer. When an update is available, hover over the button for the version and a short preview of the release notes. Click the button to review and confirm the update. Vela verifies the signed manifest and release archive, shows installation progress above the footer, and restarts automatically when the update finishes.
 
 You can also update by running the install script again or downloading a release by hand.
+
+## Migrating from vSCP
+
+Vela imports the legacy vSCP configuration on startup. It adds servers and trusted hosts, copies missing keys and themes, and fills default settings with legacy preferences. Existing Vela server entries, files, and customized preferences take precedence. The old built-in `vscp` theme becomes `vela`.
+
+Vela carries forward indexed remote-edit copies, including pending changes and conflicts. Close vSCP before migrating and reopen the working copies from Vela afterward. Vela keeps the legacy configuration directory if migration encounters invalid settings or a conflicting working copy.
 
 ## Requirements
 

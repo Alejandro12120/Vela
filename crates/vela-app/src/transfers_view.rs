@@ -663,6 +663,7 @@ impl Transfers {
                 &self.focus,
                 &self.last,
                 theme,
+                false,
                 cx,
             )
             .on_action(cx.listener(|this, _: &modal::Cancel, window, cx| {

@@ -1489,6 +1489,83 @@ async fn benchmark_transfer_and_directory_listing() {
 }
 
 #[tokio::test]
+#[ignore = "loopback connection and recursive SFTP performance benchmark"]
+async fn benchmark_perf_suite() {
+    let fixture = Fixture::start();
+    let client = client();
+    let spec = fixture.spec("b.pub");
+    disconnect(&trust_first(&client, spec.clone()).await).await;
+    for _ in 0..5 {
+        let start = Instant::now();
+        let session = connect(&client, spec.clone(), unexpected).await.unwrap();
+        report_perf("ssh_connect", start);
+        disconnect(&session).await;
+    }
+
+    let session = connect(&client, spec, unexpected).await.unwrap();
+    let links = fixture.path("links");
+    let source = fixture.path("source");
+    let destination = fixture.path("destination");
+    for path in [&links, &source, &destination] {
+        fs::create_dir(path).unwrap();
+    }
+    let file = fixture.path("target_file");
+    File::create(&file).unwrap();
+    for index in 0..100 {
+        let target = if index % 2 == 0 { &file } else { &source };
+        symlink(target, links.join(index.to_string())).unwrap();
+    }
+    for _ in 0..3 {
+        let start = Instant::now();
+        let entries = within(session.list_dir(links.clone())).await;
+        report_perf("sftp_symlink_list_100", start);
+        assert_eq!(entries.len(), 100);
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.symlink_target_kind.is_some())
+        );
+    }
+
+    for dir in 0..20 {
+        let path = source.join(dir.to_string());
+        fs::create_dir(&path).unwrap();
+        for file in 0..20 {
+            fs::write(path.join(file.to_string()), [42; 1024]).unwrap();
+        }
+    }
+    let start = Instant::now();
+    let job = enqueue(
+        &session,
+        Direction::Download,
+        vec![source.clone()],
+        destination.clone(),
+    )
+    .await;
+    let (summary, results) = collect(&job, &[]).await;
+    report_perf("sftp_recursive_download_400", start);
+    assert_eq!(summary.status, Status::Completed, "{results:?}");
+    assert_eq!(summary.totals.bytes, 400 * 1024);
+    assert_eq!(
+        fs::read(destination.join("source/19/19")).unwrap(),
+        [42; 1024]
+    );
+
+    let start = Instant::now();
+    within(session.remove_tree(source.clone())).await;
+    report_perf("sftp_recursive_remove_400", start);
+    assert!(!source.exists());
+    disconnect(&session).await;
+}
+
+fn report_perf(metric: &str, start: Instant) {
+    eprintln!(
+        "perf {metric} {:.6} ms",
+        start.elapsed().as_secs_f64() * 1000.
+    );
+}
+
+#[tokio::test]
 async fn remote_edit_watches_saves_and_preserves_the_remote_inode() {
     use vela_core::edit::{DirectoryWatch, Index, OpenRemote, Schedule, State, Target, Upload};
 

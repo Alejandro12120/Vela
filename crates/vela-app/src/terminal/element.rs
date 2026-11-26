@@ -102,6 +102,62 @@ impl IntoElement for Surface {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn benchmark_prepaint(cx: &mut gpui::TestAppContext) {
+    use std::{hint::black_box, time::Instant};
+
+    let (terminal, cx) = cx.add_window_view(|_, cx| {
+        let mut view = TerminalView::new(cx);
+        let grid_size = GridSize {
+            cols: 160,
+            rows: 50,
+            cell_width: 8,
+            cell_height: 16,
+        };
+        let terminal = super::Terminal::new(&view.settings, grid_size);
+        let line = "Compiling vela v0.1.3  │  File ── edit.txt";
+        {
+            let mut grid = terminal.grid.lock();
+            for row in 0..50 {
+                if row % 4 != 0 {
+                    for (column, character) in line.chars().enumerate() {
+                        grid.grid_mut()[CellPoint::new(Line(row), Column(column))].c = character;
+                    }
+                }
+            }
+        }
+        view.terminal = Some(terminal);
+        view
+    });
+    cx.update(|window, cx| {
+        let geometry = Geometry {
+            origin: point(px(6.), px(6.)),
+            width: px(8.),
+            height: px(16.),
+            scale: window.scale_factor(),
+            size: GridSize {
+                cols: 160,
+                rows: 50,
+                cell_width: 8,
+                cell_height: 16,
+            },
+        };
+        terminal.update(cx, |view, _| view.geometry = Some(geometry));
+        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1292.), px(812.)));
+        let mut surface = Surface(terminal.clone());
+        for _ in 0..5 {
+            let start = Instant::now();
+            for _ in 0..500 {
+                black_box(surface.prepaint(None, None, bounds, &mut (), window, cx));
+            }
+            eprintln!(
+                "perf terminal_prepaint_160x50_x500 {:.6} ms",
+                start.elapsed().as_secs_f64() * 1000.
+            );
+        }
+    });
+}
+
 #[derive(PartialEq, Eq)]
 struct StyleKey {
     fg: u32,

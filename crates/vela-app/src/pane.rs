@@ -1483,3 +1483,7 @@ impl Columns {
 #[cfg(test)]
 #[path = "pane_keyboard_tests.rs"]
 mod keyboard_tests;
+
+#[cfg(test)]
+#[path = "pane_perf_tests.rs"]
+mod perf_tests;

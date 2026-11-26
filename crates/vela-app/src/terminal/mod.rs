@@ -3,6 +3,8 @@
 pub(crate) mod colors;
 pub(crate) mod copy_on_select;
 mod element;
+#[cfg(test)]
+pub(crate) use element::benchmark_prepaint;
 pub(crate) mod font_size;
 mod keys;
 pub(crate) mod kitty;

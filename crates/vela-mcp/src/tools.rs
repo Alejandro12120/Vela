@@ -133,7 +133,7 @@ tools! {
     { server_id: server_id(), path: remote_path() }, {};
     FsRead(FsReadInput) => fs_read async, "Lee una página de un archivo remoto de texto (hasta 512 KiB).",
     { server_id: server_id(), path: remote_path() },
-    { start_line: optional(integer("Primera línea, numerada desde 1.", usize::MAX as u64)), max_lines: optional(integer("Líneas solicitadas (500 por defecto, máximo efectivo 5000).", usize::MAX as u64)) };
+    { start_line: optional(integer("Primera línea solicitada (0-based: la primera línea es 0).", usize::MAX as u64)), max_lines: optional(integer("Líneas solicitadas (500 por defecto, máximo efectivo 5000).", usize::MAX as u64)) };
     FsWrite(FsWriteInput) => fs_write async, "Crea o reemplaza el contenido de un archivo de texto remoto.",
     { server_id: server_id(), path: remote_path(), content: string("Contenido UTF-8 completo.") },
     { mode: optional(file_mode()), reason: approval_reason() };

@@ -21,7 +21,7 @@ use vela_core::{Auth, Client, ConnectCancel, Session, config::Server, settings::
 
 use crate::{
     ApprovalMode, Decision, Executor, HeadlessAskBehavior, McpAction, PolicyDecision,
-    RollbackStore, ServerAvailability, ServerIdentity, ToolOutcome, config,
+    ROLLBACK_DIR_NAME, RollbackStore, ServerAvailability, ServerIdentity, ToolOutcome, config,
     ipc::IpcClient,
     protocol::{CallContext, ClientInfo, Progress, RpcError, ToolHandler, ToolResponse},
     tools::ToolCall,
@@ -206,7 +206,7 @@ impl HeadlessRuntime {
         let settings = Settings::load(&dir)?;
         let config = config::load(&dir)?;
         let rollback = Arc::new(RollbackStore::new(
-            dir.join("mcp-rollback"),
+            dir.join(ROLLBACK_DIR_NAME),
             config.rollback.clone(),
         )?);
         let known_hosts = config_dir.map(|_| dir.join("known_hosts"));

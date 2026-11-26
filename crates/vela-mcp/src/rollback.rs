@@ -16,6 +16,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{config::RollbackConfig, executor::ExecutorError};
 
+pub const ROLLBACK_DIR_NAME: &str = "mcp-rollback";
+
 const INDEX_NAME: &str = "index.json";
 const BLOBS_DIR: &str = "blobs";
 static SNAPSHOT_COUNTER: AtomicU64 = AtomicU64::new(0);

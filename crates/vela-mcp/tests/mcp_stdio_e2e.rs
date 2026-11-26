@@ -25,8 +25,8 @@ use tokio::{
 };
 use vela_core::{Auth, Session, config::Server, settings::Settings};
 use vela_mcp::{
-    ApprovalMode, Executor, HeadlessAskBehavior, McpBackend, McpConfig, RollbackStore,
-    ServerAvailability, ServerIdentity, ServerMcpPolicy, ToolOutcome, cli,
+    ApprovalMode, Executor, HeadlessAskBehavior, McpBackend, McpConfig, ROLLBACK_DIR_NAME,
+    RollbackStore, ServerAvailability, ServerIdentity, ServerMcpPolicy, ToolOutcome, cli,
     config::{self, ExecMode},
     headless::{RuntimeOptions, VelaLauncher},
     ipc::IpcServer,
@@ -284,7 +284,7 @@ async fn gui(env: &Environment) -> Arc<Executor<GuiBackend>> {
     };
     let rollback = Arc::new(
         RollbackStore::new(
-            env.config_dir.join("mcp-rollback"),
+            env.config_dir.join(ROLLBACK_DIR_NAME),
             env.config.rollback.clone(),
         )
         .unwrap(),

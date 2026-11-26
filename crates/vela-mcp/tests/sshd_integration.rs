@@ -238,7 +238,7 @@ async fn fs_list_stat_and_read_respect_depth_pattern_and_binary_files() {
         FsReadInput {
             server_id: "srv".into(),
             path: root.join("paginas.txt").to_string_lossy().into_owned(),
-            start_line: None,
+            start_line: Some(0),
             max_lines: Some(3),
         },
         ApprovalMode::Normal,
@@ -246,6 +246,7 @@ async fn fs_list_stat_and_read_respect_depth_pattern_and_binary_files() {
     .await
     .executed()
     .unwrap();
+    assert_eq!(first.start_line, 0);
     assert_eq!(first.total_lines, 10);
     assert_eq!(first.returned_lines, 3);
     assert_eq!(first.content, "linea 0\nlinea 1\nlinea 2");

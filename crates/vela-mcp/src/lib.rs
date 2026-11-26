@@ -49,4 +49,6 @@ pub use policy::{
     ServerIdentity,
 };
 pub use presets::{PermissionProfile, critical_denied_paths};
-pub use rollback::{BackupEntry, RollbackStore, RollbackUsage, restore_snapshot};
+pub use rollback::{
+    BackupEntry, ROLLBACK_DIR_NAME, RollbackStore, RollbackUsage, restore_snapshot,
+};

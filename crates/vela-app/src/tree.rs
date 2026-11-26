@@ -2,17 +2,18 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
     path::{Component, Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, LazyLock},
 };
 
 use vela_core::Entry;
 
 pub type PathSet = HashSet<Arc<Path>>;
 
-#[derive(Clone)]
-pub struct Child {
+pub type Child = Arc<ChildNode>;
+
+pub struct ChildNode {
     pub path: Arc<Path>,
-    pub entry: Arc<Entry>,
+    pub entry: Entry,
 }
 
 enum Children {
@@ -23,24 +24,30 @@ enum Children {
 }
 
 pub enum RowState {
-    Entry(Arc<Entry>),
-    Loading,
-    Error(Arc<str>),
+    Entry(Child),
+    Loading(Arc<Path>),
+    Error(Arc<Path>, Arc<str>),
 }
 
 pub type Listing = (Arc<Path>, Result<Vec<Child>, String>);
 
 pub struct Row {
-    pub path: Arc<Path>,
     pub depth: usize,
     pub expanded: bool,
     pub state: RowState,
 }
 
 impl Row {
+    pub fn path(&self) -> &Arc<Path> {
+        match &self.state {
+            RowState::Entry(child) => &child.path,
+            RowState::Loading(path) | RowState::Error(path, _) => path,
+        }
+    }
+
     pub fn entry(&self) -> Option<&Entry> {
         match &self.state {
-            RowState::Entry(entry) => Some(entry),
+            RowState::Entry(child) => Some(&child.entry),
             _ => None,
         }
     }
@@ -59,7 +66,9 @@ pub struct Tree {
     pub show_hidden: bool,
     pub expanded: PathSet,
     pub selected: PathSet,
+    selected_paths: Arc<[PathBuf]>,
     cursor: Option<Arc<Path>>,
+    cursor_index: Option<usize>,
     anchor: Option<Arc<Path>>,
     directories: HashMap<Arc<Path>, Children>,
     pub count: usize,
@@ -73,7 +82,9 @@ impl Tree {
             show_hidden,
             expanded,
             selected: PathSet::new(),
+            selected_paths: Self::empty_paths(),
             cursor: None,
+            cursor_index: None,
             anchor: None,
             directories: HashMap::new(),
             count: 0,
@@ -148,8 +159,8 @@ impl Tree {
             .rows
             .iter()
             .filter(|row| row.expanded && matches!(row.state, RowState::Entry(_)))
-            .filter(|row| !self.directories.contains_key(&row.path))
-            .map(|row| row.path.clone())
+            .filter(|row| !self.directories.contains_key(row.path()))
+            .map(|row| row.path().clone())
             .collect();
         for path in &pending {
             self.directories.insert(path.clone(), Children::Loading);
@@ -185,18 +196,14 @@ impl Tree {
     }
 
     pub fn cursor_index(&self) -> Option<usize> {
-        self.cursor.as_ref().and_then(|cursor| {
-            self.rows
-                .iter()
-                .position(|row| &row.path == cursor && row.entry().is_some())
-        })
+        self.cursor_index
     }
 
     pub fn select(&mut self, index: usize, mode: Selection) {
         let Some(row) = self.rows.get(index).filter(|row| row.entry().is_some()) else {
             return;
         };
-        let path = row.path.clone();
+        let path = row.path().clone();
         match mode {
             Selection::Single => {
                 self.selected.clear();
@@ -218,29 +225,32 @@ impl Tree {
                 let start = self
                     .rows
                     .iter()
-                    .position(|row| row.path == anchor && row.entry().is_some())
+                    .position(|row| row.path() == &anchor && row.entry().is_some())
                     .unwrap_or(index);
                 self.selected = self.rows[start.min(index)..=start.max(index)]
                     .iter()
                     .filter(|row| row.entry().is_some())
-                    .map(|row| row.path.clone())
+                    .map(|row| row.path().clone())
                     .collect();
                 self.anchor = Some(anchor);
             }
         }
         self.cursor = Some(path);
+        self.cursor_index = Some(index);
+        if self.selected.len() == 1 && self.selected.contains(row.path()) {
+            self.selected_paths = Arc::from([row.path().to_path_buf()]);
+        } else {
+            self.update_selected_paths();
+        }
     }
 
     pub fn step(&mut self, down: bool, mode: Selection) {
-        let cursor = self.cursor_index();
-        let mut indices = 0..self.rows.len();
         let next = if down {
-            indices
-                .find(|&i| cursor.is_none_or(|cursor| i > cursor) && self.rows[i].entry().is_some())
+            let start = self.cursor_index.map_or(0, |cursor| cursor + 1);
+            (start..self.rows.len()).find(|&i| self.rows[i].entry().is_some())
         } else {
-            indices.rfind(|&i| {
-                cursor.is_none_or(|cursor| i < cursor) && self.rows[i].entry().is_some()
-            })
+            let end = self.cursor_index.unwrap_or(self.rows.len());
+            (0..end).rfind(|&i| self.rows[i].entry().is_some())
         };
         if let Some(index) = next {
             self.select(index, mode);
@@ -248,11 +258,11 @@ impl Tree {
     }
 
     pub fn select_parent(&mut self, index: usize) {
-        let parent = self.rows[index].path.parent();
+        let parent = self.rows[index].path().parent();
         if let Some(index) = self
             .rows
             .iter()
-            .position(|row| Some(row.path.as_ref()) == parent && row.entry().is_some())
+            .position(|row| Some(row.path().as_ref()) == parent && row.entry().is_some())
         {
             self.select(index, Selection::Single);
         }
@@ -263,16 +273,42 @@ impl Tree {
             .rows
             .iter()
             .filter(|row| row.entry().is_some())
-            .map(|row| row.path.clone())
+            .map(|row| row.path().clone())
             .collect();
         if self.cursor.is_none() {
+            self.cursor_index = self.rows.iter().position(|row| row.entry().is_some());
             self.cursor = self
-                .rows
-                .iter()
-                .find(|row| row.entry().is_some())
-                .map(|row| row.path.clone());
+                .cursor_index
+                .map(|index| self.rows[index].path().clone());
         }
         self.anchor = self.cursor.clone();
+        self.update_selected_paths();
+    }
+
+    pub fn replace_selection(&mut self, selected: PathSet) {
+        self.selected = selected;
+        self.update_selected_paths();
+    }
+
+    pub fn selected_paths(&self) -> Arc<[PathBuf]> {
+        self.selected_paths.clone()
+    }
+
+    fn empty_paths() -> Arc<[PathBuf]> {
+        static EMPTY: LazyLock<Arc<[PathBuf]>> = LazyLock::new(|| Arc::from([]));
+        EMPTY.clone()
+    }
+
+    fn update_selected_paths(&mut self) {
+        self.selected_paths = if self.selected.is_empty() {
+            Self::empty_paths()
+        } else {
+            self.rows
+                .iter()
+                .filter(|row| self.selected.contains(row.path()))
+                .map(|row| row.path().to_path_buf())
+                .collect()
+        };
     }
 
     fn rebuild(&mut self) {
@@ -287,6 +323,11 @@ impl Tree {
             &mut self.rows,
             &mut self.count,
         );
+        self.cursor_index = self.cursor.as_ref().and_then(|path| {
+            self.rows
+                .iter()
+                .position(|row| row.path() == path && row.entry().is_some())
+        });
         if self.selected.is_empty() && self.cursor.is_none() && self.anchor.is_none() {
             return;
         }
@@ -295,7 +336,7 @@ impl Tree {
             self.rows
                 .iter()
                 .filter(|row| row.entry().is_some())
-                .map(|row| row.path.as_ref())
+                .map(|row| row.path().as_ref())
                 .collect()
         });
         let visible = |path: &Arc<Path>| match &visible {
@@ -303,15 +344,16 @@ impl Tree {
             None => self
                 .rows
                 .iter()
-                .any(|row| row.entry().is_some() && &row.path == path),
+                .any(|row| row.entry().is_some() && row.path() == path),
         };
         self.selected.retain(&visible);
-        if self.cursor.as_ref().is_some_and(|path| !visible(path)) {
+        if self.cursor_index.is_none() {
             self.cursor = None;
         }
         if self.anchor.as_ref().is_some_and(|path| !visible(path)) {
             self.anchor = self.cursor.clone();
         }
+        self.update_selected_paths();
     }
 }
 
@@ -332,10 +374,9 @@ fn flatten(
                 }
                 let open = child.entry.is_directory() && expanded.contains(&child.path);
                 rows.push(Row {
-                    path: child.path.clone(),
                     depth,
                     expanded: open,
-                    state: RowState::Entry(child.entry.clone()),
+                    state: RowState::Entry(child.clone()),
                 });
                 *count += 1;
                 if open {
@@ -353,11 +394,10 @@ fn flatten(
             return;
         }
         Children::NotLoaded => return,
-        Children::Loading => RowState::Loading,
-        Children::Error(error) => RowState::Error(error.clone()),
+        Children::Loading => RowState::Loading(path.into()),
+        Children::Error(error) => RowState::Error(path.into(), error.clone()),
     };
     rows.push(Row {
-        path: path.into(),
         depth,
         expanded: false,
         state,
@@ -368,19 +408,33 @@ fn flatten(
 pub fn prepare(path: &Path, entries: Vec<Entry>) -> Vec<Child> {
     let mut named: Vec<_> = entries.into_iter()
         .filter(|entry| matches!(Path::new(&entry.name).components().next(), Some(Component::Normal(name)) if name == entry.name))
-        .map(|entry| (entry.name.to_string_lossy().to_lowercase(), entry))
+        .map(|entry| {
+            let lowercase = (!entry.name.as_encoded_bytes().is_ascii())
+                .then(|| entry.name.to_string_lossy().to_lowercase());
+            (lowercase, entry)
+        })
         .collect();
     named.sort_unstable_by(|(a, aa), (b, bb)| {
         bb.is_directory()
             .cmp(&aa.is_directory())
-            .then_with(|| natural_cmp(a.as_bytes(), b.as_bytes()))
+            .then_with(|| {
+                let a = a
+                    .as_deref()
+                    .map_or(aa.name.as_encoded_bytes(), str::as_bytes);
+                let b = b
+                    .as_deref()
+                    .map_or(bb.name.as_encoded_bytes(), str::as_bytes);
+                natural_cmp(a, b)
+            })
             .then_with(|| aa.name.cmp(&bb.name))
     });
     named
         .into_iter()
-        .map(|(_, entry)| Child {
-            path: path.join(&entry.name).into(),
-            entry: Arc::new(entry),
+        .map(|(_, entry)| {
+            Arc::new(ChildNode {
+                path: path.join(&entry.name).into(),
+                entry,
+            })
         })
         .collect()
 }
@@ -403,7 +457,7 @@ fn natural_cmp(mut a: &[u8], mut b: &[u8]) -> Ordering {
                 .then_with(|| digits_a.len().cmp(&digits_b.len()))
         } else {
             (a, b) = (&a[1..], &b[1..]);
-            x.cmp(&y)
+            x.to_ascii_lowercase().cmp(&y.to_ascii_lowercase())
         };
         if order != Ordering::Equal {
             return order;
@@ -522,18 +576,18 @@ mod tests {
     fn flattens_loading_error_and_loaded_children_in_place() {
         let mut tree = Tree::new("/root".into(), false, PathSet::new());
         tree.begin(path(""));
-        assert!(matches!(tree.rows[0].state, RowState::Loading));
+        assert!(matches!(tree.rows[0].state, RowState::Loading(_)));
         let (root, result) = listing("", vec![entry("a", Directory), entry("z", File)]);
         tree.finish(root, result);
         tree.set_expanded(path("a"), true);
         assert_eq!(tree.claim_loads(), vec![path("a")]);
         assert!(tree.claim_loads().is_empty());
-        assert!(matches!(tree.rows[1].state, RowState::Loading));
+        assert!(matches!(tree.rows[1].state, RowState::Loading(_)));
         assert_eq!(tree.rows[1].depth, 1);
         assert_eq!(tree.count, 2);
         tree.finish(path("a"), Err("permiso denegado".into()));
         assert!(
-            matches!(&tree.rows[1].state, RowState::Error(error) if error.as_ref() == "permiso denegado")
+            matches!(&tree.rows[1].state, RowState::Error(_, error) if error.as_ref() == "permiso denegado")
         );
         tree.set_expanded(path("a"), false);
         assert_eq!(names(&tree), vec![("a", 0), ("z", 0)]);

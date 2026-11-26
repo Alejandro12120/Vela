@@ -1,7 +1,9 @@
+use std::collections::HashMap;
+
 use gpui::{
-    AnimationExt, AnyElement, ClickEvent, Context, Div, DragMoveEvent, FocusHandle, FontWeight,
-    MouseButton, MouseDownEvent, Pixels, Point, Render, Role, SharedString, SpringAnimation,
-    Stateful, Window, anchored, deferred, div, point, prelude::*, px,
+    AnimationExt, AnyElement, App, ClickEvent, Context, Div, DragMoveEvent, FocusHandle,
+    FontWeight, MouseButton, MouseDownEvent, Pixels, Point, Render, Role, SharedString,
+    SpringAnimation, Stateful, WeakEntity, Window, anchored, deferred, div, point, prelude::*, px,
 };
 use vela_core::config::Server;
 
@@ -250,7 +252,7 @@ pub fn render(
     } else {
         0.
     };
-    let body = body(workspace, theme, titlebar_height, cx);
+    let workspace = cx.entity().downgrade();
     // The width springs and the content is clipped, so the panes reflow with it.
     // Nothing is rendered while closed, which keeps it out of the tab order.
     div()
@@ -264,11 +266,32 @@ pub fn render(
                 .to(px(target))
                 .with_epsilon(0.5),
             move |wrapper, width| {
-                wrapper
-                    .w(width)
-                    .when(width > px(0.5), move |wrapper| wrapper.child(body))
+                wrapper.w(width).when(width > px(0.5), move |wrapper| {
+                    wrapper.child(SidebarBody {
+                        workspace,
+                        theme,
+                        titlebar_height,
+                    })
+                })
             },
         )
+}
+
+#[derive(IntoElement)]
+struct SidebarBody {
+    workspace: WeakEntity<Workspace>,
+    theme: Theme,
+    titlebar_height: Pixels,
+}
+
+impl RenderOnce for SidebarBody {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        self.workspace
+            .update(cx, |workspace, cx| {
+                body(workspace, self.theme, self.titlebar_height, cx)
+            })
+            .unwrap_or_else(|_| div())
+    }
 }
 
 fn body(
@@ -378,10 +401,14 @@ fn body(
         .iter()
         .chain(&unpinned)
         .filter(|id| drag.is_none_or(|(dragged, _)| dragged != **id));
+    let mut servers = HashMap::with_capacity(workspace.servers.len());
+    for server in &workspace.servers {
+        servers.entry(server.id.as_str()).or_insert(server);
+    }
     let rows = ordered
         .zip(&positions.rows)
         .filter_map(|(id, &(_, y))| {
-            let server = workspace.servers.iter().find(|server| server.id == **id)?;
+            let server = servers.get(id)?;
             let from = settle
                 .filter(|(settling, _)| settling == id)
                 .map(|(_, y)| y);
@@ -389,10 +416,7 @@ fn body(
         })
         .collect::<Vec<_>>();
     let dragged = reorder.and_then(|reorder| {
-        let server = workspace
-            .servers
-            .iter()
-            .find(|server| server.id == reorder.id)?;
+        let server = servers.get(reorder.id.as_str())?;
         Some(floating_card(
             server,
             card_top(reorder, positions.height),
@@ -551,12 +575,7 @@ fn settings_button(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>)
 }
 
 fn update_button(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -> Stateful<Div> {
-    let (label, details) = update_tooltip(&workspace.update_state);
-    let tooltip: gpui::SharedString = std::iter::once(label.as_str())
-        .chain(details.iter().map(String::as_str))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .into();
+    let (label, tooltip) = workspace.update_tooltip.clone();
     let base = div()
         .id("update-button")
         .debug_selector(|| "update-button".into())
@@ -631,6 +650,16 @@ pub(crate) fn update_tooltip(state: &UpdateState) -> (String, Vec<String>) {
             Vec::new(),
         ),
     }
+}
+
+pub(crate) fn format_update_tooltip(state: &UpdateState) -> (SharedString, SharedString) {
+    let (label, details) = update_tooltip(state);
+    let mut tooltip = label.clone();
+    for detail in details {
+        tooltip.push('\n');
+        tooltip.push_str(&detail);
+    }
+    (label.into(), tooltip.into())
 }
 
 fn group_header(label: &'static str, theme: Theme) -> Div {

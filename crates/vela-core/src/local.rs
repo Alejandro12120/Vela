@@ -1,6 +1,7 @@
 //! Read local directory entries without following symbolic links for their own metadata.
 
 use std::{
+    ffi::OsString,
     fs::{self, FileType},
     io::{self, Read},
     os::unix::fs::MetadataExt,
@@ -9,7 +10,7 @@ use std::{
 
 #[cfg(not(target_os = "macos"))]
 use std::{
-    ffi::{OsStr, OsString},
+    ffi::OsStr,
     fs::{OpenOptions, Permissions},
     io::Write,
     os::unix::{
@@ -24,26 +25,74 @@ use crate::{Entry, EntryKind};
 /// Read a directory, skipping individual entries that disappeared or cannot be read.
 pub fn list_dir(path: &Path) -> io::Result<Vec<Entry>> {
     Ok(fs::read_dir(path)?
-        .filter_map(|item| stat(&item.ok()?.path()).ok())
+        .filter_map(|item| {
+            let item = item.ok()?;
+            Some(entry(item.file_name(), item.metadata().ok()?, || {
+                item.path()
+            }))
+        })
         .collect())
 }
 
+/// A transfer must report directory stream failures and retry an entry whose
+/// metadata failed, so its per-item error can include the affected path.
+pub(crate) fn transfer_entries(
+    path: &Path,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<Vec<Entry>, crate::Error> {
+    fs::read_dir(path)?
+        .map(|item| {
+            let item = item?;
+            crate::sftp::check_cancel(cancel)?;
+            let name = item.file_name();
+            Ok(match item.metadata() {
+                Ok(metadata) => {
+                    let mut entry = metadata_entry(name, metadata);
+                    entry.mode = entry.mode.map(|mode| mode & 0o7777);
+                    entry
+                }
+                Err(_) => Entry {
+                    name,
+                    kind: EntryKind::Other,
+                    symlink_target_kind: None,
+                    size: None,
+                    mtime: None,
+                    mode: None,
+                },
+            })
+        })
+        .collect()
+}
+
 pub fn stat(path: &Path) -> io::Result<Entry> {
-    let metadata = fs::symlink_metadata(path)?;
-    let kind = entry_kind(metadata.file_type());
-    let symlink_target_kind = if kind == EntryKind::Symlink {
-        fs::metadata(path).ok().map(|m| entry_kind(m.file_type()))
-    } else {
-        None
-    };
-    Ok(Entry {
-        name: path.file_name().unwrap_or(path.as_os_str()).to_owned(),
-        kind,
-        symlink_target_kind,
+    Ok(entry(
+        path.file_name().unwrap_or(path.as_os_str()).to_owned(),
+        fs::symlink_metadata(path)?,
+        || path,
+    ))
+}
+
+fn entry<P: AsRef<Path>>(
+    name: OsString,
+    metadata: fs::Metadata,
+    path: impl FnOnce() -> P,
+) -> Entry {
+    let mut entry = metadata_entry(name, metadata);
+    if entry.kind == EntryKind::Symlink {
+        entry.symlink_target_kind = fs::metadata(path()).ok().map(|m| entry_kind(m.file_type()));
+    }
+    entry
+}
+
+fn metadata_entry(name: OsString, metadata: fs::Metadata) -> Entry {
+    Entry {
+        name,
+        kind: entry_kind(metadata.file_type()),
+        symlink_target_kind: None,
         size: Some(metadata.len()),
         mtime: metadata.modified().ok(),
         mode: Some(metadata.mode()),
-    })
+    }
 }
 
 const TEXT_EXTENSIONS: &[&str] = &[

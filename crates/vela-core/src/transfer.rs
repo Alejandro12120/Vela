@@ -14,7 +14,7 @@ use std::{
 };
 
 use openssh_sftp_client::{Sftp, UnixTimeStamp, error::SftpErrorKind, metadata::MetaDataBuilder};
-use tokio::fs;
+use tokio::{fs, task::JoinSet};
 
 use crate::{Entry, EntryKind, Error, local, sftp};
 
@@ -246,24 +246,38 @@ impl Work {
                 continue;
             };
             let destination = self.spec.destination.join(name);
-            let mut pending = vec![(source.clone(), destination)];
-            while let Some((path, destination)) = pending.pop() {
+            let mut pending = vec![(source.clone(), destination, None::<Entry>)];
+            while let Some((path, destination, entry)) = pending.pop() {
                 if self.cancel.check().is_err() {
                     break;
                 }
-                let result = match self.source(sftp, &path).await {
+                let entry = match entry {
+                    // Recheck directories immediately before traversing them.
+                    // Links and incomplete READDIR attributes also need a stat.
+                    Some(entry)
+                        if entry.kind == EntryKind::File
+                            && entry.size.is_some()
+                            && entry.mode.is_some()
+                            && entry.mtime.is_some() =>
+                    {
+                        Ok(entry)
+                    }
+                    _ => self.source(sftp, &path).await,
+                };
+                let result = match entry {
                     Ok(entry) if entry.kind == EntryKind::Directory => {
                         match self.children(sftp, &path).await {
                             Ok(children) => {
                                 if path == source {
                                     covered.push(path.clone());
                                 }
-                                pending.extend(
-                                    children
-                                        .into_iter()
-                                        .rev()
-                                        .map(|name| (path.join(&name), destination.join(&name))),
-                                );
+                                pending.extend(children.into_iter().rev().map(|entry| {
+                                    (
+                                        path.join(&entry.name),
+                                        destination.join(&entry.name),
+                                        Some(entry),
+                                    )
+                                }));
                                 plan.push((path, destination, entry));
                                 continue;
                             }
@@ -517,27 +531,19 @@ impl Work {
         }
     }
 
-    async fn children(&self, sftp: &Sftp, path: &Path) -> Result<Vec<OsString>, Error> {
-        let mut names = Vec::new();
-        match self.spec.direction {
+    async fn children(&self, sftp: &Sftp, path: &Path) -> Result<Vec<Entry>, Error> {
+        let mut entries = match self.spec.direction {
             Direction::Upload => {
-                let mut dir = fs::read_dir(path).await?;
-                while let Some(item) = dir.next_entry().await? {
-                    self.cancel.check()?;
-                    names.push(item.file_name());
-                }
+                let path = path.to_owned();
+                let cancel = self.cancel.flag.clone();
+                tokio::task::spawn_blocking(move || local::transfer_entries(&path, &cancel))
+                    .await
+                    .map_err(io::Error::other)??
             }
-            Direction::Download => {
-                names.extend(
-                    sftp::read_dir(sftp, path)
-                        .await?
-                        .into_iter()
-                        .map(|entry| entry.name),
-                );
-            }
-        }
-        names.sort();
-        Ok(names)
+            Direction::Download => sftp::read_dir(sftp, path).await?,
+        };
+        entries.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        Ok(entries)
     }
 
     async fn existing(&self, sftp: &Sftp, path: &Path) -> Result<Option<Entry>, Error> {
@@ -710,7 +716,14 @@ impl Work {
             .open(&part)
             .await?;
         let result = async {
-            sftp::write_file(&mut source, &mut output, progress, &self.cancel.flag).await?;
+            sftp::write_file(
+                &mut source,
+                &mut output,
+                progress,
+                &self.cancel.flag,
+                !overwrite,
+            )
+            .await?;
             self.cancel.check()?;
             Ok::<_, Error>(())
         }
@@ -871,23 +884,45 @@ pub(crate) async fn remove_remote_tree(sftp: &Sftp, path: PathBuf) -> Result<(),
         let mut fs = sftp.fs();
         if visited {
             fs.remove_dir(&path).await?;
-        } else if fs
+            continue;
+        }
+        // A directory may have been replaced by a symlink since READDIR.
+        // Recheck immediately before descending. Unlinking files itself
+        // already handles symlinks without following their targets.
+        let is_dir = fs
             .symlink_metadata(&path)
             .await?
             .file_type()
-            .is_some_and(|kind| kind.is_dir())
-        {
-            let children = sftp::read_dir(sftp, &path).await?;
-            pending.extend(
-                std::iter::once((path.clone(), true)).chain(
-                    children
-                        .into_iter()
-                        .map(|entry| (path.join(entry.name), false)),
-                ),
-            );
-        } else {
+            .is_some_and(|kind| kind.is_dir());
+        if !is_dir {
             fs.remove_file(&path).await?;
+            continue;
         }
+        let children = sftp::read_dir(sftp, &path).await?;
+        let mut deletes = JoinSet::new();
+        let mut child_dirs = Vec::new();
+        for entry in children.into_iter().rev() {
+            let child = path.join(entry.name);
+            match entry.kind {
+                EntryKind::Directory | EntryKind::Other => {
+                    child_dirs.push((child, false));
+                }
+                _ => {
+                    if deletes.len() == sftp::METADATA_CONCURRENCY
+                        && let Some(result) = deletes.join_next().await
+                    {
+                        result.map_err(io::Error::other)??;
+                    }
+                    let mut fs = sftp.fs();
+                    deletes.spawn(async move { fs.remove_file(child).await });
+                }
+            }
+        }
+        while let Some(result) = deletes.join_next().await {
+            result.map_err(io::Error::other)??;
+        }
+        pending.push((path, true));
+        pending.extend(child_dirs.into_iter().rev());
     }
     Ok(())
 }

@@ -305,9 +305,18 @@ impl Process {
         let mut child = command.stderr(Stdio::piped()).spawn()?;
         let mut stderr = child.stderr.take().expect("piped stderr");
         let stderr = tokio::spawn(async move {
-            let mut bytes = Vec::new();
-            stderr.read_to_end(&mut bytes).await?;
-            Ok(bytes)
+            const STDERR_LIMIT: usize = 64 * 1024;
+            let mut bytes = std::collections::VecDeque::new();
+            let mut buffer = [0; 4096];
+            loop {
+                let count = stderr.read(&mut buffer).await?;
+                if count == 0 {
+                    return Ok(Vec::from(bytes));
+                }
+                let overflow = (bytes.len() + count).saturating_sub(STDERR_LIMIT);
+                bytes.drain(..overflow);
+                bytes.extend(&buffer[..count]);
+            }
         });
         Ok(Self { child, stderr })
     }
@@ -371,6 +380,9 @@ async fn clear_stale_socket(spec: &ConnectionSpec, askpass: &askpass::Server) ->
     .and_then(Result::ok)
     .filter(|output| output.status.success())
     .and_then(|output| control_path_from_g(&output.stdout));
+    if socket_missing(path.as_deref()) {
+        return path;
+    }
     let answers = timeout(
         EXIT_TIMEOUT,
         command(spec, askpass, &["-O", "check"], &[]).output(),
@@ -388,6 +400,26 @@ async fn clear_stale_socket(spec: &ConnectionSpec, askpass: &askpass::Server) ->
     path
 }
 
+fn socket_missing(path: Option<&Path>) -> bool {
+    path.is_some_and(|path| {
+        fs::symlink_metadata(path).is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+    })
+}
+
+#[cfg(target_os = "linux")]
+async fn parent_comm(pid: u32) -> Option<String> {
+    let stat = fs::read(format!("/proc/{pid}/stat")).ok()?;
+    // The kernel places the process name in parentheses. It can itself
+    // contain parentheses, spaces, or bytes that are not UTF-8.
+    let end = stat.iter().rposition(|&byte| byte == b')')?;
+    let fields = std::str::from_utf8(&stat[end + 1..]).ok()?;
+    let parent: u32 = fields.split_ascii_whitespace().nth(1)?.parse().ok()?;
+    let comm = fs::read(format!("/proc/{parent}/comm")).ok()?;
+    let comm = String::from_utf8_lossy(&comm).trim().to_owned();
+    (!comm.is_empty()).then_some(comm)
+}
+
+#[cfg(not(target_os = "linux"))]
 async fn parent_comm(pid: u32) -> Option<String> {
     let output = timeout(
         EXIT_TIMEOUT,
@@ -487,9 +519,15 @@ impl Master {
         // Check an existing socket before trusting it. An owned master must be the
         // process listening, even if another client connected to the same host.
         let mut retried = false;
+        let mut delay = Duration::from_millis(15);
         loop {
             if let Some(status) = self.process.child.try_wait()? {
                 return Err(Error::ssh(status, self.process.stderr().await));
+            }
+            if socket_missing(self.control_path.as_deref()) {
+                sleep(delay).await;
+                delay = (delay + Duration::from_millis(10)).min(Duration::from_millis(50));
+                continue;
             }
             let result = self.control("check").output().await?;
             if result.status.success() {
@@ -521,6 +559,7 @@ impl Master {
                         command(&self.spec, &self.askpass, &MASTER_ARGS, &[]).stdout(Stdio::null()),
                     )?;
                     retried = true;
+                    delay = Duration::from_millis(15);
                     continue;
                 }
                 return Err(Error::ConnectFailed {

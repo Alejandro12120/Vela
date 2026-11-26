@@ -1,5 +1,7 @@
 // Adapted from Zed crates/terminal_view/src/terminal_element.rs (v1.27.0), GPL-3.0-or-later.
 
+use std::collections::HashMap;
+
 use alacritty_terminal::{
     index::{Column, Direction, Line, Point as CellPoint},
     term::cell::Flags,
@@ -7,8 +9,9 @@ use alacritty_terminal::{
 };
 use gpui::{
     App, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity, GlobalElementId,
-    InspectorElementId, IntoElement, LayoutId, Pixels, Point, StrikethroughStyle, Style, TextAlign,
-    TextRun, UnderlineStyle, Window, fill, point, px, relative, rgb, size,
+    InspectorElementId, IntoElement, LayoutId, Pixels, Point, ShapedLine, SharedString,
+    StrikethroughStyle, Style, TextAlign, TextRun, UnderlineStyle, Window, fill, point, px,
+    relative, rgb, size,
 };
 
 use super::{GridSize, view::TerminalView};
@@ -158,13 +161,15 @@ pub(crate) fn benchmark_prepaint(cx: &mut gpui::TestAppContext) {
     });
 }
 
-#[derive(PartialEq, Eq)]
-struct StyleKey {
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct StyleKey {
     fg: u32,
     variant: usize,
     decoration: Flags,
     underline: Option<u32>,
 }
+
+pub(super) type ShapeCache = HashMap<(StyleKey, bool), HashMap<SharedString, ShapedLine>>;
 
 struct Run {
     key: StyleKey,
@@ -220,6 +225,12 @@ impl Element for Surface {
         let glassy = crate::theme::Theme::current(window, cx).glassy;
         self.0.update(cx, |view, cx| {
             let geometry = Geometry::new(bounds, view, window);
+            if view
+                .geometry
+                .is_some_and(|old| old.width != geometry.width || old.scale != geometry.scale)
+            {
+                view.shaped.clear();
+            }
             view.geometry = Some(geometry);
             view.spawn_measured(geometry.size, window, cx);
             view.ime_bounds = None;
@@ -231,6 +242,7 @@ impl Element for Surface {
             };
             terminal.resize(geometry.size);
             let grid = terminal.grid.lock();
+            terminal.refresh_mouse(&grid);
             let content = grid.renderable_content();
             let background = palette.color(
                 alacritty_terminal::vte::ansi::Color::Named(NamedColor::Background),
@@ -247,6 +259,7 @@ impl Element for Surface {
                 CursorShape::HollowBlock
             };
             let mut background_run: Option<(Option<u32>, usize, i32, usize)> = None;
+            let mut text_run: Option<Run> = None;
 
             for cell in content.display_iter {
                 let row = cell.point.line.0 + content.display_offset as i32;
@@ -346,27 +359,46 @@ impl Element for Surface {
                 } else {
                     cell.cell.c
                 };
-                if let Some(run) = frame.runs.last_mut()
+                let blank = character == ' ' && combining.is_empty() && decoration.is_empty();
+                if let Some(run) = &mut text_run
                     && fixed
                     && run.fixed
                     && run.key == key
                     && run.row == row
                     && run.col + run.columns == col
                 {
-                    run.text.push(character);
+                    // Delay allocating for a run of plain spaces until it
+                    // contains a glyph. Keep the complete shaped text if it does.
+                    if !blank || !run.text.is_empty() {
+                        if run.text.is_empty() {
+                            run.text.extend(std::iter::repeat_n(' ', run.columns));
+                        }
+                        run.text.push(character);
+                    }
                     run.columns += 1;
                 } else {
-                    let mut text = String::from(character);
-                    text.extend(combining);
-                    frame.runs.push(Run {
+                    let mut text = String::new();
+                    if !blank {
+                        text.push(character);
+                        text.extend(combining);
+                    }
+                    if let Some(previous) = text_run.replace(Run {
                         key,
                         text,
                         col,
                         row,
                         columns,
                         fixed,
-                    });
+                    }) && !previous.text.is_empty()
+                    {
+                        frame.runs.push(previous);
+                    }
                 }
+            }
+            if let Some(run) = text_run
+                && !run.text.is_empty()
+            {
+                frame.runs.push(run);
             }
             if let Some((Some(color), col, row, columns)) = background_run {
                 frame
@@ -394,6 +426,11 @@ impl Element for Surface {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let previous = self
+            .0
+            .update(cx, |view, _| std::mem::take(&mut view.shaped));
+        let mut previous = previous;
+        let mut next = ShapeCache::with_capacity(previous.len());
         let view = self.0.read(cx);
         let geometry = view.geometry.unwrap();
         let fonts = view.fonts.clone();
@@ -410,39 +447,58 @@ impl Element for Surface {
             for &(color, rect) in &frame.backgrounds {
                 window.paint_quad(fill(rect, rgb(color)));
             }
-            for run in &frame.runs {
-                if run.key.decoration.is_empty() && run.text.bytes().all(|byte| byte == b' ') {
-                    continue;
-                }
+            for run in &mut frame.runs {
                 let rect = geometry.rect(run.col, run.row, run.columns);
                 let flags = run.key.decoration;
                 let foreground = rgb(run.key.fg).into();
                 let underline = rgb(run.key.underline.unwrap_or(run.key.fg)).into();
-                let shaped = window.text_system().shape_line(
-                    run.text.clone().into(),
-                    font_size,
-                    &[TextRun {
-                        len: run.text.len(),
-                        font: fonts[run.key.variant].clone(),
-                        color: foreground,
-                        strikethrough: flags.contains(Flags::STRIKEOUT).then_some(
-                            StrikethroughStyle {
-                                color: Some(foreground),
-                                thickness: px(1.),
-                            },
-                        ),
-                        ..Default::default()
-                    }],
-                    run.fixed.then_some(geometry.width),
-                );
-                let _ = shaped.paint(
-                    rect.origin,
-                    geometry.height,
-                    TextAlign::Left,
-                    None,
-                    window,
-                    cx,
-                );
+                let style = (run.key, run.fixed);
+                let lines = next.entry(style).or_default();
+                let text = run.text.as_str();
+                if !lines.contains_key(text) {
+                    let shaped = previous
+                        .get_mut(&style)
+                        .and_then(|lines| lines.remove(text))
+                        .unwrap_or_else(|| {
+                            let len = run.text.len();
+                            window.text_system().shape_line(
+                                std::mem::take(&mut run.text).into(),
+                                font_size,
+                                &[TextRun {
+                                    len,
+                                    font: fonts[run.key.variant].clone(),
+                                    color: foreground,
+                                    strikethrough: flags.contains(Flags::STRIKEOUT).then_some(
+                                        StrikethroughStyle {
+                                            color: Some(foreground),
+                                            thickness: px(1.),
+                                        },
+                                    ),
+                                    ..Default::default()
+                                }],
+                                run.fixed.then_some(geometry.width),
+                            )
+                        });
+                    let text = shaped.text.clone();
+                    let _ = shaped.paint(
+                        rect.origin,
+                        geometry.height,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    );
+                    lines.insert(text, shaped);
+                } else {
+                    let _ = lines[text].paint(
+                        rect.origin,
+                        geometry.height,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    );
+                }
                 if flags.intersects(Flags::ALL_UNDERLINES) {
                     let base = point(rect.left(), rect.bottom() - px(2.));
                     if flags.intersects(Flags::DOTTED_UNDERLINE | Flags::DASHED_UNDERLINE) {
@@ -510,6 +566,7 @@ impl Element for Surface {
                 );
             }
         });
+        self.0.update(cx, |view, _| view.shaped = next);
     }
 }
 

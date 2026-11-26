@@ -510,7 +510,7 @@ impl Workspace {
         cx.spawn_in(window, async move |workspace, cx| {
             let mut settings = read.await;
             let _ = workspace.update_in(cx, |workspace, window, cx| {
-                settings.resolve_family(&cx.text_system().all_font_names());
+                settings.resolve_family(crate::terminal::view::font_names(cx));
                 if apply {
                     for connection in workspace.connections.values() {
                         if let super::Connection::Connected { panes, .. } = connection
@@ -2769,10 +2769,10 @@ mod tests {
         for enabled in [true, false] {
             workspace.update(cx, |this, _| {
                 this.update_check = None;
-                this.update_state = UpdateState::Available {
+                this.set_update_state(UpdateState::Available {
                     release: super::super::tests::test_release(),
                     error: None,
-                };
+                });
             });
             let toggle = cx.debug_bounds("include-prereleases").unwrap();
             cx.simulate_click(toggle.center(), gpui::Modifiers::none());

@@ -210,9 +210,9 @@ impl Panes {
                 .when(!theme.glassy, |body| body.bg(theme.panel))
                 .children(self.terminal.clone())
         };
-        let (current, previous) = match self.view {
-            SessionView::Files => (files(), terminal()),
-            SessionView::Terminal => (terminal(), files()),
+        let current = match self.view {
+            SessionView::Files => files(),
+            SessionView::Terminal => terminal(),
         };
         let mut body = div()
             .id("session-body")
@@ -224,6 +224,10 @@ impl Panes {
         if let Some(switched) = self.switched
             && switched.elapsed() < motion::FAST
         {
+            let previous = match self.view {
+                SessionView::Files => terminal(),
+                SessionView::Terminal => files(),
+            };
             let id = ("session-view", self.view as u32);
             body = body.child(previous.absolute().inset_0()).child(
                 current.relative().occlude().with_animation(

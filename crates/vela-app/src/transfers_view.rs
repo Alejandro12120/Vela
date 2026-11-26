@@ -503,7 +503,7 @@ impl Transfers {
     fn dialog(&self, theme: Theme, cx: &Context<Self>) -> Option<gpui::Div> {
         let (title, lead, body, footer) = if let Some(pending) = self.conflicts.first() {
             let conflict = &pending.conflict;
-            let now = SystemTime::now();
+            let now = SystemTime::now().into();
             let metadata = |label, entry: &vela_core::Entry| {
                 div()
                     .flex()

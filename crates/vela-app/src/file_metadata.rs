@@ -1,14 +1,17 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    borrow::Cow,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use vela_core::{Entry, EntryKind};
 
 const EMPTY: &str = "—";
 
-pub fn size(entry: &Entry) -> String {
+pub fn size(entry: &Entry) -> Cow<'static, str> {
     let Some(bytes) = entry.size.filter(|_| !entry.is_directory()) else {
         return EMPTY.into();
     };
-    format_size(bytes)
+    format_size(bytes).into()
 }
 
 pub fn format_size(bytes: u64) -> String {
@@ -48,26 +51,37 @@ pub fn clock(time: SystemTime) -> String {
     )
 }
 
-pub fn modified(time: Option<SystemTime>, now: SystemTime) -> String {
+#[derive(Clone, Copy)]
+pub struct CalendarDay {
+    today: Option<(i32, i32)>,
+    yesterday: Option<(i32, i32)>,
+}
+
+impl From<SystemTime> for CalendarDay {
+    fn from(now: SystemTime) -> Self {
+        let today = local_time(now).map(|time| (time.tm_year, time.tm_yday));
+        let yesterday = today.map(|(year, day)| {
+            if day == 0 {
+                let previous = year + 1899;
+                let leap = previous % 4 == 0 && (previous % 100 != 0 || previous % 400 == 0);
+                (year - 1, 364 + i32::from(leap))
+            } else {
+                (year, day - 1)
+            }
+        });
+        Self { today, yesterday }
+    }
+}
+
+pub fn modified(time: Option<SystemTime>, today: CalendarDay) -> String {
     let Some(time) = time.and_then(local_time) else {
         return EMPTY.into();
     };
-    let today = local_time(now);
-    let day = if today
-        .is_some_and(|today| time.tm_year == today.tm_year && time.tm_yday == today.tm_yday)
-    {
-        "Today".into()
-    } else if today.is_some_and(|today| {
-        let year = today.tm_year + 1899;
-        let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-        let yesterday = if today.tm_yday == 0 {
-            (today.tm_year - 1, 364 + i32::from(leap))
-        } else {
-            (today.tm_year, today.tm_yday - 1)
-        };
-        (time.tm_year, time.tm_yday) == yesterday
-    }) {
-        "Yesterday".into()
+    let date = Some((time.tm_year, time.tm_yday));
+    let day = if today.today == date {
+        Cow::Borrowed("Today")
+    } else if today.yesterday == date {
+        Cow::Borrowed("Yesterday")
     } else {
         let months = [
             "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -78,11 +92,12 @@ pub fn modified(time: Option<SystemTime>, now: SystemTime) -> String {
             months[time.tm_mon as usize],
             time.tm_year + 1900
         )
+        .into()
     };
     format!("{day}, {:02}:{:02}", time.tm_hour, time.tm_min)
 }
 
-pub fn permissions(entry: &Entry) -> String {
+pub fn permissions(entry: &Entry) -> Cow<'static, str> {
     let Some(mode) = entry.mode else {
         return EMPTY.into();
     };
@@ -111,7 +126,7 @@ pub fn permissions(entry: &Entry) -> String {
             (false, false) => '-',
         });
     }
-    text
+    text.into()
 }
 
 #[cfg(test)]
@@ -143,10 +158,10 @@ mod tests {
         // January 1 at noon, far from a DST change. Test with the machine's
         // configured local time, including zones where midnight falls on UTC.
         let start = UNIX_EPOCH + Duration::from_secs(1_767_268_800);
-        let today = modified(Some(start), start);
+        let today = modified(Some(start), start.into());
         let previous = start - Duration::from_secs(86_400);
         assert!(today.starts_with("Today, "));
-        assert!(modified(Some(previous), start).starts_with("Yesterday, "));
-        assert_eq!(modified(None, start), "—");
+        assert!(modified(Some(previous), start.into()).starts_with("Yesterday, "));
+        assert_eq!(modified(None, start.into()), "—");
     }
 }

@@ -1,6 +1,6 @@
 // Adapted from Zed crates/terminal_view/src/terminal_view.rs (v1.27.0), GPL-3.0-or-later.
 
-use std::{ffi::OsString, ops::Range};
+use std::{borrow::Cow, ffi::OsString, ops::Range};
 
 use alacritty_terminal::{
     grid::{Dimensions, Scroll},
@@ -10,9 +10,9 @@ use alacritty_terminal::{
 };
 use gpui::{
     App, Bounds, ClipboardItem, Context, EntityInputHandler, EventEmitter, FocusHandle, Font,
-    FontFallbacks, FontFeatures, KeyBinding, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollEvent, Subscription, Task, UTF16Selection,
-    Window, actions, div, font, prelude::*, px,
+    FontFallbacks, FontFeatures, Global, KeyBinding, KeyDownEvent, Keystroke, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollEvent, Subscription, Task,
+    UTF16Selection, Window, actions, div, font, prelude::*, px,
 };
 use vela_core::{appearance::TerminalColors, settings::TerminalColorSource};
 
@@ -26,7 +26,7 @@ use super::{
     GridSize, Terminal,
     colors::{Palette, terminal_palette},
     copy_on_select,
-    element::{Geometry, Surface},
+    element::{Geometry, ShapeCache, Surface},
     font_size, keys,
     kitty::{Kitty, OptionAsAlt},
     mouse,
@@ -99,10 +99,12 @@ pub struct TerminalView {
     pub(super) focus: FocusHandle,
     pub(super) fonts: [Font; 4],
     pub(super) geometry: Option<Geometry>,
+    pub(super) shaped: ShapeCache,
     pub(super) ime_bounds: Option<Bounds<Pixels>>,
     pub(super) last_logged_size: Option<GridSize>,
     pub(super) marked: Option<Marked>,
     selected: bool,
+    window_active: Option<bool>,
     error: Option<String>,
     kitty_error: Option<String>,
     pending: Vec<String>,
@@ -132,10 +134,12 @@ impl TerminalView {
             focus: cx.focus_handle(),
             fonts: std::array::from_fn(|_| font(crate::theme::monospace())),
             geometry: None,
+            shaped: ShapeCache::new(),
             ime_bounds: None,
             last_logged_size: None,
             marked: None,
             selected: false,
+            window_active: None,
             error: None,
             kitty_error: None,
             pending: Vec::new(),
@@ -186,11 +190,20 @@ impl TerminalView {
         cx.notify();
     }
 
-    pub fn stop(&mut self) {
+    pub fn stop(&mut self, cx: &mut Context<Self>) -> Option<Task<()>> {
         self.startup.take();
         self.ready_to_spawn.take();
         self.redraw.take();
-        self.terminal.take();
+        self.shaped.clear();
+        self.drop_terminal(cx)
+    }
+
+    fn drop_terminal(&mut self, cx: &App) -> Option<Task<()>> {
+        self.window_active = None;
+        self.terminal.take().map(|terminal| {
+            cx.background_executor()
+                .spawn(async move { drop(terminal) })
+        })
     }
 
     pub fn reload(&mut self, settings: Kitty, window: &Window, cx: &mut Context<Self>) {
@@ -202,12 +215,14 @@ impl TerminalView {
     }
 
     pub fn set_selected(&mut self, selected: bool, window: &Window) {
+        let window_active = window.is_window_active();
+        if self.selected == selected && self.window_active == Some(window_active) {
+            return;
+        }
         self.selected = selected;
+        self.window_active = Some(window_active);
         if let Some(terminal) = &self.terminal {
-            terminal
-                .listener
-                .redraw
-                .visible(selected && window.is_window_active());
+            terminal.listener.redraw.visible(selected && window_active);
         }
     }
 
@@ -216,7 +231,9 @@ impl TerminalView {
             return;
         }
         self.redraw.take();
-        self.terminal.take();
+        if let Some(cleanup) = self.drop_terminal(cx) {
+            cleanup.detach();
+        }
         self.marked.take();
         self.error.take();
         self.kitty_error.take();
@@ -278,6 +295,7 @@ impl TerminalView {
                         }
                         terminal.set_palette(view.palette);
                         view.terminal = Some(terminal);
+                        view.window_active = None;
                         view.set_selected(view.selected, window);
                         view.redraw = Some(cx.spawn_in(window, async move |view, cx| {
                             loop {
@@ -319,10 +337,10 @@ impl TerminalView {
         }));
     }
 
-    pub fn set_settings(&mut self, mut settings: Kitty, cx: &App) {
-        let names = cx.text_system().all_font_names();
+    pub fn set_settings(&mut self, mut settings: Kitty, cx: &mut App) {
+        let names = font_names(cx);
         let configured = settings.family.clone();
-        settings.resolve_family(&names);
+        settings.resolve_family(names);
         if crate::dev::logging() {
             let key = crate::theme::family_key(&configured);
             let present = names
@@ -368,6 +386,7 @@ impl TerminalView {
         }
         self.settings = settings;
         self.geometry = None;
+        self.shaped.clear();
     }
 
     fn apply_font_size(&mut self, cx: &mut Context<Self>) {
@@ -377,6 +396,7 @@ impl TerminalView {
         }
         self.settings.size = size;
         self.geometry = None;
+        self.shaped.clear();
         cx.notify();
     }
 
@@ -469,7 +489,16 @@ impl TerminalView {
         let (Some(terminal), Some(geometry)) = (&self.terminal, self.geometry) else {
             return;
         };
+        if !self.selecting
+            && let Some(offset) = terminal.mouse_idle_offset()
+        {
+            if !event.modifiers.shift && !terminal.ended() {
+                self.last_report = Some(geometry.cell(event.position, offset).0);
+            }
+            return;
+        }
         let mut grid = terminal.grid.lock();
+        terminal.refresh_mouse(&grid);
         let (point, side) = geometry.cell(event.position, grid.grid().display_offset());
         if self.selecting && event.pressed_button == Some(MouseButton::Left) {
             if let Some(selection) = grid.selection.as_mut() {
@@ -544,17 +573,52 @@ impl TerminalView {
             && !event.modifiers.shift
             && mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL)
         {
-            let key = if lines > 0 { "up" } else { "down" };
-            if let Ok(key) = Keystroke::parse(key)
-                && let Some(bytes) = keys::to_esc_str(&key, mode, false)
-            {
-                terminal.send(bytes.as_bytes().repeat(lines.unsigned_abs() as usize));
-            }
+            let bytes = scroll_key(mode.contains(TermMode::APP_CURSOR), lines);
+            terminal.send_bytes(bytes);
         } else {
             grid.scroll_display(Scroll::Delta(lines));
             cx.notify();
         }
         cx.stop_propagation();
+    }
+}
+
+struct FontNames(Vec<String>);
+impl Global for FontNames {}
+
+pub(crate) fn font_names(cx: &mut App) -> &[String] {
+    if !cx.has_global::<FontNames>() {
+        cx.set_global(FontNames(cx.text_system().all_font_names()));
+    }
+    &cx.global::<FontNames>().0
+}
+
+fn scroll_key(application: bool, lines: i32) -> Cow<'static, [u8]> {
+    const COUNT: usize = 64;
+    const fn repeat(key: [u8; 3]) -> [u8; 3 * COUNT] {
+        let mut bytes = [0; 3 * COUNT];
+        let mut index = 0;
+        while index < bytes.len() {
+            bytes[index] = key[index % key.len()];
+            index += 1;
+        }
+        bytes
+    }
+    static UP: [u8; 3 * COUNT] = repeat(*b"\x1b[A");
+    static DOWN: [u8; 3 * COUNT] = repeat(*b"\x1b[B");
+    static APP_UP: [u8; 3 * COUNT] = repeat(*b"\x1bOA");
+    static APP_DOWN: [u8; 3 * COUNT] = repeat(*b"\x1bOB");
+    let keys = match (application, lines > 0) {
+        (true, true) => &APP_UP,
+        (true, false) => &APP_DOWN,
+        (false, true) => &UP,
+        (false, false) => &DOWN,
+    };
+    let count = lines.unsigned_abs() as usize;
+    if count <= COUNT {
+        Cow::Borrowed(&keys[..count * 3])
+    } else {
+        Cow::Owned(keys[..3].repeat(count))
     }
 }
 

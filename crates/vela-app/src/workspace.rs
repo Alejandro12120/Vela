@@ -426,10 +426,10 @@ impl Workspace {
                         if dev::prompt().as_deref() == Some("password-rejected") {
                             #[cfg(feature = "dev")]
                             {
-                                this.password_attempts.insert("prueba".into(), 1);
+                                this.password_attempts.insert("example".into(), 1);
                                 this.prompts.push_back(askpass::Request::fake(
-                                    "prueba",
-                                    "Password for 'prueba':",
+                                    "example",
+                                    "Password for 'example':",
                                     askpass::Kind::Password,
                                 ));
                                 this.show_next_prompt(window, cx);

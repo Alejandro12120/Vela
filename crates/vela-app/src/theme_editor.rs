@@ -1086,7 +1086,7 @@ mod tests {
             let editor = workspace.settings_page.editor.as_ref().unwrap();
             editor
                 .name
-                .update(cx, |input, cx| input.set_value("frAMbueSa", window, cx));
+                .update(cx, |input, cx| input.set_value("raSPberRy", window, cx));
             editor.rows[&Token::Accent]
                 .input
                 .update(cx, |input, cx| input.set_value("#135", window, cx));

@@ -337,8 +337,8 @@ impl Workspace {
         let current = self
             .effective_socket()
             .map_or_else(String::new, |path| path.to_string_lossy().into_owned());
-        let input = cx
-            .new(|cx| TextInput::new(&current, "Agent Socket", "/ruta/al/agente.sock", false, cx));
+        let input =
+            cx.new(|cx| TextInput::new(&current, "Agent Socket", "/path/to/agent.sock", false, cx));
         self.settings_page.agent_input = Some(input.clone());
         self.settings_page.agent_editing = true;
         input.read(cx).focus_handle(cx).focus(window, cx);
@@ -2564,7 +2564,7 @@ mod tests {
                 TextInput::new(
                     &missing.to_string_lossy(),
                     "Agent Socket",
-                    "/ruta/al/agente.sock",
+                    "/path/to/agent.sock",
                     false,
                     cx,
                 )

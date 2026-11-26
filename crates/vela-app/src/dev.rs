@@ -413,7 +413,7 @@ pub fn editor_roots() -> Vec<PathBuf> {
 }
 
 /// Opens `path` the way a double click should. Text goes to the editor chosen
-/// in Ajustes or, without one, to the default text editor (`open -t`). Anything
+/// in Settings or, without one, to the default text editor (`open -t`). Anything
 /// else opens with its default application. The real path, with symbolic links
 /// resolved, decides whether the file is text.
 pub fn terminal_view() -> bool {

@@ -386,7 +386,7 @@ pub fn export_theme(theme: &ThemeDef, dest: &Path) -> io::Result<()> {
     let file = dest
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| invalid("ruta"))?;
+        .ok_or_else(|| invalid("path"))?;
     let dir = dest
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -712,6 +712,27 @@ mod tests {
             ("vela-3", "Vela (3)")
         );
         assert_eq!(new_theme_id("✨", ["tema"]), "tema-2");
+    }
+
+    #[test]
+    fn english_theme_names_keep_legacy_ids_reserved() {
+        let themes = builtin_themes();
+        assert_eq!(
+            themes
+                .iter()
+                .map(|theme| theme.id.as_str())
+                .collect::<Vec<_>>(),
+            BUILTIN_IDS
+        );
+        assert_eq!(
+            themes
+                .iter()
+                .map(|theme| theme.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Vela", "Raspberry", "Forest", "Ocean", "Amber", "Lavender"]
+        );
+        assert_eq!(new_theme_id("OCEANO", []), "oceano-2");
+        assert_eq!(new_theme_id("Ocean", ["ocean"]), "ocean-2");
     }
 
     #[test]

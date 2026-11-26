@@ -32,7 +32,7 @@ pub enum Field {
 
 const FIELDS: [(Field, &str, &str); 6] = [
     (Field::Name, "Name (optional)", "Same as Host"),
-    (Field::Host, "Host", "servidor.ejemplo"),
+    (Field::Host, "Host", "server.example.com"),
     (Field::Port, "Port", "22"),
     (Field::User, "Username", ""),
     (Field::Socket, "Agent Socket", ""),

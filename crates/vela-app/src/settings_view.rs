@@ -960,6 +960,7 @@ impl Workspace {
                     .relative()
                     .flex()
                     .flex_1()
+                    .min_w_0()
                     .min_h_0()
                     .child({
                         let viewport = self.settings_page.settings_viewport.clone();
@@ -972,6 +973,7 @@ impl Workspace {
                             .id("settings-scroll")
                             .flex()
                             .flex_1()
+                            .min_w_0()
                             .min_h_0()
                             .flex_col()
                             .items_center()
@@ -1887,7 +1889,7 @@ impl Workspace {
                     .child("  ")
                     .child(div().text_color(blue).child("scripts"))
                     .child("  ")
-                    .child("notas.txt"),
+                    .child("notes.txt"),
             )
             .child(
                 div().flex().items_center().child(prompt()).child(

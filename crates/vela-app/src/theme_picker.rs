@@ -36,9 +36,9 @@ enum Axis {
 impl Axis {
     fn label(self) -> &'static str {
         match self {
-            Self::Saturation => "Saturación y brillo",
-            Self::Hue => "Tono",
-            Self::Opacity => "Opacidad",
+            Self::Saturation => "Saturation and Brightness",
+            Self::Hue => "Hue",
+            Self::Opacity => "Opacity",
         }
     }
 }
@@ -305,7 +305,7 @@ impl Workspace {
         let panel = div()
             .id("color-picker")
             .role(gpui::Role::Dialog)
-            .aria_label("Selector de color")
+            .aria_label("Color Picker")
             .track_focus(&picker.scope)
             .tab_group()
             .tab_stop(false)
@@ -364,7 +364,7 @@ impl Workspace {
                     .child(
                         button(
                             "picker-done",
-                            "Hecho",
+                            "Done",
                             Variant::Primary,
                             theme,
                             cx.listener(|this, _, window, cx| {

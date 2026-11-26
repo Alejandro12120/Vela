@@ -59,20 +59,20 @@ impl ThemeEditor {
 
     fn title(&self) -> &'static str {
         if self.creating {
-            "Crear tema"
+            "Create Theme"
         } else {
-            "Editar tema"
+            "Edit Theme"
         }
     }
 
     fn name_error(&self, appearance: &Appearance, cx: &App) -> Option<&'static str> {
         let name = self.name.read(cx).value().trim();
         if name.is_empty() {
-            Some("Escribe un nombre.")
+            Some("Enter a name.")
         } else if appearance.themes.iter().any(|theme| {
             (self.creating || theme.id != self.draft.id) && names_match(&theme.name, name)
         }) {
-            Some("Ya existe un tema con ese nombre.")
+            Some("A theme with that name already exists.")
         } else {
             None
         }
@@ -120,10 +120,9 @@ impl Workspace {
             theme.builtin = false;
             theme
         };
-        let name = cx.new(|cx| TextInput::new(&draft.name, "Nombre", "p. ej. Aurora", false, cx));
-        let filter = cx.new(|cx| {
-            TextInput::new("", "Filtrar colores", "Filtrar colores", false, cx).compact()
-        });
+        let name = cx.new(|cx| TextInput::new(&draft.name, "Name", "e.g. Aurora", false, cx));
+        let filter =
+            cx.new(|cx| TextInput::new("", "Filter Colors", "Filter Colors", false, cx).compact());
         let return_focus = window
             .focused(cx)
             .unwrap_or_else(|| self.settings_page.focus.clone());
@@ -410,7 +409,7 @@ impl Workspace {
                     task.await.map_err(|error| error.to_string())
                 }
                 Ok(Ok(None)) => return,
-                _ => Err("No se pudo abrir el selector de archivos.".into()),
+                _ => Err("Couldn't open the file picker.".into()),
             };
             let _ = this.update_in(cx, |this, _, cx| {
                 if let Some(editor) = &mut this.settings_page.editor {
@@ -543,13 +542,13 @@ impl Workspace {
                                     div()
                                         .text_size(px(12.))
                                         .text_color(theme.secondary_text)
-                                        .child("Elige un color"),
+                                        .child("Choose a color"),
                                 ),
                         )
                         .child(
                             icon_button(
                                 "editor-close",
-                                "Cerrar",
+                                "Close",
                                 IconName::Close,
                                 Variant::Secondary,
                                 theme,
@@ -580,7 +579,7 @@ impl Workspace {
                                 .flex_col()
                                 .gap_2()
                                 .child(editor_row(
-                                    "Nombre",
+                                    "Name",
                                     div().w_full().child(editor.name.clone()),
                                 ))
                                 .when_some(
@@ -595,15 +594,10 @@ impl Workspace {
                                     },
                                 )
                                 .child(editor_row(
-                                    "Apariencia",
+                                    "Appearance",
                                     self.variant_switch(editor, theme, cx),
                                 ))
-                                .child(
-                                    div()
-                                        .pt_2()
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child("Colores"),
-                                )
+                                .child(div().pt_2().font_weight(FontWeight::MEDIUM).child("Colors"))
                                 .child(
                                     div()
                                         .flex()
@@ -630,10 +624,10 @@ impl Workspace {
                                                 .items_center()
                                                 .gap_2()
                                                 .flex_none()
-                                                .child("Avanzado")
+                                                .child("Advanced")
                                                 .child(switch(
                                                     "advanced",
-                                                    "Avanzado",
+                                                    "Advanced",
                                                     editor.advanced,
                                                     theme,
                                                     cx.listener(|this, _, window, cx| {
@@ -680,7 +674,7 @@ impl Workspace {
                         .child(
                             button(
                                 "theme-export",
-                                "Exportar…",
+                                "Export…",
                                 Variant::Secondary,
                                 theme,
                                 cx.listener(move |this, _, window, cx| {
@@ -698,7 +692,7 @@ impl Workspace {
                                 .child(
                                     button(
                                         "theme-cancel",
-                                        "Cancelar",
+                                        "Cancel",
                                         Variant::Secondary,
                                         theme,
                                         cx.listener(|this, _, window, cx| {
@@ -712,9 +706,9 @@ impl Workspace {
                                         "theme-save",
                                         IconName::Palette,
                                         if editor.creating {
-                                            "Crear tema"
+                                            "Create Theme"
                                         } else {
-                                            "Guardar"
+                                            "Save"
                                         },
                                         Variant::Primary,
                                         None,
@@ -768,24 +762,24 @@ impl Workspace {
 
     fn variant_switch(&self, editor: &ThemeEditor, theme: Theme, cx: &Context<Self>) -> Div {
         div().flex().gap_1().children(
-            [
-                (ColorVariant::Light, "Claro"),
-                (ColorVariant::Dark, "Oscuro"),
-            ]
-            .map(|(variant, label)| {
-                button(
-                    label,
-                    label,
-                    if editor.variant == variant {
-                        Variant::Selected
-                    } else {
-                        Variant::Secondary
-                    },
-                    theme,
-                    cx.listener(move |this, _, window, cx| this.set_variant(variant, window, cx)),
-                )
-                .h(px(24.))
-            }),
+            [(ColorVariant::Light, "Light"), (ColorVariant::Dark, "Dark")].map(
+                |(variant, label)| {
+                    button(
+                        label,
+                        label,
+                        if editor.variant == variant {
+                            Variant::Selected
+                        } else {
+                            Variant::Secondary
+                        },
+                        theme,
+                        cx.listener(move |this, _, window, cx| {
+                            this.set_variant(variant, window, cx)
+                        }),
+                    )
+                    .h(px(24.))
+                },
+            ),
         )
     }
 
@@ -797,7 +791,7 @@ impl Workspace {
             .child(
                 button(
                     "clear-kitty",
-                    "Usar colores de kitty.conf",
+                    "Use Colors from kitty.conf",
                     Variant::Secondary,
                     theme,
                     cx.listener(|this, _, window, cx| this.import_kitty(false, window, cx)),
@@ -808,7 +802,7 @@ impl Workspace {
             .child(
                 button(
                     "import-kitty",
-                    "Importar de kitty.conf",
+                    "Import from kitty.conf",
                     Variant::Secondary,
                     theme,
                     cx.listener(move |this, _, window, cx| {
@@ -826,7 +820,7 @@ impl Workspace {
                     div()
                         .text_size(px(12.))
                         .text_color(theme.secondary_text)
-                        .child("No se encontró kitty.conf"),
+                        .child("kitty.conf not found"),
                 )
             })
     }
@@ -961,7 +955,7 @@ fn fallback_color(token: Token, defaults: &vela_core::appearance::TerminalColors
 }
 
 fn search_key(text: &str) -> String {
-    // The editor labels are Spanish. Drop combining marks and normalize the
+    // Drop combining marks and normalize the
     // precomposed vowels so typing either form gives the same results.
     text.graphemes(true)
         .flat_map(|part| {
@@ -999,7 +993,7 @@ fn contrast_warning(
 }
 
 fn format_ratio(ratio: f32) -> String {
-    format!("{ratio:.1}:1").replace('.', ",")
+    format!("{ratio:.1}:1")
 }
 
 #[cfg(test)]
@@ -1116,9 +1110,9 @@ mod tests {
     }
 
     #[test]
-    fn formats_contrast_and_filters_spanish_labels() {
-        assert_eq!(format_ratio(3.2), "3,2:1");
-        assert_eq!(search_key("SELECCIÓN"), "seleccion");
+    fn formats_contrast_and_normalizes_search() {
+        assert_eq!(format_ratio(3.2), "3.2:1");
+        assert_eq!(search_key("SELECTION"), "selection");
         assert_eq!(search_key("seleccio\u{301}n"), "seleccion");
     }
 }

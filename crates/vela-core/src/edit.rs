@@ -118,7 +118,7 @@ pub struct Index {
 fn private_dir(path: &Path) -> io::Result<()> {
     DirBuilder::new().recursive(true).mode(0o700).create(path)?;
     if !fs::symlink_metadata(path)?.is_dir() {
-        return Err(io::Error::other("La caché no es una carpeta"));
+        return Err(io::Error::other("The cache path isn't a folder"));
     }
     fs::set_permissions(path, Permissions::from_mode(0o700))
 }
@@ -164,7 +164,7 @@ impl Index {
                 || !targets.insert(&edit.target)
                 || !directories.insert(edit.local_path.parent().unwrap())
             {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "Ruta de edición inválida o duplicada"));
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid or duplicate edit path"));
             }
         }
         for server in fs::read_dir(&root)? {
@@ -200,7 +200,7 @@ impl Index {
 
     pub fn directory(&self, target: &Target) -> io::Result<TempDir> {
         if !valid_component(&target.server_id) {
-            return Err(io::Error::other("Identificador de servidor inválido"));
+            return Err(io::Error::other("Invalid server ID"));
         }
         let parent = self.root.join(&target.server_id);
         private_dir(&parent)?;
@@ -258,7 +258,7 @@ impl Index {
         match parent.canonicalize() {
             Ok(path) if path == parent => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            _ => return Err(io::Error::other("La ruta de la copia local ha cambiado")),
+            _ => return Err(io::Error::other("The local copy's path has changed")),
         }
         // Remove the bytes before dropping the record. A write failure leaves
         // the record available for retry and startup recovery.
@@ -371,7 +371,7 @@ struct LocalVersion {
 
 fn version(meta: &Metadata) -> io::Result<LocalVersion> {
     if !meta.is_file() {
-        return Err(io::Error::other("La copia local no es un archivo"));
+        return Err(io::Error::other("The local copy isn't a file"));
     }
     Ok(LocalVersion {
         stamp: Stamp::local(meta)?,
@@ -454,7 +454,7 @@ impl OpenRemote {
     pub async fn inspect(session: &Session, target: &Target) -> Result<Self, Error> {
         let path = target.remote_path.clone();
         let stamp = Stamp::remote(&session.stat(path.clone()).await?).ok_or_else(|| {
-            Error::Sftp("La edición requiere un archivo regular con fecha y tamaño".into())
+            Error::Sftp("Editing requires a regular file with a modification time and size".into())
         })?;
         let canonical = session.realpath(path).await?;
         Ok(Self { canonical, stamp })
@@ -474,7 +474,7 @@ impl OpenRemote {
             || staged.as_file().metadata()?.len() != self.stamp.size
         {
             return Err(Error::Sftp(
-                "El archivo remoto cambió durante la descarga".into(),
+                "The remote file changed during download".into(),
             ));
         }
         Ok(staged)
@@ -490,7 +490,7 @@ impl OpenRemote {
             target
                 .remote_path
                 .file_name()
-                .ok_or_else(|| io::Error::other("Falta el nombre del archivo"))?,
+                .ok_or_else(|| io::Error::other("The filename is missing"))?,
         );
         let staged = self.download(session, directory).await?;
         let (local, sha256) = content(staged.path())?;
@@ -543,7 +543,7 @@ impl Edit {
             return Ok(None);
         }
         if remote.canonical != self.canonical_remote {
-            return Err(Error::Sftp("La ruta remota ha cambiado".into()));
+            return Err(Error::Sftp("The remote path has changed".into()));
         }
         let staged = remote
             .download(session, self.local_path.parent().unwrap())
@@ -565,12 +565,12 @@ impl Edit {
     pub async fn save_remote_copy(&self, session: &Session) -> Result<PathBuf, Error> {
         let remote = OpenRemote::inspect(session, &self.target).await?;
         if remote.canonical != self.canonical_remote {
-            return Err(Error::Sftp("La ruta remota ha cambiado".into()));
+            return Err(Error::Sftp("The remote path has changed".into()));
         }
         let parent = self.local_path.parent().unwrap();
         let name = Path::new(self.local_path.file_name().unwrap());
         let mut copy = OsString::from(name.file_stem().unwrap());
-        copy.push(" (remoto)");
+        copy.push(" (remote)");
         if let Some(ext) = name.extension() {
             copy.push(".");
             copy.push(ext);
@@ -636,7 +636,7 @@ pub(crate) async fn upload(
     let written = Stamp::remote(&crate::sftp::entry(OsString::new(), written?));
     let remote = Stamp::remote(&crate::sftp::stat(sftp, canonical).await?)
         .filter(|remote| remote.size == snapshot.local.size && Some(*remote) == written)
-        .ok_or_else(|| Error::Sftp("El archivo remoto cambió durante la subida".into()))?;
+        .ok_or_else(|| Error::Sftp("The remote file changed during upload".into()))?;
     Ok(Upload::Synced(Baseline {
         remote,
         local: snapshot.local,

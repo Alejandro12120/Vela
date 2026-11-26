@@ -218,7 +218,7 @@ impl Loaded {
             Ok(settings) => (settings, None),
             Err(error) => (
                 Settings::default(),
-                Some(format!("No se pudo leer settings.toml. {error}")),
+                Some(format!("Couldn't read settings.toml: {error}")),
             ),
         };
         let appearance = cx.global_mut::<Appearance>();

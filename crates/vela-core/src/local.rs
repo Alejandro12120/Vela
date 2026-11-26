@@ -139,7 +139,7 @@ pub fn trash(path: &Path) -> io::Result<Option<std::path::PathBuf>> {
     if !path.is_absolute() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "Se necesita una ruta absoluta",
+            "An absolute path is required",
         ));
     }
     let is_directory = fs::symlink_metadata(path)?.is_dir();
@@ -181,7 +181,7 @@ fn home_trash_dir() -> io::Result<PathBuf> {
         }
     }
     let home = std::env::var_os("HOME")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME no definido"))?;
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME isn't set"))?;
     Ok(PathBuf::from(home).join(".local/share/Trash"))
 }
 
@@ -196,7 +196,7 @@ fn trash_in(path: &Path, home_trash: &Path, uid: u32) -> io::Result<Option<PathB
     if !path.is_absolute() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "Se necesita una ruta absoluta",
+            "An absolute path is required",
         ));
     }
     let dev = fs::symlink_metadata(path)?.dev();
@@ -226,7 +226,7 @@ fn trash_in(path: &Path, home_trash: &Path, uid: u32) -> io::Result<Option<PathB
 
     let name = path
         .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Se necesita un nombre"))?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "A name is required"))?
         .to_owned();
     let files = location.root.join("files");
     let info = location.root.join("info");
@@ -261,9 +261,9 @@ fn trash_in(path: &Path, home_trash: &Path, uid: u32) -> io::Result<Option<PathB
         {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                number = number
-                    .checked_add(1)
-                    .ok_or_else(|| io::Error::other("Demasiados nombres en la Papelera"))?;
+                number = number.checked_add(1).ok_or_else(|| {
+                    io::Error::other("Too many items with this name in the Trash")
+                })?;
                 continue;
             }
             Err(error) => return Err(error),
@@ -273,9 +273,9 @@ fn trash_in(path: &Path, home_trash: &Path, uid: u32) -> io::Result<Option<PathB
             Ok(_) => {
                 drop(file);
                 let _ = fs::remove_file(&info_path);
-                number = number
-                    .checked_add(1)
-                    .ok_or_else(|| io::Error::other("Demasiados nombres en la Papelera"))?;
+                number = number.checked_add(1).ok_or_else(|| {
+                    io::Error::other("Too many items with this name in the Trash")
+                })?;
                 continue;
             }
             Err(error) => {
@@ -340,7 +340,7 @@ fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
     } else {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "No se puede mover este tipo de elemento a la Papelera",
+            "Can't move this type of item to the Trash",
         ))
     }
 }
@@ -451,7 +451,7 @@ fn prepare_trash_root(root: &Path) -> bool {
 fn trash_unavailable() -> io::Error {
     io::Error::new(
         io::ErrorKind::Unsupported,
-        "No se puede mover a la Papelera en este disco",
+        "Can't move to the Trash on this disk",
     )
 }
 

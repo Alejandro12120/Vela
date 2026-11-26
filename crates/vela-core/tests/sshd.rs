@@ -1084,8 +1084,8 @@ async fn recursive_queue_round_trip_preserves_content_modes_and_mtimes() {
     assert_eq!(summary.totals.bytes, 219);
     assert_eq!(summary.copied, 4);
     assert_eq!(summary.skipped, 2);
-    assert!(results.contains(&ItemResult::Skipped("Omitido: enlace a carpeta".into())));
-    assert!(results.contains(&ItemResult::Skipped("Omitido: enlace roto".into())));
+    assert!(results.contains(&ItemResult::Skipped("Skipped: link to a folder".into())));
+    assert!(results.contains(&ItemResult::Skipped("Skipped: broken link".into())));
     let remote = remote.join("origen");
     symlink(FILES[0], remote.join("enlace remoto")).unwrap();
     symlink("anidada", remote.join("carpeta enlace")).unwrap();
@@ -1604,7 +1604,7 @@ async fn remote_edit_watches_saves_and_preserves_the_remote_inode() {
         b"someone else's remote version\n"
     );
     let copy = within(edit.save_remote_copy(&session)).await;
-    assert_eq!(copy.file_name().unwrap(), "archivo # ñ (remoto).txt");
+    assert_eq!(copy.file_name().unwrap(), "archivo # ñ (remote).txt");
     assert_eq!(fs::read(&copy).unwrap(), fs::read(&remote).unwrap());
     assert_eq!(fs::read(&edit.local_path).unwrap(), b"my local version\n");
     assert_eq!(index.get(&target).unwrap().state, State::Conflict);

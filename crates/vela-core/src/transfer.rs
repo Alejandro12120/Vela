@@ -241,7 +241,7 @@ impl Work {
                 self.emit(Event::Item {
                     source,
                     destination: None,
-                    result: ItemResult::Failed("Ruta de origen inválida".into()),
+                    result: ItemResult::Failed("Invalid source path".into()),
                 });
                 continue;
             };
@@ -278,9 +278,9 @@ impl Work {
                     }
                     Ok(entry) => {
                         let reason = match entry.symlink_target_kind {
-                            Some(EntryKind::Directory) => "Omitido: enlace a carpeta",
-                            None if entry.kind == EntryKind::Symlink => "Omitido: enlace roto",
-                            _ => "Omitido: tipo de archivo no compatible",
+                            Some(EntryKind::Directory) => "Skipped: link to a folder",
+                            None if entry.kind == EntryKind::Symlink => "Skipped: broken link",
+                            _ => "Skipped: unsupported file type",
                         };
                         ItemResult::Skipped(reason.into())
                     }
@@ -358,7 +358,7 @@ impl Work {
                 }
                 None => Ok((
                     None,
-                    ItemResult::Skipped("Omitido: carpeta de destino no disponible".into()),
+                    ItemResult::Skipped("Skipped: destination folder unavailable".into()),
                 )),
             };
             let (destination, result) = match result {
@@ -441,7 +441,7 @@ impl Work {
                 Ok(_) => {
                     return Err(io::Error::new(
                         io::ErrorKind::NotADirectory,
-                        "El destino no es una carpeta",
+                        "The destination isn't a folder",
                     )
                     .into());
                 }
@@ -449,7 +449,7 @@ impl Work {
                     let Some(parent) = current.parent() else {
                         return Err(io::Error::new(
                             io::ErrorKind::NotFound,
-                            "La carpeta de destino no existe",
+                            "The destination folder doesn't exist",
                         )
                         .into());
                     };
@@ -568,7 +568,7 @@ impl Work {
             if self.staging_limit.is_some() {
                 return Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
-                    "Dos elementos tienen el mismo nombre en la caché local",
+                    "Two items have the same name in the local cache",
                 )
                 .into());
             }
@@ -601,7 +601,10 @@ impl Work {
                     return Err(Error::Cancelled);
                 }
                 Choice::Skip => {
-                    return Ok((None, ItemResult::Skipped("Omitido: ya existe".into())));
+                    return Ok((
+                        None,
+                        ItemResult::Skipped("Skipped: item already exists".into()),
+                    ));
                 }
                 Choice::Rename => {
                     let name = target.file_name().expect("planned name").to_owned();
@@ -617,10 +620,9 @@ impl Work {
                     overwrite = Some(existing_mode)
                 }
                 Choice::Overwrite => {
-                    return Err(io::Error::other(
-                        "No se puede sobrescribir un elemento de otro tipo",
-                    )
-                    .into());
+                    return Err(
+                        io::Error::other("Can't overwrite an item of a different type").into(),
+                    );
                 }
             }
         }
@@ -732,12 +734,12 @@ impl Work {
         match result {
             Ok(()) => Ok(ItemResult::Copied),
             Err(error) if overwrite => Ok(ItemResult::Incomplete(format!(
-                "Incompleto en destino: {error}"
+                "Incomplete at destination: {error}"
             ))),
             Err(error) => {
                 sftp.fs().remove_file(&part).await.map_err(|cleanup| {
                     io::Error::other(format!(
-                        "{error}. No se pudo quitar {}: {cleanup}",
+                        "{error}. Couldn't remove {}: {cleanup}",
                         part.display()
                     ))
                 })?;
@@ -849,7 +851,7 @@ pub(crate) async fn ensure_remote_free(sftp: &Sftp, target: &Path) -> Result<(),
     if remote_existing(sftp, target).await?.is_some() {
         Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
-            "Ya existe un elemento con ese nombre",
+            "An item with that name already exists",
         )
         .into())
     } else {
@@ -860,7 +862,7 @@ pub(crate) async fn ensure_remote_free(sftp: &Sftp, target: &Path) -> Result<(),
 pub(crate) async fn remove_remote_tree(sftp: &Sftp, path: PathBuf) -> Result<(), Error> {
     if path.file_name().is_none() || path.components().any(|part| part == Component::ParentDir) {
         return Err(
-            io::Error::new(io::ErrorKind::InvalidInput, "Ruta inválida para eliminar").into(),
+            io::Error::new(io::ErrorKind::InvalidInput, "Invalid path for deletion").into(),
         );
     }
     let normalized: PathBuf = path.components().collect();

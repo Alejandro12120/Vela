@@ -130,9 +130,7 @@ pub(crate) async fn read_dir(sftp: &Sftp, path: &Path) -> Result<Vec<Entry>, Err
             if !matches!(name.components().next(), Some(Component::Normal(_)))
                 || name.file_name() != Some(name.as_os_str())
             {
-                return Err(Error::Sftp(
-                    "Nombre de archivo inválido en el listado remoto".into(),
-                ));
+                return Err(Error::Sftp("Invalid filename in the remote listing".into()));
             }
             entries.push(entry(name.as_os_str().to_owned(), item.metadata()));
         }

@@ -23,7 +23,7 @@ impl InlineRename {
     ) -> Option<Self> {
         let name = path.file_name()?.to_str()?;
         let input = cx.new(|cx| {
-            let mut input = TextInput::new(name, "Nombre", "Nombre", false, cx).compact();
+            let mut input = TextInput::new(name, "Name", "Name", false, cx).compact();
             input.select_bytes(base_selection(name, directory));
             input
         });
@@ -52,8 +52,8 @@ pub fn validate(name: &str) -> bool {
 
 pub fn folder_name(number: usize) -> String {
     match number {
-        1 => "carpeta sin título".into(),
-        n => format!("carpeta sin título {n}"),
+        1 => "untitled folder".into(),
+        n => format!("untitled folder {n}"),
     }
 }
 
@@ -79,7 +79,7 @@ mod tests {
         for name in ["", "  ", ".", "..", "a/b", "a\0b"] {
             assert!(!validate(name));
         }
-        assert_eq!(folder_name(1), "carpeta sin título");
-        assert_eq!(folder_name(2), "carpeta sin título 2");
+        assert_eq!(folder_name(1), "untitled folder");
+        assert_eq!(folder_name(2), "untitled folder 2");
     }
 }

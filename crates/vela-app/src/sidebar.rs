@@ -288,18 +288,18 @@ fn body(
         .h(px(32.));
     heading = match heading_zone {
         Some(reorder) => heading.child(
-            drop_zone("Suelta aquí para fijar", reorder.target.pinned, theme)
+            drop_zone("Drop here to pin", reorder.target.pinned, theme)
                 .id("heading-zone")
                 .size_full()
                 .on_drop(cx.listener(|this, _: &ServerDrag, _, cx| this.drop_reorder(cx))),
         ),
-        None => heading.child(div().font_weight(FontWeight::MEDIUM).child("Servidores")),
+        None => heading.child(div().font_weight(FontWeight::MEDIUM).child("Servers")),
     };
     if workspace.dir.is_some() && heading_zone.is_none() {
         heading = heading.child(
             icon_button(
                 "add",
-                "Añadir servidor",
+                "Add Server",
                 IconName::Plus,
                 Variant::Secondary,
                 theme,
@@ -346,7 +346,7 @@ fn body(
                         icon_text_button(
                             "settings",
                             IconName::Settings,
-                            "Ajustes",
+                            "Settings",
                             if workspace.settings_open() {
                                 Variant::Selected
                             } else {
@@ -371,14 +371,10 @@ fn body(
                         .items_start()
                         .gap_2()
                         .py_2()
-                        .child(
-                            div()
-                                .text_color(theme.secondary_text)
-                                .child("Sin servidores"),
-                        )
+                        .child(div().text_color(theme.secondary_text).child("No servers"))
                         .child(button(
                             "add-first",
-                            "Añadir servidor",
+                            "Add Server",
                             Variant::Secondary,
                             theme,
                             cx.listener(|this, _, window, cx| this.open_form(None, window, cx)),
@@ -431,7 +427,7 @@ fn body(
         )
         .when_some(positions.header, |list, y| {
             list.child(
-                group_header("Fijados", theme)
+                group_header("Pinned", theme)
                     .absolute()
                     .top(px(y))
                     .left_0()
@@ -449,9 +445,9 @@ fn body(
                 .filter_map(|(group, zone)| {
                     let (y, active) = (*zone)?;
                     let label = if group == 0 {
-                        "Suelta aquí para fijar"
+                        "Drop here to pin"
                     } else {
-                        "Suelta aquí para dejar de fijar"
+                        "Drop here to unpin"
                     };
                     Some(
                         drop_zone(label, active, theme)
@@ -547,7 +543,7 @@ fn update_button(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -
 
     match &workspace.update_state {
         UpdateState::Idle => base
-            .aria_label("Buscar actualizaciones")
+            .aria_label("Check for Updates")
             .tab_index(0)
             .bg(theme.panel)
             .cursor_pointer()
@@ -560,7 +556,7 @@ fn update_button(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -
             )
             .on_click(cx.listener(|this, _, window, cx| this.check_for_updates(window, cx))),
         UpdateState::Checking => base
-            .aria_label("Buscando actualizaciones…")
+            .aria_label("Checking for Updates…")
             .bg(theme.selection)
             .opacity(0.75)
             .child(motion::spin(
@@ -570,7 +566,7 @@ fn update_button(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -
                 "update-check-spin",
             )),
         UpdateState::Available { release, .. } => base
-            .aria_label(format!("Descargar actualización {}", release.version))
+            .aria_label(format!("Download Update {}", release.version))
             .tab_index(0)
             .bg(theme.panel)
             .cursor_pointer()
@@ -583,7 +579,7 @@ fn update_button(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -
             )
             .on_click(cx.listener(|this, _, window, cx| this.install_update(window, cx))),
         UpdateState::Installing { release, .. } => base
-            .aria_label(format!("Instalando actualización {}…", release.version))
+            .aria_label(format!("Installing Update {}…", release.version))
             .bg(theme.selection)
             .opacity(0.75)
             .child(
@@ -637,11 +633,11 @@ fn drop_zone(label: &'static str, active: bool, theme: Theme) -> Div {
 
 fn status(connection: Option<&Connection>, theme: Theme) -> (&'static str, gpui::Rgba) {
     match connection {
-        Some(Connection::Connecting { .. }) => ("Conectando", theme.warning),
-        Some(Connection::Disconnecting) => ("Desconectando", theme.warning),
-        Some(Connection::Connected { .. }) => ("Conectado", theme.success),
+        Some(Connection::Connecting { .. }) => ("Connecting", theme.warning),
+        Some(Connection::Disconnecting) => ("Disconnecting", theme.warning),
+        Some(Connection::Connected { .. }) => ("Connected", theme.success),
         Some(Connection::Error(_)) => ("Error", theme.danger),
-        None => ("Desconectado", theme.secondary_text),
+        None => ("Disconnected", theme.secondary_text),
     }
 }
 
@@ -819,7 +815,7 @@ fn pin_button(
     div()
         .id("pin-server")
         .role(Role::Button)
-        .aria_label(if pinned { "Dejar de fijar" } else { "Fijar" })
+        .aria_label(if pinned { "Unpin" } else { "Pin" })
         .tab_index(0)
         .flex_none()
         .flex()
@@ -869,7 +865,7 @@ pub fn row_menu(
             } else {
                 IconName::Plug
             },
-            if connected { "Desconectar" } else { "Conectar" },
+            if connected { "Disconnect" } else { "Connect" },
             !working,
             false,
         ),
@@ -880,32 +876,22 @@ pub fn row_menu(
             } else {
                 IconName::Pin
             },
-            if server.pinned {
-                "Dejar de fijar"
-            } else {
-                "Fijar"
-            },
+            if server.pinned { "Unpin" } else { "Pin" },
             true,
             false,
         ),
-        (
-            RowAction::Edit,
-            IconName::Pencil,
-            "Editar…",
-            !working,
-            false,
-        ),
+        (RowAction::Edit, IconName::Pencil, "Edit…", !working, false),
         (
             RowAction::Duplicate,
             IconName::Copy,
-            "Duplicar…",
+            "Duplicate…",
             true,
             false,
         ),
         (
             RowAction::Delete,
             IconName::Trash,
-            "Eliminar…",
+            "Delete…",
             !working,
             true,
         ),

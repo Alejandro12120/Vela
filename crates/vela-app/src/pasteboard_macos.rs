@@ -66,9 +66,7 @@ fn write_paths(board: &NSPasteboard, paths: &[(PathBuf, bool)]) -> io::Result<()
     let objects = NSArray::from_slice(&writers);
     board.clearContents();
     if !board.writeObjects(&objects) {
-        return Err(io::Error::other(
-            "No se pudieron copiar los archivos al portapapeles",
-        ));
+        return Err(io::Error::other("Couldn't copy the files to the clipboard"));
     }
     Ok(())
 }

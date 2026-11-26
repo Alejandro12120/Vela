@@ -14,8 +14,8 @@ enum Zone {
 impl Zone {
     fn label(self) -> &'static str {
         match self {
-            Self::Chrome => "Barra lateral y cabecera",
-            Self::Content => "Listas y terminal",
+            Self::Chrome => "Sidebar and Header",
+            Self::Content => "File Lists and Terminal",
         }
     }
 
@@ -45,15 +45,35 @@ impl Workspace {
         let glass = appearance.glass();
         let reduced = appearance.reduce_transparency;
         let enabled = glass.enabled && !reduced && !self.settings_page.busy;
-        section("Interfaz")
-            .child(div().flex().justify_between().items_center().gap_3().py_1().child("Vidrio esmerilado")
-                .child(switch("glass-enabled", "Vidrio esmerilado", glass.enabled, theme,
-                    cx.listener(|this, _, window, cx| this.toggle_glass(window, cx)))))
-            .when(reduced, |section| section.child(
-                div().text_size(px(12.)).text_color(theme.secondary_text)
-                    .child("macOS tiene activado “Reducir transparencia”: la ventana se mantiene opaca.")
-            ))
-            .children([Zone::Chrome, Zone::Content].map(|zone| self.glass_slider(zone, glass, enabled, theme, cx)))
+        section("Interface")
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .items_center()
+                    .gap_3()
+                    .py_1()
+                    .child("Frosted Glass")
+                    .child(switch(
+                        "glass-enabled",
+                        "Frosted Glass",
+                        glass.enabled,
+                        theme,
+                        cx.listener(|this, _, window, cx| this.toggle_glass(window, cx)),
+                    )),
+            )
+            .when(reduced, |section| {
+                section.child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme.secondary_text)
+                        .child("Reduce Transparency is on in macOS. The window stays opaque."),
+                )
+            })
+            .children(
+                [Zone::Chrome, Zone::Content]
+                    .map(|zone| self.glass_slider(zone, glass, enabled, theme, cx)),
+            )
             .child(self.glass_pointer(cx))
     }
 
@@ -227,7 +247,7 @@ mod tests {
             );
         });
         let track = cx
-            .debug_bounds("Barra lateral y cabecera")
+            .debug_bounds("Sidebar and Header")
             .expect("a visible slider");
         let click = point(
             track.left() + track.size.width * (25. / 70.),

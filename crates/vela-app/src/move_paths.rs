@@ -97,7 +97,7 @@ pub async fn run(
                                 || !self::allow_overwrite(&source, &paths, &dest, executor).await?
                             {
                                 return Err(io::Error::other(
-                                    "El destino contiene un elemento que se va a mover",
+                                    "The destination contains an item being moved",
                                 )
                                 .into());
                             }

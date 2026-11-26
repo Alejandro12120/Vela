@@ -1,6 +1,6 @@
 use gpui::{App, Global};
 
-/// The saved «Copiar al seleccionar» preference. `None` follows `kitty.conf`.
+/// The saved “Copy on Select” preference. `None` follows `kitty.conf`.
 #[derive(Default)]
 pub(crate) struct CopyOnSelect {
     value: Option<bool>,

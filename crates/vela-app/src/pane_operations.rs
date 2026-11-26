@@ -175,7 +175,7 @@ impl Pane {
         let label = if paths.len() == 1 {
             name.to_owned()
         } else {
-            format!("{} elementos", paths.len())
+            format!("{} items", paths.len())
         };
         Some(Drag {
             side: self.source.side(),
@@ -489,7 +489,10 @@ impl Pane {
                         path.parent().and_then(Path::to_str),
                         path.file_name().and_then(std::ffi::OsStr::to_str),
                     ) else {
-                        self.report_error("El nombre no se puede ejecutar como texto.".into(), cx);
+                        self.report_error(
+                            "The filename can't be passed to the shell as text.".into(),
+                            cx,
+                        );
                         return;
                     };
                     if !kitty {
@@ -503,7 +506,7 @@ impl Pane {
                     let command = vela_core::run_script_command(directory, name, executable);
                     let args = session.terminal_command(&command);
                     (
-                        Some("No se pudo abrir Kitty"),
+                        Some("Couldn't open Kitty"),
                         Box::new(move || dev::open_kitty_ssh(&args)),
                     )
                 }
@@ -543,7 +546,7 @@ impl Pane {
         self.scroll_to_cursor();
         self.rename = InlineRename::new(path, directory, window, cx);
         if self.rename.is_none() {
-            self.path_error = Some("El nombre no se puede editar como texto.".into());
+            self.path_error = Some("The name can't be edited as text.".into());
         }
         cx.notify();
     }
@@ -566,7 +569,7 @@ impl Pane {
         }
         let value = input.value();
         if !rename::validate(value) {
-            rename.error = Some("Nombre no válido");
+            rename.error = Some("Invalid name");
             cx.notify();
             return;
         }
@@ -600,9 +603,9 @@ impl Pane {
                                 Error::Io(error)
                                     if error.kind() == io::ErrorKind::AlreadyExists =>
                                 {
-                                    "Ya existe ese nombre"
+                                    "That name is already in use"
                                 }
-                                _ => "No se pudo renombrar",
+                                _ => "Couldn't rename the item",
                             });
                         }
                     }
@@ -642,7 +645,7 @@ impl Pane {
                         this.refresh_changed([parent], Some(path), window, cx);
                     }
                     Err(error) => {
-                        this.path_error = Some(format!("No se pudo crear la carpeta: {error}"))
+                        this.path_error = Some(format!("Couldn't create the folder: {error}"))
                     }
                 }
                 cx.notify();

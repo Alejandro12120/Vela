@@ -79,7 +79,7 @@ fn format_copies_size(bytes: u64) -> String {
     } else {
         (bytes as f64 / 1_000., "KB")
     };
-    format!("{value:.1} {unit}").replace('.', ",")
+    format!("{value:.1} {unit}")
 }
 
 /// Installed editor bundles, in menu order. Only paths that exist are returned.
@@ -301,7 +301,7 @@ impl Workspace {
         cx.spawn_in(window, async move |this, cx| {
             if let Err(error) = reveal.await {
                 let _ = this.update_in(cx, |this, _, cx| {
-                    this.settings_error = Some(format!("No se pudo mostrar la carpeta. {error}"));
+                    this.settings_error = Some(format!("Couldn't show the folder: {error}"));
                     cx.notify();
                 });
             }
@@ -333,15 +333,8 @@ impl Workspace {
         let current = self
             .effective_socket()
             .map_or_else(String::new, |path| path.to_string_lossy().into_owned());
-        let input = cx.new(|cx| {
-            TextInput::new(
-                &current,
-                "Socket del agente",
-                "/ruta/al/agente.sock",
-                false,
-                cx,
-            )
-        });
+        let input = cx
+            .new(|cx| TextInput::new(&current, "Agent Socket", "/ruta/al/agente.sock", false, cx));
         self.settings_page.agent_input = Some(input.clone());
         self.settings_page.agent_editing = true;
         input.read(cx).focus_handle(cx).focus(window, cx);
@@ -383,7 +376,7 @@ impl Workspace {
             None => ("consultando…", theme.secondary_text),
             Some(Ok(count)) if *count == 0 => ("bloqueado", theme.warning),
             Some(Ok(_)) => ("disponible", theme.success),
-            Some(Err(AgentError::Unavailable)) => ("no encontrado", theme.secondary_text),
+            Some(Err(AgentError::Unavailable)) => ("not found", theme.secondary_text),
             Some(Err(AgentError::Refused | AgentError::Timeout)) => ("bloqueado", theme.warning),
             Some(Err(AgentError::Protocol(_))) => ("error", theme.danger),
         }
@@ -397,7 +390,7 @@ impl Workspace {
         {
             "Bitwarden"
         } else {
-            "Agente SSH"
+            "SSH Agent"
         }
     }
 
@@ -537,7 +530,7 @@ impl Workspace {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Elegir aplicación".into()),
+            prompt: Some("Choose Application".into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = paths.await;
@@ -549,14 +542,13 @@ impl Workspace {
                     Ok(Ok(Some(paths))) => {
                         match paths.into_iter().next().filter(|path| is_application(path)) {
                             Some(path) => this.save_editor(Some(path), window, cx),
-                            None => this.settings_error = Some("Elige una aplicación .app.".into()),
+                            None => {
+                                this.settings_error = Some("Choose an application (.app).".into())
+                            }
                         }
                     }
                     Ok(Ok(None)) => {}
-                    _ => {
-                        this.settings_error =
-                            Some("No se pudo abrir el selector de aplicaciones.".into())
-                    }
+                    _ => this.settings_error = Some("Couldn't open the application picker.".into()),
                 }
                 cx.notify();
             });
@@ -609,8 +601,7 @@ impl Workspace {
                         cx.refresh_windows();
                     }
                     Err(error) => {
-                        this.settings_error =
-                            Some(format!("No se pudo guardar settings.toml. {error}"))
+                        this.settings_error = Some(format!("Couldn't save settings.toml: {error}"))
                     }
                 }
                 cx.notify();
@@ -694,7 +685,7 @@ impl Workspace {
         else {
             return;
         };
-        let base = format!("{} copia", copy.name);
+        let base = format!("{} copy", copy.name);
         copy.name = base.clone();
         for suffix in 2.. {
             if !appearance
@@ -751,7 +742,7 @@ impl Workspace {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Añadir tema".into()),
+            prompt: Some("Add Theme".into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = paths.await;
@@ -773,7 +764,7 @@ impl Workspace {
                     Ok(Ok(None)) => {}
                     _ => {
                         this.settings_page.theme_error =
-                            Some("No se pudo abrir el selector de archivos.".into())
+                            Some("Couldn't open the file picker.".into())
                     }
                 }
                 cx.notify();
@@ -814,12 +805,12 @@ impl Workspace {
                 (draft.light, draft.dark)
             });
         let schemes = [
-            ("Sistema", IconName::Monitor, Scheme::System),
-            ("Claro", IconName::Sun, Scheme::Light),
-            ("Oscuro", IconName::Moon, Scheme::Dark),
+            ("System", IconName::Monitor, Scheme::System),
+            ("Light", IconName::Sun, Scheme::Light),
+            ("Dark", IconName::Moon, Scheme::Dark),
         ];
-        let appearance_section = section("Apariencia")
-            .child(subtitle("Esquema de color"))
+        let appearance_section = section("Appearance")
+            .child(subtitle("Color Scheme"))
             .child(
                 div()
                     .flex()
@@ -836,7 +827,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(subtitle("Temas"))
+                    .child(subtitle("Themes"))
                     .child(
                         div()
                             .flex()
@@ -845,7 +836,7 @@ impl Workspace {
                                 icon_text_button(
                                     "create-theme",
                                     IconName::Palette,
-                                    "Crear tema",
+                                    "Create Theme",
                                     Variant::Secondary,
                                     None,
                                     theme,
@@ -859,7 +850,7 @@ impl Workspace {
                                 icon_text_button(
                                     "add-theme",
                                     IconName::Plus,
-                                    "Añadir tema",
+                                    "Add Theme",
                                     Variant::Secondary,
                                     None,
                                     theme,
@@ -940,13 +931,13 @@ impl Workspace {
                                 div()
                                     .text_size(px(16.))
                                     .font_weight(FontWeight::MEDIUM)
-                                    .child("Ajustes"),
+                                    .child("Settings"),
                             ),
                     )
                     .child(
                         icon_button(
                             "settings-close",
-                            "Cerrar ajustes",
+                            "Close Settings",
                             IconName::Close,
                             Variant::Secondary,
                             theme,
@@ -1059,14 +1050,14 @@ impl Workspace {
                 ColorVariant::Light => (
                     "sun",
                     IconName::Sun,
-                    "claro",
+                    "Light",
                     &theme_focus.light,
                     selected.0,
                 ),
                 ColorVariant::Dark => (
                     "moon",
                     IconName::Moon,
-                    "oscuro",
+                    "Dark",
                     &theme_focus.dark,
                     selected.1,
                 ),
@@ -1075,9 +1066,9 @@ impl Workspace {
                 (Scheme::Light, ColorVariant::Dark) | (Scheme::Dark, ColorVariant::Light) => 0.4,
                 _ => 1.,
             });
-            let label = format!("Usar «{}» en modo {mode}", def.name);
+            let label = format!("Use “{}” in {mode} Mode", def.name);
             let accessible_label = if selected {
-                format!("{label} (seleccionado)")
+                format!("{label} (selected)")
             } else {
                 label.clone()
             };
@@ -1147,7 +1138,7 @@ impl Workspace {
                             .when(!def.builtin, |row| {
                                 row.child(theme_action(
                                     "edit",
-                                    "Editar",
+                                    "Edit",
                                     IconName::Pencil,
                                     theme,
                                     cx.listener(move |this, _, window, cx| {
@@ -1158,7 +1149,7 @@ impl Workspace {
                             })
                             .child(theme_action(
                                 "duplicate",
-                                "Duplicar",
+                                "Duplicate",
                                 IconName::Copy,
                                 theme,
                                 cx.listener(move |this, _, window, cx| {
@@ -1169,7 +1160,7 @@ impl Workspace {
                             .when(!def.builtin, |row| {
                                 row.child(theme_action(
                                     "delete",
-                                    "Eliminar",
+                                    "Delete",
                                     IconName::Trash,
                                     theme,
                                     cx.listener(move |this, _, window, cx| {
@@ -1244,7 +1235,7 @@ impl Workspace {
             .child(status)
             .child(small_button(
                 "change-agent",
-                "Cambiar…",
+                "Change…",
                 Variant::Secondary,
                 theme,
                 cx.listener(|this, _, window, cx| this.edit_agent_socket(window, cx)),
@@ -1252,7 +1243,7 @@ impl Workspace {
             .when(self.settings.agent_socket.is_some(), |row| {
                 row.child(small_button(
                     "use-bitwarden",
-                    "Usar el de Bitwarden",
+                    "Use Bitwarden Socket",
                     Variant::Secondary,
                     theme,
                     cx.listener(|this, _, window, cx| this.use_bitwarden_socket(window, cx)),
@@ -1282,14 +1273,14 @@ impl Workspace {
                 .child(div().w(px(280.)).children(input))
                 .child(small_button(
                     "save-agent-socket",
-                    "Guardar",
+                    "Save",
                     Variant::Primary,
                     theme,
                     cx.listener(|this, _, window, cx| this.commit_agent_socket(window, cx)),
                 ))
                 .child(small_button(
                     "cancel-agent-socket",
-                    "Cancelar",
+                    "Cancel",
                     Variant::Secondary,
                     theme,
                     cx.listener(|this, _, _, cx| this.cancel_agent_socket(cx)),
@@ -1302,17 +1293,17 @@ impl Workspace {
                 .text_color(theme.secondary_text)
                 .child(
                     self.effective_socket()
-                        .map_or_else(|| "Ninguno".to_owned(), |path| abbreviate_path(path, 52)),
+                        .map_or_else(|| "None".to_owned(), |path| abbreviate_path(path, 52)),
                 )
                 .into_any_element()
         };
 
-        section("Agente SSH").child(settings_group(
+        section("SSH Agent").child(settings_group(
             theme,
             vec![
                 settings_row(
-                    "Agente",
-                    Some("Lo usan todos los servidores con clave SSH.".into()),
+                    "Agent",
+                    Some("Used by all servers that authenticate with an SSH key.".into()),
                     controls,
                     theme,
                 ),
@@ -1333,14 +1324,14 @@ impl Workspace {
     }
 
     fn editor_entries(&self) -> Vec<(&'static str, Option<PathBuf>)> {
-        let mut entries = vec![("Predeterminada del sistema", None)];
+        let mut entries = vec![("System Default", None)];
         entries.extend(
             installed_editors(&crate::dev::editor_roots())
                 .into_iter()
                 .map(|(name, path)| (name, Some(path))),
         );
         #[cfg(target_os = "macos")]
-        entries.push(("Otra aplicación…", None));
+        entries.push(("Other Application…", None));
         entries
     }
 
@@ -1503,7 +1494,7 @@ impl Workspace {
             return div()
                 .text_size(px(13.))
                 .text_color(theme.secondary_text)
-                .child("Aplicación predeterminada (xdg-open)")
+                .child("Default application (xdg-open)")
                 .into_any_element();
         }
         let label = self
@@ -1512,7 +1503,7 @@ impl Workspace {
             .as_deref()
             .and_then(|path| path.file_stem())
             .map_or_else(
-                || "Predeterminada del sistema".to_owned(),
+                || "System Default".to_owned(),
                 |name| name.to_string_lossy().into_owned(),
             );
         let bounds = self.settings_page.editor_trigger_bounds.clone();
@@ -1782,12 +1773,12 @@ impl Workspace {
 
         let copies = self.settings_page.edit_copies;
         let caption = match copies {
-            None => "Calculando…".to_owned(),
-            Some((0, _)) => "Sin copias.".to_owned(),
+            None => "Calculating…".to_owned(),
+            Some((0, _)) => "No copies.".to_owned(),
             Some((count, bytes)) => format!(
-                "{} {} · {}. Las que tienen cambios sin subir no se borran.",
+                "{} {} · {}. Copies with unuploaded changes are kept.",
                 count,
-                if count == 1 { "archivo" } else { "archivos" },
+                if count == 1 { "file" } else { "files" },
                 format_copies_size(bytes)
             ),
         };
@@ -1799,7 +1790,7 @@ impl Workspace {
             .children(folder.then(|| {
                 small_button(
                     "show-copies",
-                    "Mostrar",
+                    "Show",
                     Variant::Secondary,
                     theme,
                     cx.listener(|this, _, window, cx| this.reveal_edit_copies(window, cx)),
@@ -1807,7 +1798,7 @@ impl Workspace {
             }))
             .child(small_button(
                 "empty-copies",
-                "Vaciar…",
+                "Clear…",
                 Variant::Secondary,
                 theme,
                 cx.listener(|this, _, window, cx| {
@@ -1822,17 +1813,12 @@ impl Workspace {
                 theme,
                 vec![
                     settings_row(
-                        "Abrir archivos remotos con",
-                        Some("Al guardar en el editor, Vela sube el cambio al servidor.".into()),
+                        "Open remote files with",
+                        Some("Vela uploads your changes when you save in the editor.".into()),
                         editor_control,
                         theme,
                     ),
-                    settings_row(
-                        "Copias de edición",
-                        Some(caption.into()),
-                        copies_control,
-                        theme,
-                    ),
+                    settings_row("Edit Copies", Some(caption.into()), copies_control, theme),
                 ],
             ))
             .when_some(self.settings_error.clone(), |section, error| {
@@ -1953,7 +1939,7 @@ impl Workspace {
             .child(cell(
                 "font-smaller",
                 "−",
-                "Reducir tamaño de letra",
+                "Decrease Font Size",
                 current > 6,
                 (current > 6).then(|| {
                     Box::new(step(-1.))
@@ -1978,7 +1964,7 @@ impl Workspace {
             .child(cell(
                 "font-larger",
                 "+",
-                "Aumentar tamaño de letra",
+                "Increase Font Size",
                 current < 48,
                 (current < 48).then(|| {
                     Box::new(step(1.))
@@ -1987,7 +1973,7 @@ impl Workspace {
             ));
         let reset = crate::components::button::icon_button(
             "reset-font-size",
-            "Volver al tamaño de kitty.conf",
+            "Reset Font Size to kitty.conf",
             IconName::RotateCcw,
             Variant::Secondary,
             theme,
@@ -2008,9 +1994,9 @@ impl Workspace {
             .terminal_copy_on_select
             .unwrap_or(kitty_default);
         let font_description = if cfg!(target_os = "macos") {
-            "También con ⌘+, ⌘− y ⌘0. Se guarda entre arranques."
+            "Use ⌘+, ⌘−, or ⌘0. The size is saved across launches."
         } else {
-            "También con Ctrl+Mayús++, Ctrl+Mayús+− y Ctrl+Mayús+0. Se guarda entre arranques."
+            "Use Ctrl+Shift++, Ctrl+Shift+−, or Ctrl+Shift+0. The size is saved across launches."
         };
 
         let appearance = cx.global::<Appearance>();
@@ -2029,7 +2015,7 @@ impl Workspace {
             .cursor_pointer()
             .hover(move |style| style.text_color(theme.text))
             .focus(move |style| style.border_color(theme.accent))
-            .child(format!("Los del tema «{theme_name}»"))
+            .child(format!("From the “{theme_name}” theme"))
             .child(
                 icon(IconName::ArrowRight)
                     .size(px(14.))
@@ -2050,7 +2036,7 @@ impl Workspace {
             Some(path) => (abbreviate_path(path, 40), None, Some(path.clone())),
             None => (
                 String::new(),
-                Some("No se encontró; se usan los valores de Kitty"),
+                Some("File not found. Using Kitty defaults."),
                 None,
             ),
         };
@@ -2070,7 +2056,7 @@ impl Workspace {
             .children(show.map(|path| {
                 small_button(
                     "show-kitty",
-                    "Mostrar",
+                    "Show",
                     Variant::Secondary,
                     theme,
                     cx.listener(move |_, _, window, cx| {
@@ -2082,7 +2068,7 @@ impl Workspace {
                             if let Err(error) = reveal.await {
                                 let _ = this.update_in(cx, |this, _, cx| {
                                     this.settings_error =
-                                        Some(format!("No se pudo mostrar el archivo. {error}"));
+                                        Some(format!("Couldn't show the file: {error}"));
                                     cx.notify();
                                 });
                             }
@@ -2094,7 +2080,7 @@ impl Workspace {
             .child(small_icon_text_button(
                 "reload-kitty",
                 IconName::Refresh,
-                "Volver a leer",
+                "Reload",
                 Variant::Secondary,
                 theme,
                 cx.listener(|this, _, window, cx| this.read_kitty(true, window, cx)),
@@ -2106,19 +2092,17 @@ impl Workspace {
                 theme,
                 vec![
                     settings_row(
-                        "Tamaño de letra",
+                        "Font Size",
                         Some(font_description.into()),
                         size_control,
                         theme,
                     ),
                     settings_row(
-                        "Copiar al seleccionar",
-                        Some(
-                            "Copia al portapapeles el texto que seleccionas en la terminal.".into(),
-                        ),
+                        "Copy on Select",
+                        Some("Copies selected terminal text to the clipboard.".into()),
                         switch(
                             "terminal-copy-on-select",
-                            "Copiar al seleccionar",
+                            "Copy on Select",
                             copy_value,
                             theme,
                             cx.listener(move |this, _, window, cx| {
@@ -2134,7 +2118,7 @@ impl Workspace {
                         theme,
                     ),
                     settings_row(
-                        "Fuente",
+                        "Font",
                         None,
                         div()
                             .text_size(px(12.))
@@ -2143,14 +2127,14 @@ impl Workspace {
                                 "{}, {}",
                                 kitty.family,
                                 if kitty.path.is_some() {
-                                    "de kitty.conf"
+                                    "from kitty.conf"
                                 } else {
-                                    "por defecto"
+                                    "default"
                                 }
                             )),
                         theme,
                     ),
-                    settings_row("Colores", None, colors_control, theme),
+                    settings_row("Colors", None, colors_control, theme),
                     settings_row(
                         "kitty.conf",
                         kitty_description.map(Into::into),
@@ -2493,9 +2477,9 @@ mod tests {
     }
 
     #[test]
-    fn copy_sizes_use_a_spanish_decimal_comma() {
-        assert_eq!(format_copies_size(1_200_000), "1,2 MB");
-        assert_eq!(format_copies_size(999), "1,0 KB");
+    fn copy_sizes_use_a_decimal_point() {
+        assert_eq!(format_copies_size(1_200_000), "1.2 MB");
+        assert_eq!(format_copies_size(999), "1.0 KB");
     }
 
     fn serve_agent(
@@ -2569,7 +2553,7 @@ mod tests {
             let input = cx.new(|cx| {
                 TextInput::new(
                     &missing.to_string_lossy(),
-                    "Socket del agente",
+                    "Agent Socket",
                     "/ruta/al/agente.sock",
                     false,
                     cx,
@@ -2715,7 +2699,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut theme = vela_core::appearance::builtin_themes().remove(0);
         theme.id = "noche".into();
-        theme.name = "Noche".into();
+        theme.name = "Night".into();
         theme.builtin = false;
         save_user_theme(dir.path(), &theme).unwrap();
         let mut settings = Settings::default();

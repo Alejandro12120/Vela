@@ -35,7 +35,7 @@ pub enum SessionView {
 impl SessionView {
     fn label(self) -> &'static str {
         match self {
-            Self::Files => "Archivos",
+            Self::Files => "Files",
             Self::Terminal => "Terminal",
         }
     }
@@ -283,7 +283,7 @@ impl Panes {
                 icon_text_button(
                     "disconnect",
                     IconName::Unplug,
-                    "Desconectar",
+                    "Disconnect",
                     Variant::Secondary,
                     None,
                     theme,

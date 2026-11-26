@@ -25,7 +25,7 @@ impl Process {
             .into_iter()
             .map(|arg| {
                 arg.into_string()
-                    .map_err(|_| io::Error::other("Argumento SSH no válido en UTF-8"))
+                    .map_err(|_| io::Error::other("SSH argument isn't valid UTF-8"))
             })
             .collect::<io::Result<Vec<_>>>()?;
         let options = Options {

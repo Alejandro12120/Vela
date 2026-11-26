@@ -665,7 +665,7 @@ mod tests {
                 },
                 ..server(Auth::Password)
             },
-            entry("password", "Contraseña", false),
+            entry("password", "Password", false),
         ];
         save(&legacy, servers).unwrap();
 

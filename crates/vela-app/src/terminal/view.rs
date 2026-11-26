@@ -179,7 +179,7 @@ impl TerminalView {
     }
 
     pub fn kitty_error(&mut self, error: String, cx: &mut Context<Self>) {
-        self.kitty_error = Some(format!("No se pudo abrir Kitty. {error}"));
+        self.kitty_error = Some(format!("Couldn't open Kitty: {error}"));
         cx.notify();
     }
 
@@ -556,8 +556,8 @@ impl Render for TerminalView {
         let status = self
             .error
             .as_ref()
-            .map(|error| format!("No se pudo abrir la terminal. {error}"))
-            .unwrap_or_else(|| "La sesión de terminal ha terminado".into());
+            .map(|error| format!("Couldn't open the terminal: {error}"))
+            .unwrap_or_else(|| "The terminal session ended".into());
         div()
             .flex()
             .flex_col()
@@ -650,7 +650,7 @@ impl Render for TerminalView {
                         .child(div().min_w_0().flex_1().truncate().child(status))
                         .child(button(
                             "terminal-restart",
-                            "Abrir de nuevo",
+                            "Reopen",
                             Variant::Secondary,
                             theme,
                             cx.listener(|_, _, _, cx| cx.emit(Restart)),

@@ -18,7 +18,7 @@ pub fn root() -> io::Result<PathBuf> {
     }
     std::env::home_dir()
         .map(|home| home.join("Library/Caches/Vela/staging"))
-        .ok_or_else(|| io::Error::other("No se encuentra la carpeta de caché"))
+        .ok_or_else(|| io::Error::other("Cache folder not found"))
 }
 
 pub struct Directory {
@@ -59,7 +59,7 @@ fn lock(directory: &Path, mode: libc::c_int) -> io::Result<File> {
 pub fn create(root: &Path) -> io::Result<Directory> {
     DirBuilder::new().recursive(true).mode(0o700).create(root)?;
     if !fs::symlink_metadata(root)?.is_dir() {
-        return Err(io::Error::other("La caché no es una carpeta"));
+        return Err(io::Error::other("The cache path isn't a folder"));
     }
     let _root_lock = lock(root, libc::LOCK_EX)?;
     let temp = tempfile::Builder::new()
@@ -88,7 +88,7 @@ fn remove_directory(path: &Path) -> io::Result<()> {
 pub fn cleanup(root: &Path, paths: &[PathBuf]) -> io::Result<()> {
     match fs::symlink_metadata(root) {
         Ok(metadata) if metadata.is_dir() => {}
-        Ok(_) => return Err(io::Error::other("La caché no es una carpeta")),
+        Ok(_) => return Err(io::Error::other("The cache path isn't a folder")),
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     }

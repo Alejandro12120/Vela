@@ -5,7 +5,8 @@
 #   curl -fsSL https://raw.githubusercontent.com/Alejandro12120/Vela/main/install.sh | sh
 #
 # Optional environment variables:
-#   VELA_VERSION           Install a specific release tag (e.g. v0.1.0). Defaults to latest.
+#   VELA_VERSION           Install a specific release tag (e.g. v0.1.0). Defaults to latest stable.
+#   VELA_PRERELEASE=1      Include prereleases when choosing the latest version (requires Python 3).
 #   VELA_INSTALL_DIR       Linux binary directory (default: ~/.local/bin).
 #   VELA_DATA_DIR          Linux XDG data directory (default: ~/.local/share).
 #   VELA_APPS_DIR          macOS Applications directory (default: /Applications).
@@ -38,10 +39,11 @@ Vela installer
 
 Usage:
   curl -fsSL https://raw.githubusercontent.com/Alejandro12120/Vela/main/install.sh | sh
-  sh install.sh [--version <tag>]
+  sh install.sh [--version <tag>] [--prerelease]
 
 Options:
   -v, --version <tag>  Install a specific release version or tag (e.g. 0.1.0 or v0.1.0)
+  -p, --prerelease     Include prereleases when choosing the latest version (requires Python 3)
   -h, --help           Show this help message
 EOF
 }
@@ -60,6 +62,10 @@ parse_args() {
                 VELA_VERSION="$2"
                 shift 2
                 ;;
+            -p|--prerelease)
+                VELA_PRERELEASE=1
+                shift
+                ;;
             -h|--help)
                 usage
                 exit 0
@@ -69,6 +75,58 @@ parse_args() {
                 ;;
         esac
     done
+}
+
+latest_release_tag() {
+    need_cmd python3
+    curl -q -fsSL --proto '=https' --tlsv1.2 --retry 3 --retry-delay 1 \
+        --max-time 60 --max-filesize 4194304 \
+        --header 'Accept: application/vnd.github+json' --user-agent 'Vela installer' \
+        -o "$1" "https://api.github.com/repos/${VELA_REPO}/releases?per_page=20" \
+        || die "Failed to fetch the GitHub release list."
+    python3 - "$1" <<'PY'
+import json
+import re
+import sys
+
+number = r"(0|[1-9][0-9]*)"
+identifier = r"[0-9A-Za-z-]+"
+semver = re.compile(
+    rf"v?{number}\.{number}\.{number}(?:-({identifier}(?:\.{identifier})*))?"
+    rf"(?:\+{identifier}(?:\.{identifier})*)?"
+)
+
+
+def version_key(tag):
+    match = semver.fullmatch(tag)
+    if not match:
+        return None
+    pre = match[4].split(".") if match[4] else []
+    if any(part.isdecimal() and len(part) > 1 and part.startswith("0") for part in pre):
+        return None
+    identifiers = tuple((0, int(part)) if part.isdecimal() else (1, part) for part in pre)
+    return tuple(map(int, match.groups()[:3])), not pre, identifiers
+
+
+with open(sys.argv[1]) as source:
+    releases = json.load(source)
+
+candidates = []
+for release in releases:
+    if release["draft"]:
+        continue
+    assets = {asset["name"] for asset in release["assets"]}
+    if not {"manifest.json", "manifest.json.sshsig"} <= assets:
+        continue
+    tag = release["tag_name"]
+    key = version_key(tag)
+    if key is not None:
+        candidates.append((key, tag))
+
+if not candidates:
+    sys.exit("No published Vela release has a signed manifest.")
+print(max(candidates, key=lambda candidate: candidate[0])[1])
+PY
 }
 
 detect_platform() {
@@ -201,7 +259,7 @@ validate_asset_name() {
             ;;
     esac
     case "$1" in
-        *[!A-Za-z0-9._-]*)
+        *[!A-Za-z0-9._+-]*)
             die "Unexpected characters in archive name: '$1'"
             ;;
     esac
@@ -429,6 +487,13 @@ main() {
 
     pubkey="${VELA_SIGNING_PUBKEY:-$VELA_DEFAULT_PUBKEY}"
 
+    tmp_base="${TMPDIR:-/tmp}"
+    tmp_base="${tmp_base%/}"
+    tmp_dir="$(mktemp -d "${tmp_base}/vela-install.XXXXXX")"
+    chmod 700 "$tmp_dir"
+    trap 'rm -rf -- "$tmp_dir"' EXIT INT TERM
+
+    selected_tag=""
     if [ -n "${VELA_RELEASE_BASE_URL:-}" ]; then
         base_url="${VELA_RELEASE_BASE_URL%/}"
     elif [ -n "${VELA_VERSION:-}" ]; then
@@ -437,15 +502,13 @@ main() {
             *) tag="v${VELA_VERSION}" ;;
         esac
         base_url="https://github.com/${VELA_REPO}/releases/download/${tag}"
+    elif [ "${VELA_PRERELEASE:-}" = "1" ]; then
+        selected_tag="$(latest_release_tag "${tmp_dir}/releases.json")" \
+            || die "Could not select a published Vela release."
+        base_url="https://github.com/${VELA_REPO}/releases/download/${selected_tag}"
     else
         base_url="https://github.com/${VELA_REPO}/releases/latest/download"
     fi
-
-    tmp_base="${TMPDIR:-/tmp}"
-    tmp_base="${tmp_base%/}"
-    tmp_dir="$(mktemp -d "${tmp_base}/vela-install.XXXXXX")"
-    chmod 700 "$tmp_dir"
-    trap 'rm -rf -- "$tmp_dir"' EXIT INT TERM
 
     allowed_signers="${tmp_dir}/allowed_signers"
     printf '%s %s\n' "$VELA_SIGNER_IDENTITY" "$pubkey" > "$allowed_signers"
@@ -466,6 +529,11 @@ main() {
     expected_sha256="$(parse_manifest_platform "$manifest_file" "$PLATFORM" "sha256")"
 
     [ -n "$VERSION" ] || die "Could not read release version from manifest.json."
+    if [ -n "$selected_tag" ]; then
+        [ "$VERSION" = "${selected_tag#v}" ] &&
+            [ "$(parse_manifest_top "$manifest_file" "tag")" = "$selected_tag" ] \
+            || die "The signed version and tag do not match the selected release."
+    fi
     [ -n "$asset" ] || die "Platform '${PLATFORM}' was not found in manifest.json."
     validate_asset_name "$asset"
     validate_sha256 "$expected_sha256"

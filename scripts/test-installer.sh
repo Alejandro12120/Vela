@@ -260,4 +260,98 @@ EXPECTED_PUB="$(tr -d '\r\n' < "${REPO_ROOT}/packaging/vela-release.pub")"
 grep -Fq "VELA_DEFAULT_PUBKEY=\"${EXPECTED_PUB}\"" "$INSTALLER" \
     || fail "install.sh embedded public key does not match packaging/vela-release.pub"
 
+if command -v python3 >/dev/null 2>&1; then
+    say "Testing prerelease discovery, numeric RC ordering and explicit version precedence"
+    RC_DIST="${TMP}/dist-rc"
+    RC_TAG=v0.10.0-rc.10
+    if [ -d "${TMP}/dist-openssh" ]; then
+        cp -R "${TMP}/dist-openssh" "$RC_DIST"
+        RC_KEY="${TMP}/id_ed25519"
+        RC_PUB="$OPENSSH_PUB"
+    else
+        cp -R "$MOCK_DIST" "$RC_DIST"
+        RC_KEY="${TMP}/test_key"
+        RC_PUB="$PUBKEY"
+    fi
+    sed "s/\"0\.9\.9\"/\"${RC_TAG#v}\"/; s/v0\.9\.9/$RC_TAG/g" \
+        "${RC_DIST}/manifest.json" > "${TMP}/rc-manifest.json"
+    mv "${TMP}/rc-manifest.json" "${RC_DIST}/manifest.json"
+    ssh-keygen -Y sign -f "$RC_KEY" -n vela-release \
+        < "${RC_DIST}/manifest.json" > "${RC_DIST}/manifest.json.sshsig"
+
+    python3 - "$RC_TAG" > "${TMP}/releases.json" <<'PY'
+import json
+import sys
+
+
+def release(tag, draft=False, signed=True):
+    assets = [{"name": "manifest.json"}]
+    if signed:
+        assets.append({"name": "manifest.json.sshsig"})
+    return {"tag_name": tag, "draft": draft, "assets": assets}
+
+
+json.dump([
+    release("v0.10.0-rc.2"),
+    release("v9.0.0", draft=True),
+    release("v8.0.0", signed=False),
+    release("v7.0.0-rc.01"),
+    release(sys.argv[1]),
+    release("v0.9.9"),
+], sys.stdout)
+PY
+
+    mkdir "${TMP}/mock-bin"
+    cat > "${TMP}/mock-bin/curl" <<'EOF'
+#!/bin/sh
+set -eu
+while [ "$#" -gt 1 ]; do
+    if [ "$1" = "-o" ]; then
+        dest="$2"
+        shift 2
+    else
+        shift
+    fi
+done
+case "$1" in
+    "https://api.github.com/repos/Alejandro12120/Vela/releases?per_page=20")
+        [ "$MOCK_TAG" != "v0.9.9" ] || exit 1
+        cp "$MOCK_RELEASES" "$dest"
+        ;;
+    "https://github.com/Alejandro12120/Vela/releases/download/${MOCK_TAG}/"*)
+        cp "${MOCK_PAYLOAD}/${1##*/}" "$dest"
+        ;;
+    *)
+        printf 'Unexpected URL: %s\n' "$1" >&2
+        exit 1
+        ;;
+esac
+EOF
+    chmod +x "${TMP}/mock-bin/curl"
+
+    mock_install() {
+        PATH="${TMP}/mock-bin:$PATH" \
+        MOCK_TAG="$tag" MOCK_PAYLOAD="$payload" MOCK_RELEASES="${TMP}/releases.json" \
+        VELA_VERSION="" VELA_RELEASE_BASE_URL="" VELA_SIGNING_PUBKEY="$key" \
+        VELA_INSTALL_DIR="${TMP}/rc-bin" VELA_DATA_DIR="${TMP}/rc-share" \
+        VELA_APPS_DIR="${TMP}/rc-apps" \
+        sh -s -- "$@" < "$INSTALLER"
+    }
+
+    tag="$RC_TAG" payload="$RC_DIST" key="$RC_PUB"
+    result="$(mock_install -p)"
+    printf '%s\n' "$result" | grep -Fq "Vela ${RC_TAG#v} installed" \
+        || fail "The prerelease flag did not install the highest signed RC."
+    result="$(VELA_PRERELEASE=1 mock_install)"
+    printf '%s\n' "$result" | grep -Fq "Vela ${RC_TAG#v} installed" \
+        || fail "VELA_PRERELEASE did not select the highest signed RC."
+    if key="$WRONG_PUBKEY" mock_install --prerelease >/dev/null 2>&1; then
+        fail "Prerelease mode accepted a manifest signed by a different key."
+    fi
+    tag=v0.9.9 payload="$MOCK_DIST" key="$PUBKEY"
+    result="$(mock_install --prerelease --version 0.9.9)"
+    printf '%s\n' "$result" | grep -Fq "Vela 0.9.9 installed" \
+        || fail "An explicit version did not take precedence."
+fi
+
 say "All installer checks passed!"

@@ -6,18 +6,25 @@ on:
       - 'v*'
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'Tag to release (optional, defaults to v<Cargo.toml version>)'
+      mode:
+        description: 'Release type'
+        type: choice
+        options:
+          - prerelease
+          - release
+        default: prerelease
+      version:
+        description: 'Version or prerelease base (optional, e.g. 0.2.0 or 0.2.0-rc.1)'
         required: false
         type: string
       draft:
         description: 'Create the GitHub Release as a draft'
         required: false
-        default: true
+        default: false
         type: boolean
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: ${{ github.event_name == 'workflow_dispatch' && 'release-dispatch' || format('release-{0}', github.ref) }}
   cancel-in-progress: false
 
 permissions:
@@ -35,55 +42,39 @@ jobs:
       tag: ${{ steps.meta.outputs.tag }}
       prerelease: ${{ steps.meta.outputs.prerelease }}
       draft: ${{ steps.meta.outputs.draft }}
+      stamp_version: ${{ steps.meta.outputs.stamp_version }}
+      target_sha: ${{ steps.target.outputs.sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Validate version and tag
+      - name: Resolve version and tag
         id: meta
         env:
-          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_MODE: ${{ inputs.mode }}
+          INPUT_VERSION: ${{ inputs.version }}
           INPUT_DRAFT: ${{ inputs.draft }}
+        run: python3 scripts/release-version.py
+
+      - name: Stamp and push the stable version
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'release'
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
         run: |
-          python3 - <<'PY'
-          import os, re, sys, tomllib
+          python3 scripts/release-version.py --stamp "$VERSION"
+          if ! git diff --quiet -- crates/vela-app/Cargo.toml crates/vela-core/Cargo.toml Cargo.lock; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add -- crates/vela-app/Cargo.toml crates/vela-core/Cargo.toml Cargo.lock
+            git commit -m "Chore: bump version to $VERSION"
+            git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"
+          fi
 
-          with open("crates/vela-app/Cargo.toml", "rb") as f:
-              app_version = tomllib.load(f)["package"]["version"]
-          with open("crates/vela-core/Cargo.toml", "rb") as f:
-              core_version = tomllib.load(f)["package"]["version"]
-
-          if app_version != core_version:
-              sys.exit(
-                  f"Version mismatch: vela-app={app_version} != vela-core={core_version}"
-              )
-
-          event = os.environ["GITHUB_EVENT_NAME"]
-          if event == "push":
-              tag = os.environ["GITHUB_REF_NAME"]
-              draft = "false"
-          else:
-              tag = os.environ.get("INPUT_TAG", "").strip() or f"v{app_version}"
-              draft = "true" if os.environ.get("INPUT_DRAFT", "true") == "true" else "false"
-
-          expected_tag = f"v{app_version}"
-          if tag != expected_tag:
-              sys.exit(
-                  f"Tag '{tag}' does not match Cargo.toml version '{app_version}' "
-                  f"(expected '{expected_tag}'). Bump Cargo.toml before tagging."
-              )
-
-          if not re.match(r"^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$", app_version):
-              sys.exit(f"Invalid semver version: {app_version}")
-
-          prerelease = "true" if "-" in app_version else "false"
-
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
-              out.write(f"version={app_version}\n")
-              out.write(f"tag={tag}\n")
-              out.write(f"prerelease={prerelease}\n")
-              out.write(f"draft={draft}\n")
-          PY
+      - name: Record release target
+        id: target
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Render app icons
         run: |
@@ -134,6 +125,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.target_sha }}
+
+      - name: Stamp the prerelease version
+        if: needs.prepare.outputs.stamp_version == 'true'
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: python3 scripts/release-version.py --stamp "$VERSION"
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -269,6 +268,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.target_sha }}
 
       - name: Download build artifacts
         uses: actions/download-artifact@v4
@@ -299,7 +300,7 @@ jobs:
           TAG: ${{ needs.prepare.outputs.tag }}
           PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
           DRAFT: ${{ needs.prepare.outputs.draft }}
-          TARGET_SHA: ${{ github.sha }}
+          TARGET_SHA: ${{ needs.prepare.outputs.target_sha }}
         run: |
           flags=(--title "Vela ${TAG}" --generate-notes)
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then

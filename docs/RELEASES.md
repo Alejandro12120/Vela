@@ -12,7 +12,7 @@ Se ejecuta en cada `push` a cualquier rama y en cada Pull Request:
 
 ## 2. Clave de firma (Ed25519)
 
-Las releases se firman con una clave **Ed25519** mediante OpenSSL (`scripts/sign-release.py`). La firma sirve tanto para verificación manual como para el futuro auto-updater.
+Las releases se firman con una clave **Ed25519** mediante OpenSSL (`scripts/sign-release.py`). La firma sirve tanto para la verificación manual como para las actualizaciones desde Vela.
 
 ### Generar el par de claves (una sola vez, en local)
 
@@ -45,7 +45,9 @@ En el repositorio: **Settings → Secrets and variables → Actions → New repo
 - `Vela-<versión>-macos-aarch64.tar.gz` (`Vela.app` con `Info.plist`, icono `Vela.icns` y firma ad-hoc) + `.sig` + `.sshsig`
 - `vela-<versión>-linux-x86_64.tar.gz` (`vela`, `LICENSE`, `vela.desktop` con `Icon=vela` e iconos `hicolor` SVG/PNG) + `.sig` + `.sshsig`
 - `SHA256SUMS.txt` + `SHA256SUMS.txt.sig` + `SHA256SUMS.txt.sshsig`
-- `manifest.json` + `manifest.json.sig` + `manifest.json.sshsig` (esquema `1` pensado para `install.sh` y el futuro auto-updater, consultable vía `.../releases/latest/download/manifest.json`)
+- `manifest.json` + `manifest.json.sig` + `manifest.json.sshsig` (esquema `1` para `install.sh` y Vela, disponible en `.../releases/latest/download/manifest.json`)
+
+`scripts/sign-release.py --notes-file <archivo.md>` incluye las notas Markdown en el campo opcional `notes` del manifiesto firmado. El flujo habitual genera las notas en GitHub. Si el manifiesto no incluye notas, Vela consulta el cuerpo de la release por su etiqueta con un límite de tres segundos y sigue mostrando la actualización aunque falle la consulta. Los repositorios espejo configurados con una URL personalizada usan las notas del manifiesto.
 
 Las firmas `.sig` (Ed25519 raw de 64 bytes) y `.sshsig` (OpenSSH SSHSIG, namespace `vela-release`) se generan a partir del mismo secreto `VELA_SIGNING_KEY`. Las claves públicas correspondientes están en [packaging/vela-release.pub](../packaging/vela-release.pub) y [packaging/vela-release-public.pem](../packaging/vela-release-public.pem).
 

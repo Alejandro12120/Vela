@@ -747,6 +747,7 @@ impl Workspace {
             &self.dialog_focus,
             &self.confirm_focus,
             theme,
+            false,
             cx,
         )
         .into_any_element()

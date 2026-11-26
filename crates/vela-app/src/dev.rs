@@ -94,6 +94,7 @@ pub fn server_state() -> Option<ServerState> {
 pub enum UpdatePreview {
     Checking,
     Available,
+    Confirm,
     Installing(f32),
     Error,
 }
@@ -107,6 +108,7 @@ pub fn update_state() -> Option<UpdatePreview> {
     match raw.as_str() {
         "checking" => Some(UpdatePreview::Checking),
         "available" => Some(UpdatePreview::Available),
+        "confirm" => Some(UpdatePreview::Confirm),
         "installing" => Some(UpdatePreview::Installing(0.45)),
         "error" => Some(UpdatePreview::Error),
         _ => None,
@@ -298,9 +300,7 @@ pub fn edit_root() -> io::Result<PathBuf> {
     if let Some(dir) = config_override() {
         return Ok(dir.join("edit-cache"));
     }
-    std::env::home_dir()
-        .map(|home| home.join("Library/Caches/Vela/edit"))
-        .ok_or_else(|| io::Error::other("Cache folder not found"))
+    vela_core::edit::default_root("Vela")
 }
 
 /// Opens the floating menu of the server with this display name at its row's centre at startup.

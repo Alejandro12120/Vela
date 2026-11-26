@@ -17,23 +17,19 @@ pub enum TerminalColorSource {
     Kitty,
 }
 
-#[derive(Clone, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(default)]
 pub struct Settings {
     pub editor: Option<PathBuf>,
     /// Global SSH agent socket. When absent, the first detected Bitwarden
     /// socket is used, if any.
-    #[serde(default)]
     pub agent_socket: Option<PathBuf>,
     /// Terminal font size in points. When absent, `kitty.conf` decides.
-    #[serde(default)]
     pub terminal_font_size: Option<f32>,
     /// Whether selecting terminal text copies it. When absent, `kitty.conf` decides.
-    #[serde(default)]
     pub terminal_copy_on_select: Option<bool>,
     /// Terminal palette source. Kitty falls back to the theme without a configuration file.
-    #[serde(default)]
     pub terminal_colors: TerminalColorSource,
-    #[serde(default)]
     pub appearance: AppearanceSettings,
 }
 
@@ -52,6 +48,65 @@ impl Settings {
         Self::load(dir)?;
         let text = toml::to_string_pretty(self).map_err(io::Error::other)?;
         crate::config::save_private(dir, "settings.toml", &text)
+    }
+
+    pub(crate) fn import_defaults(&mut self, legacy: Self) {
+        fn fill<T: PartialEq>(value: &mut T, legacy: T, default: T) {
+            if *value == default {
+                *value = legacy;
+            }
+        }
+
+        let default = Self::default();
+        fill(&mut self.editor, legacy.editor, default.editor);
+        fill(
+            &mut self.agent_socket,
+            legacy.agent_socket,
+            default.agent_socket,
+        );
+        fill(
+            &mut self.terminal_font_size,
+            legacy.terminal_font_size,
+            default.terminal_font_size,
+        );
+        fill(
+            &mut self.terminal_copy_on_select,
+            legacy.terminal_copy_on_select,
+            default.terminal_copy_on_select,
+        );
+        fill(
+            &mut self.terminal_colors,
+            legacy.terminal_colors,
+            default.terminal_colors,
+        );
+        let (current, legacy, default) =
+            (&mut self.appearance, legacy.appearance, default.appearance);
+        fill(&mut current.scheme, legacy.scheme, default.scheme);
+        fill(
+            &mut current.light_theme,
+            legacy.light_theme,
+            default.light_theme,
+        );
+        fill(
+            &mut current.dark_theme,
+            legacy.dark_theme,
+            default.dark_theme,
+        );
+        fill(
+            &mut current.glass.enabled,
+            legacy.glass.enabled,
+            default.glass.enabled,
+        );
+        fill(
+            &mut current.glass.chrome,
+            legacy.glass.chrome,
+            default.glass.chrome,
+        );
+        fill(
+            &mut current.glass.content,
+            legacy.glass.content,
+            default.glass.content,
+        );
     }
 }
 
@@ -147,6 +202,23 @@ mod tests {
             Settings::load(dir.path()).unwrap().terminal_colors,
             TerminalColorSource::Theme
         );
+    }
+
+    #[test]
+    fn older_builtin_theme_ids_and_new_fields_load_with_current_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        for appearance in [
+            "theme = 'vscp'",
+            "theme = 'vscp'\nlight_theme = 'vscp'",
+            "light_theme = 'vscp'\ndark_theme = 'vscp'",
+        ] {
+            fs::write(
+                dir.path().join("settings.toml"),
+                format!("obsolete_field = 7\n[appearance]\n{appearance}\nobsolete = true\n"),
+            )
+            .unwrap();
+            assert_eq!(Settings::load(dir.path()).unwrap(), Settings::default());
+        }
     }
 
     #[test]

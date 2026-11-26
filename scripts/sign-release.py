@@ -307,6 +307,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--version", required=True)
     parser.add_argument("--tag", required=True)
     parser.add_argument(
+        "--notes-file",
+        type=pathlib.Path,
+        help="Optional UTF-8 Markdown to include in the signed update manifest",
+    )
+    parser.add_argument(
         "--platform",
         action="append",
         required=True,
@@ -467,6 +472,10 @@ def main() -> int:
             "notes_url": f"https://github.com/{args.repo}/releases/tag/{args.tag}",
             "platforms": platforms_manifest,
         }
+        if args.notes_file is not None:
+            notes = args.notes_file.read_text(encoding="utf-8").strip()
+            if notes:
+                manifest["notes"] = notes
         manifest_path = dist_dir / "manifest.json"
         manifest_path.write_text(
             json.dumps(manifest, indent=2, sort_keys=False) + "\n",

@@ -38,23 +38,23 @@ const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum UpdateError {
-    #[error("Plataforma no soportada para actualizaciones automáticas.")]
+    #[error("Automatic updates are unavailable on this platform.")]
     UnsupportedPlatform,
-    #[error("No se pudo comprobar actualizaciones: {0}")]
+    #[error("Couldn't check for updates: {0}")]
     DownloadFailed(String),
-    #[error("La firma Ed25519 de {0} no es válida.")]
+    #[error("The Ed25519 signature for {0} is invalid.")]
     SignatureInvalid(String),
-    #[error("El manifiesto de actualización no es válido: {0}")]
+    #[error("Invalid update manifest: {0}")]
     InvalidManifest(String),
-    #[error("No hay paquete disponible para esta plataforma ({0}).")]
+    #[error("No update package is available for this platform ({0}).")]
     PlatformMissing(String),
-    #[error("Tamaño del archivo inesperado (esperado {expected}, obtenido {actual}).")]
+    #[error("Unexpected file size (expected {expected}, got {actual}).")]
     SizeMismatch { expected: u64, actual: u64 },
-    #[error("La suma SHA-256 del paquete descargado no coincide.")]
+    #[error("The downloaded package's SHA-256 checksum doesn't match.")]
     ChecksumMismatch,
-    #[error("El paquete descargado no es válido: {0}")]
+    #[error("Invalid downloaded package: {0}")]
     InvalidArchive(String),
-    #[error("No se pudo instalar la actualización: {0}")]
+    #[error("Couldn't install the update: {0}")]
     InstallFailed(String),
     #[error(transparent)]
     Io(#[from] io::Error),
@@ -252,7 +252,7 @@ pub fn check(config: &Config) -> Result<CheckOutcome, UpdateError> {
         .as_deref()
         .ok_or(UpdateError::UnsupportedPlatform)?;
     let current = semver::Version::parse(&config.current_version)
-        .map_err(|err| UpdateError::InvalidManifest(format!("versión actual: {err}")))?;
+        .map_err(|err| UpdateError::InvalidManifest(format!("current version: {err}")))?;
 
     let custom_base = config.base_url.as_deref().map(|u| u.trim_end_matches('/'));
     let base = custom_base.unwrap_or(DEFAULT_BASE_URL);
@@ -290,13 +290,13 @@ pub fn check(config: &Config) -> Result<CheckOutcome, UpdateError> {
 
     if manifest.schema != 1 {
         return Err(UpdateError::InvalidManifest(format!(
-            "esquema no soportado ({})",
+            "unsupported schema ({})",
             manifest.schema
         )));
     }
 
     let remote = semver::Version::parse(&manifest.version)
-        .map_err(|err| UpdateError::InvalidManifest(format!("versión remota: {err}")))?;
+        .map_err(|err| UpdateError::InvalidManifest(format!("remote version: {err}")))?;
 
     if remote <= current {
         return Ok(CheckOutcome::UpToDate);
@@ -528,7 +528,7 @@ fn download_small_file(
     let mut stdout = child
         .stdout
         .take()
-        .ok_or_else(|| UpdateError::DownloadFailed("sin salida de curl".into()))?;
+        .ok_or_else(|| UpdateError::DownloadFailed("no output from curl".into()))?;
 
     let mut file = File::create(dest)?;
     let mut total: u64 = 0;
@@ -543,7 +543,7 @@ fn download_small_file(
             let _ = child.kill();
             let _ = child.wait();
             return Err(UpdateError::DownloadFailed(
-                "la respuesta superó el tamaño máximo permitido".into(),
+                "the response exceeded the size limit".into(),
             ));
         }
         file.write_all(&buf[..read])?;
@@ -555,7 +555,7 @@ fn download_small_file(
     if !status.success() {
         let detail = stderr.trim();
         return Err(UpdateError::DownloadFailed(if detail.is_empty() {
-            format!("curl terminó con código {status}")
+            format!("curl exited with status {status}")
         } else {
             detail.to_owned()
         }));
@@ -581,7 +581,7 @@ fn download_archive_with_progress(
     let mut stdout = child
         .stdout
         .take()
-        .ok_or_else(|| UpdateError::DownloadFailed("sin salida de curl".into()))?;
+        .ok_or_else(|| UpdateError::DownloadFailed("no output from curl".into()))?;
 
     let mut file = File::create(dest)?;
     let mut hasher = Sha256::new();
@@ -600,7 +600,7 @@ fn download_archive_with_progress(
             let _ = child.kill();
             let _ = child.wait();
             return Err(UpdateError::DownloadFailed(
-                "el archivo superó el límite de 512 MiB".into(),
+                "the file exceeded the 512 MiB limit".into(),
             ));
         }
         file.write_all(&buf[..read])?;
@@ -618,7 +618,7 @@ fn download_archive_with_progress(
     if !status.success() {
         let detail = stderr.trim();
         return Err(UpdateError::DownloadFailed(if detail.is_empty() {
-            format!("curl terminó con código {status}")
+            format!("curl exited with status {status}")
         } else {
             detail.to_owned()
         }));
@@ -685,7 +685,7 @@ fn validate_asset_name(name: &str) -> Result<(), UpdateError> {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
     {
         return Err(UpdateError::InvalidManifest(format!(
-            "nombre de archivo no válido: '{name}'"
+            "invalid filename: '{name}'"
         )));
     }
     Ok(())
@@ -698,7 +698,7 @@ fn validate_sha256(digest: &str) -> Result<(), UpdateError> {
             .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
     {
         return Err(UpdateError::InvalidManifest(format!(
-            "SHA-256 no válido: '{digest}'"
+            "Invalid SHA-256 checksum: '{digest}'"
         )));
     }
     Ok(())
@@ -712,7 +712,7 @@ fn validate_download_url(url: &str) -> Result<(), UpdateError> {
         Ok(())
     } else {
         Err(UpdateError::InvalidManifest(format!(
-            "URL de descarga no permitida: '{url}'"
+            "Disallowed download URL: '{url}'"
         )))
     }
 }
@@ -749,7 +749,7 @@ fn validate_tar_entries<'a>(entries: impl IntoIterator<Item = &'a str>) -> Resul
             })
         {
             return Err(UpdateError::InvalidArchive(format!(
-                "ruta peligrosa en el archivo: '{entry}'"
+                "unsafe path in the archive: '{entry}'"
             )));
         }
     }
@@ -785,19 +785,19 @@ fn find_linux_source_dir(extract_dir: &Path) -> Result<PathBuf, UpdateError> {
         }
     }
     Err(UpdateError::InvalidArchive(
-        "no se encontró el binario 'vela' en el paquete".into(),
+        "the package doesn't contain the 'vela' binary".into(),
     ))
 }
 
 fn atomic_replace_binary(src_bin: &Path, dest_bin: &Path) -> Result<(), UpdateError> {
-    let bin_dir = dest_bin.parent().ok_or_else(|| {
-        UpdateError::InstallFailed("no se pudo determinar la carpeta del binario".into())
-    })?;
+    let bin_dir = dest_bin
+        .parent()
+        .ok_or_else(|| UpdateError::InstallFailed("couldn't locate the binary's folder".into()))?;
     let tmp_bin = bin_dir.join(format!(".vela.update.{}", std::process::id()));
     let _ = fs::remove_file(&tmp_bin);
     fs::copy(src_bin, &tmp_bin).map_err(|err| {
         UpdateError::InstallFailed(format!(
-            "sin permisos de escritura en {}: {err}",
+            "no write permission for {}: {err}",
             bin_dir.display()
         ))
     })?;
@@ -805,7 +805,7 @@ fn atomic_replace_binary(src_bin: &Path, dest_bin: &Path) -> Result<(), UpdateEr
     if let Err(err) = fs::rename(&tmp_bin, dest_bin) {
         let _ = fs::remove_file(&tmp_bin);
         return Err(UpdateError::InstallFailed(format!(
-            "no se pudo reemplazar {}: {err}",
+            "couldn't replace {}: {err}",
             dest_bin.display()
         )));
     }
@@ -925,12 +925,12 @@ fn install_macos_bundle(
     let src_app = extract_dir.join("Vela.app");
     if !src_app.is_dir() || !src_app.join("Contents/MacOS/vela").is_file() {
         return Err(UpdateError::InvalidArchive(
-            "el paquete no contiene un Vela.app válido".into(),
+            "the package doesn't contain a valid Vela.app".into(),
         ));
     }
-    let apps_dir = dest_app.parent().ok_or_else(|| {
-        UpdateError::InstallFailed("no se pudo determinar la carpeta de Vela.app".into())
-    })?;
+    let apps_dir = dest_app
+        .parent()
+        .ok_or_else(|| UpdateError::InstallFailed("couldn't locate the Vela.app folder".into()))?;
     let pid = std::process::id();
     let staged_app = apps_dir.join(format!(".Vela.app.new.{pid}"));
     let backup_app = apps_dir.join(format!(".Vela.app.old.{pid}"));
@@ -960,7 +960,7 @@ fn install_macos_bundle(
             if !fallback.status.success() {
                 let _ = fs::remove_dir_all(&staged_app);
                 return Err(UpdateError::InstallFailed(format!(
-                    "sin permisos de escritura en {}",
+                    "no write permission for {}",
                     apps_dir.display()
                 )));
             }
@@ -971,7 +971,7 @@ fn install_macos_bundle(
     if had_existing && let Err(err) = fs::rename(dest_app, &backup_app) {
         let _ = fs::remove_dir_all(&staged_app);
         return Err(UpdateError::InstallFailed(format!(
-            "no se pudo mover el paquete actual: {err}"
+            "couldn't move the current package: {err}"
         )));
     }
 
@@ -981,7 +981,7 @@ fn install_macos_bundle(
         }
         let _ = fs::remove_dir_all(&staged_app);
         return Err(UpdateError::InstallFailed(format!(
-            "no se pudo activar el nuevo paquete: {err}"
+            "couldn't activate the new package: {err}"
         )));
     }
 

@@ -51,7 +51,7 @@ impl Server {
 }
 
 /// Removes the global agent socket from servers that stored the very same
-/// socket, so a single change in Ajustes applies to them. Returns whether any
+/// socket, so a single change in Settings applies to them. Returns whether any
 /// server changed.
 pub fn clear_default_sockets(servers: &mut [Server], default: &Path) -> bool {
     let mut changed = false;
@@ -665,7 +665,7 @@ mod tests {
                 },
                 ..server(Auth::Password)
             },
-            entry("password", "Contraseña", false),
+            entry("password", "Password", false),
         ];
         save(&legacy, servers).unwrap();
 

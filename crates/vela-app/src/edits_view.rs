@@ -94,7 +94,7 @@ impl Workspace {
         match index {
             Ok(index) => self.edits.index = Some(index),
             Err(error) => {
-                self.edits.error = Some(format!("No se pudo leer el índice de ediciones. {error}"));
+                self.edits.error = Some(format!("Couldn't read the edit index: {error}"));
                 return;
             }
         }
@@ -118,9 +118,8 @@ impl Workspace {
                                             .collect::<Vec<_>>()
                                     }
                                     Err(error) => {
-                                        this.edits.error = Some(format!(
-                                            "Error al vigilar las copias locales. {error}"
-                                        ));
+                                        this.edits.error =
+                                            Some(format!("Couldn't watch local copies: {error}"));
                                         cx.notify();
                                         this.edits
                                             .rows()
@@ -141,7 +140,7 @@ impl Workspace {
                 }));
             }
             Err(error) => {
-                self.edits.error = Some(format!("No se pudo iniciar la vigilancia. {error}"))
+                self.edits.error = Some(format!("Couldn't start watching local copies: {error}"))
             }
         }
         for row in self.edits.rows().to_vec() {
@@ -155,7 +154,7 @@ impl Workspace {
         if let Some(watch) = &mut self.edits.watch
             && let Err(error) = watch.add(&row.local_path)
         {
-            self.edits.error = Some(format!("No se pudo vigilar {}. {error}", name(&row.target)));
+            self.edits.error = Some(format!("Couldn't watch {}: {error}", name(&row.target)));
         }
     }
 
@@ -236,7 +235,7 @@ impl Workspace {
                         } else {
                             this.edit_error(
                                 &target,
-                                "Confirma la descarga cuando esté libre la ventana",
+                                "Confirm the download once the current dialog closes",
                                 cx,
                             );
                         }
@@ -340,11 +339,7 @@ impl Workspace {
                 true
             }
             Some(Err(error)) => {
-                self.edit_error(
-                    &target,
-                    format!("No se pudo guardar edits.toml. {error}"),
-                    cx,
-                );
+                self.edit_error(&target, format!("Couldn't save edits.toml: {error}"), cx);
                 false
             }
             None => false,
@@ -661,28 +656,28 @@ impl Workspace {
     ) -> AnyElement {
         let (title, body, confirm, cancel) = match dialog {
             EditDialog::Large(_, remote) => (
-                "Descargar para editar",
+                "Download to Edit",
                 format!(
-                    "Este archivo pesa {}. ¿Descargarlo para editar?",
+                    "This file is {}. Download it to edit?",
                     crate::file_metadata::format_size(remote.stamp.size)
                 ),
-                Some("Descargar"),
-                "Cancelar",
+                Some("Download"),
+                "Cancel",
             ),
             EditDialog::Discard(target) => (
-                "Descartar cambios",
+                "Discard Changes",
                 format!(
-                    "¿Eliminar la copia local de «{}» y descartar sus cambios?",
+                    "Delete the local copy of “{}” and discard its changes?",
                     name(target)
                 ),
-                Some("Descartar cambios"),
-                "Cancelar",
+                Some("Discard Changes"),
+                "Cancel",
             ),
             EditDialog::Conflict(target, stamp) => (
-                "El archivo remoto ha cambiado desde que lo abriste",
+                "The remote file changed since you opened it",
                 target.remote_path.display().to_string(),
-                stamp.as_ref().map(|_| "Sobrescribir remoto"),
-                "Más tarde",
+                stamp.as_ref().map(|_| "Overwrite Remote File"),
+                "Later",
             ),
         };
         let conflict = matches!(dialog, EditDialog::Conflict(..));
@@ -691,7 +686,7 @@ impl Workspace {
             Some(
                 button(
                     "edit-save-copy",
-                    "Guardar remoto como copia",
+                    "Save Remote File as a Copy",
                     Variant::Secondary,
                     theme,
                     cx.listener(move |this, _, window, cx| {
@@ -777,7 +772,7 @@ impl Workspace {
             icon_text_button(
                 "edits",
                 IconName::Edits,
-                "Ediciones",
+                "Edits",
                 if self.edits.popover {
                     Variant::Selected
                 } else {
@@ -833,7 +828,7 @@ impl Workspace {
                 div()
                     .p_3()
                     .text_color(theme.secondary_text)
-                    .child("Sin archivos en edición"),
+                    .child("No files being edited"),
             );
         }
         let panel = div()
@@ -858,7 +853,7 @@ impl Workspace {
                     .px_3()
                     .py_2()
                     .font_weight(FontWeight::MEDIUM)
-                    .child("Ediciones"),
+                    .child("Edits"),
             )
             .child(list)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
@@ -897,9 +892,9 @@ impl Workspace {
     fn edit_row(&self, row: &Edit, i: usize, theme: Theme, cx: &Context<Self>) -> Div {
         let target = &row.target;
         let state = match row.state {
-            State::Synced => ("Sincronizado", theme.success, Some(IconName::Check)),
-            State::Pending => ("Cambios sin subir", theme.warning, None),
-            State::Conflict => ("Conflicto", theme.danger, Some(IconName::Warning)),
+            State::Synced => ("Synced", theme.success, Some(IconName::Check)),
+            State::Pending => ("Unuploaded Changes", theme.warning, None),
+            State::Conflict => ("Conflict", theme.danger, Some(IconName::Warning)),
         };
         let busy = self
             .edits
@@ -976,7 +971,7 @@ impl Workspace {
                     .child(action(
                         "edit-open",
                         IconName::ExternalLink,
-                        "Abrir",
+                        "Open",
                         None,
                         |this, target, window, cx| this.open_edit(target, window, cx),
                     ))
@@ -984,7 +979,7 @@ impl Workspace {
                         bar.child(action(
                             "edit-upload",
                             IconName::Upload,
-                            "Subir ahora",
+                            "Upload Now",
                             None,
                             |this, target, window, cx| {
                                 this.request_upload(target, None, window, cx)
@@ -1001,9 +996,9 @@ impl Workspace {
                         "edit-reveal",
                         IconName::FolderOpen,
                         if cfg!(target_os = "macos") {
-                            "Mostrar en Finder"
+                            "Show in Finder"
                         } else {
-                            "Mostrar en la carpeta"
+                            "Show in Folder"
                         },
                         None,
                         Workspace::reveal_edit,
@@ -1012,7 +1007,7 @@ impl Workspace {
                         bar.child(action(
                             "edit-stop",
                             IconName::Close,
-                            "Dejar de editar",
+                            "Stop Editing",
                             None,
                             |this, target, window, cx| this.remove_edit(target, false, window, cx),
                         ))
@@ -1021,7 +1016,7 @@ impl Workspace {
                         bar.child(action(
                             "edit-discard",
                             IconName::Undo,
-                            "Descartar cambios…",
+                            "Discard Changes…",
                             Some(theme.danger),
                             |this, target, window, cx| {
                                 this.open_dialog(
@@ -1092,14 +1087,14 @@ impl Workspace {
                             .text_color(theme.warning),
                     )
                     .child(if pending == 1 {
-                        "1 archivo con cambios sin subir".into()
+                        "1 file with unuploaded changes".into()
                     } else {
-                        format!("{pending} archivos con cambios sin subir")
+                        format!("{pending} files with unuploaded changes")
                     })
                     .child(
                         button(
                             "edit-review",
-                            "Revisar",
+                            "Review",
                             Variant::Secondary,
                             theme,
                             cx.listener(move |this, _, _, cx| {
@@ -1125,23 +1120,23 @@ impl Workspace {
         {
             let (caption, color, glyph) = match notice {
                 Notice::Opening => (
-                    format!("Abriendo {}…", name(target)),
+                    format!("Opening {}…", name(target)),
                     theme.secondary_text,
                     IconName::Spinner,
                 ),
                 Notice::Uploading => (
-                    format!("Subiendo cambios de {}…", name(target)),
+                    format!("Uploading changes to {}…", name(target)),
                     theme.secondary_text,
                     IconName::Upload,
                 ),
                 Notice::Pending => (
-                    format!("{} · Cambios sin subir", name(target)),
+                    format!("{} · Unuploaded changes", name(target)),
                     theme.warning,
                     IconName::Warning,
                 ),
                 Notice::Uploaded(time) => (
                     format!(
-                        "{} subido · {}",
+                        "{} uploaded · {}",
                         name(target),
                         crate::file_metadata::clock(*time)
                     ),
@@ -1189,7 +1184,7 @@ impl Workspace {
                             bar.child(
                                 button(
                                     "edit-retry",
-                                    "Reintentar",
+                                    "Retry",
                                     Variant::Secondary,
                                     theme,
                                     cx.listener(move |this, _, window, cx| {
@@ -1238,7 +1233,7 @@ pub(super) fn reveal(path: &Path) -> io::Result<()> {
         {
             Ok(())
         } else {
-            Err(io::Error::other("No se pudo mostrar la copia en Finder"))
+            Err(io::Error::other("Couldn't show the copy in Finder"))
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -1251,7 +1246,7 @@ pub(super) fn reveal(path: &Path) -> io::Result<()> {
         {
             Ok(())
         } else {
-            Err(io::Error::other("No se pudo mostrar la carpeta"))
+            Err(io::Error::other("Couldn't show the folder"))
         }
     }
 }

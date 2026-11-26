@@ -110,12 +110,12 @@ fn ratio(bytes: u64, totals: Totals, files: usize) -> f32 {
 
 fn status_label(status: Status, errors: usize) -> String {
     match status {
-        Status::Queued => "En cola".into(),
-        Status::Preparing => "Preparando…".into(),
-        Status::Running => "En curso".into(),
-        Status::Completed => "Completada".into(),
-        Status::CompletedWithErrors => format!("Completada con errores ({errors})"),
-        Status::Cancelled => "Cancelada".into(),
+        Status::Queued => "Queued".into(),
+        Status::Preparing => "Preparing…".into(),
+        Status::Running => "In Progress".into(),
+        Status::Completed => "Completed".into(),
+        Status::CompletedWithErrors => format!("Completed with errors ({errors})"),
+        Status::Cancelled => "Canceled".into(),
         Status::Error => "Error".into(),
     }
 }
@@ -235,7 +235,7 @@ impl Transfers {
 
             while let Ok(event) = job.events.recv().await {
                 if dev::logging() {
-                    dev::log(format_args!("trabajo {id}: {event:?}"));
+                    dev::log(format_args!("job {id}: {event:?}"));
                 }
                 if let Event::Item {
                     destination: Some(path),
@@ -281,7 +281,7 @@ impl Transfers {
                 {
                     row.status = Status::Error;
                     row.details
-                        .push("La sesión terminó durante la transferencia.".into());
+                        .push("The session ended during the transfer.".into());
                     this.conflicts.retain(|pending| pending.job != Some(id));
                     this.restore_focus(window, cx);
                     cx.notify();
@@ -525,8 +525,8 @@ impl Transfers {
                 .flex()
                 .flex_col()
                 .gap_2()
-                .child(metadata("Origen", &conflict.source))
-                .child(metadata("Destino", &conflict.existing))
+                .child(metadata("Source", &conflict.source))
+                .child(metadata("Destination", &conflict.existing))
                 .child(
                     div()
                         .id("apply-all")
@@ -560,7 +560,7 @@ impl Transfers {
                                     )
                                 }),
                         )
-                        .child("Aplicar a todos los conflictos de este trabajo")
+                        .child("Apply to all conflicts in this job")
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_policy(cx)))
                         .on_action(cx.listener(|this, _: &modal::Confirm, _, cx| {
                             cx.stop_propagation();
@@ -574,9 +574,9 @@ impl Transfers {
                 .child(
                     div().flex().flex_wrap().justify_end().gap_2().children(
                         [
-                            ("Sobrescribir", Choice::Overwrite),
-                            ("Omitir", Choice::Skip),
-                            ("Renombrar", Choice::Rename),
+                            ("Overwrite", Choice::Overwrite),
+                            ("Skip", Choice::Skip),
+                            ("Rename", Choice::Rename),
                         ]
                         .into_iter()
                         .filter(|(_, choice)| {
@@ -593,7 +593,7 @@ impl Transfers {
                     div().flex().justify_end().child(
                         Self::dialog_button(
                             "cancel-transfer",
-                            "Cancelar trabajo",
+                            "Cancel Job",
                             theme,
                             cx,
                             |this, window, cx| this.answer(Choice::Cancel, window, cx),
@@ -603,7 +603,7 @@ impl Transfers {
                 );
             (
                 format!(
-                    "Ya existe «{}» en el destino",
+                    "“{}” already exists at the destination",
                     conflict.existing.name.to_string_lossy()
                 ),
                 Some((IconName::Warning, theme.warning)),
@@ -613,19 +613,19 @@ impl Transfers {
         } else if let Some(deletion) = &self.deletion {
             let count = deletion.paths.len();
             let items = if count == 1 {
-                "1 elemento".into()
+                "1 item".into()
             } else {
-                format!("{count} elementos")
+                format!("{count} items")
             };
             let remote = matches!(deletion.source, Source::Remote(_));
             let title = if remote {
-                format!("¿Eliminar {items} de {}?", self.server)
+                format!("Delete {items} from {}?", self.server)
             } else {
-                format!("¿Mover {items} a la Papelera?")
+                format!("Move {items} to the Trash?")
             };
             let body = div().when(remote, |body| {
                 body.text_color(theme.danger)
-                    .child("Esta acción no se puede deshacer.")
+                    .child("This action can't be undone.")
             });
             let footer = div()
                 .flex()
@@ -633,7 +633,7 @@ impl Transfers {
                 .gap_2()
                 .child(Self::dialog_button(
                     "cancel-delete",
-                    "Cancelar",
+                    "Cancel",
                     theme,
                     cx,
                     Self::escape,
@@ -641,11 +641,7 @@ impl Transfers {
                 .child(
                     Self::dialog_button(
                         "confirm-delete",
-                        if remote {
-                            "Eliminar"
-                        } else {
-                            "Mover a la Papelera"
-                        },
+                        if remote { "Delete" } else { "Move to Trash" },
                         theme,
                         cx,
                         Self::delete,
@@ -686,7 +682,7 @@ impl Transfers {
                     return notice.into();
                 }
                 self.rows.last().map_or_else(
-                    || "Transferencias".into(),
+                    || "Transfers".into(),
                     |row| status_label(row.status, row.errors),
                 )
             },
@@ -697,16 +693,16 @@ impl Transfers {
                 match &row.file {
                     Some((index, file)) => {
                         let verb = match row.direction {
-                            Direction::Upload => "Subiendo",
-                            Direction::Download => "Descargando",
+                            Direction::Upload => "Uploading",
+                            Direction::Download => "Downloading",
                         };
                         let name = file
                             .file_name()
                             .unwrap_or(file.as_os_str())
                             .to_string_lossy();
-                        let speed = format!("{:.1}", row.speed).replace('.', ",");
+                        let speed = format!("{:.1}", row.speed);
                         format!(
-                            "{verb} {index} de {} · {name} · {speed} MB/s · {:.0} %",
+                            "{verb} {index} of {} · {name} · {speed} MB/s · {:.0} %",
                             row.totals.files,
                             progress * 100.
                         )
@@ -740,7 +736,7 @@ impl Transfers {
                             div()
                                 .id("transfer-disclosure")
                                 .role(Role::Button)
-                                .aria_label("Cola de transferencias")
+                                .aria_label("Transfer Queue")
                                 .aria_expanded(self.expanded)
                                 .tab_index(0)
                                 .cursor_pointer()
@@ -770,7 +766,7 @@ impl Transfers {
                                 icon_text_button(
                                     "stop-job",
                                     IconName::Close,
-                                    "Cancelar",
+                                    "Cancel",
                                     Variant::Secondary,
                                     None,
                                     theme,
@@ -813,8 +809,8 @@ impl Transfers {
                             .px_2()
                             .children(self.rows.iter().map(|row| {
                                 let (direction, direction_icon) = match row.direction {
-                                    Direction::Upload => ("Subida", IconName::Upload),
-                                    Direction::Download => ("Descarga", IconName::Download),
+                                    Direction::Upload => ("Upload", IconName::Upload),
+                                    Direction::Download => ("Download", IconName::Download),
                                 };
                                 let (status_icon, status_color) = match row.status {
                                     Status::Completed => (Some(IconName::Check), theme.success),
@@ -829,9 +825,9 @@ impl Transfers {
                                     }
                                 };
                                 let files = if row.totals.files == 1 {
-                                    "1 archivo".into()
+                                    "1 file".into()
                                 } else {
-                                    format!("{} archivos", row.totals.files)
+                                    format!("{} files", row.totals.files)
                                 };
                                 let bytes = file_metadata::size(&vela_core::Entry {
                                     name: Default::default(),
@@ -902,7 +898,7 @@ impl Transfers {
                         div().flex().justify_end().p_2().child(
                             button(
                                 "clear-jobs",
-                                "Limpiar",
+                                "Clear",
                                 Variant::Secondary,
                                 theme,
                                 cx.listener(|this, _, _, cx| {
@@ -963,7 +959,7 @@ impl Transfers {
                         .child(
                             icon_button(
                                 "dismiss-error",
-                                "Cerrar",
+                                "Close",
                                 IconName::Close,
                                 Variant::Secondary,
                                 theme,
@@ -1027,10 +1023,10 @@ mod tests {
 
     #[test]
     fn queue_status_and_progress() {
-        assert_eq!(status_label(Status::Queued, 0), "En cola");
+        assert_eq!(status_label(Status::Queued, 0), "Queued");
         assert_eq!(
             status_label(Status::CompletedWithErrors, 2),
-            "Completada con errores (2)"
+            "Completed with errors (2)"
         );
         assert_eq!(
             ratio(

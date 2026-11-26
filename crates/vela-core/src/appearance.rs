@@ -229,7 +229,7 @@ pub fn hex(color: u32) -> String {
 fn invalid(key: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
-        format!("Valor no válido en {key}."),
+        format!("Invalid value for {key}."),
     )
 }
 
@@ -300,7 +300,12 @@ pub fn load_user_themes(dir: &Path) -> (Vec<ThemeDef>, Vec<String>) {
     let mut errors = Vec::new();
     let mut files = match theme_files(dir) {
         Ok(files) => files,
-        Err(error) => return (themes, vec![format!("No se pudo leer themes: {error}")]),
+        Err(error) => {
+            return (
+                themes,
+                vec![format!("Couldn't read the themes folder: {error}")],
+            );
+        }
     };
     files.sort();
     for path in files {
@@ -316,7 +321,7 @@ pub fn load_user_themes(dir: &Path) -> (Vec<ThemeDef>, Vec<String>) {
         match result {
             Ok(theme) => themes.push(theme),
             Err(error) => errors.push(format!(
-                "No se pudo leer {}: {error}",
+                "Couldn't read {}: {error}",
                 path.file_name().unwrap_or_default().to_string_lossy()
             )),
         }
@@ -349,7 +354,7 @@ pub fn import_theme(dir: &Path, source: &Path) -> io::Result<ThemeDef> {
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "Elige un archivo .toml.",
+            "Choose a .toml file.",
         ));
     }
     let (users, _) = load_user_themes(dir);
@@ -381,7 +386,7 @@ pub fn export_theme(theme: &ThemeDef, dest: &Path) -> io::Result<()> {
     let file = dest
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| invalid("ruta"))?;
+        .ok_or_else(|| invalid("path"))?;
     let dir = dest
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -556,27 +561,27 @@ pub fn builtin_themes() -> Vec<ThemeDef> {
     [
         ("Vela", VELA_LIGHT, VELA_DARK),
         (
-            "Frambuesa",
+            "Raspberry",
             tinted(VELA_LIGHT, [0xfcf6fa, 0xf6edf4, 0xfffafd, 0x99185f]),
             tinted(VELA_DARK, [0x1f1a24, 0x261e2a, 0x231d27, 0xf08dbd]),
         ),
         (
-            "Bosque",
+            "Forest",
             tinted(VELA_LIGHT, [0xf5faf6, 0xeaf3ed, 0xf9fdf9, 0x206641]),
             tinted(VELA_DARK, [0x171f1b, 0x1e2922, 0x1b251f, 0x76d5a2]),
         ),
         (
-            "Océano",
+            "Ocean",
             tinted(VELA_LIGHT, [0xf3f9fc, 0xe9f2f8, 0xf9fcff, 0x195f99]),
             tinted(VELA_DARK, [0x171f2a, 0x1d2937, 0x1c2532, 0x80baf4]),
         ),
         (
-            "Ámbar",
+            "Amber",
             tinted(VELA_LIGHT, [0xfcf8f1, 0xf6eee0, 0xfffcf7, 0x975019]),
             tinted(VELA_DARK, [0x241f18, 0x2c251c, 0x29231a, 0xf1b273]),
         ),
         (
-            "Lavanda",
+            "Lavender",
             tinted(VELA_LIGHT, [0xf8f6fd, 0xf0ebf8, 0xfcfaff, 0x6547ab]),
             tinted(VELA_DARK, [0x201c2a, 0x282236, 0x251f30, 0xbda5fa]),
         ),
@@ -707,6 +712,27 @@ mod tests {
             ("vela-3", "Vela (3)")
         );
         assert_eq!(new_theme_id("✨", ["tema"]), "tema-2");
+    }
+
+    #[test]
+    fn english_theme_names_keep_legacy_ids_reserved() {
+        let themes = builtin_themes();
+        assert_eq!(
+            themes
+                .iter()
+                .map(|theme| theme.id.as_str())
+                .collect::<Vec<_>>(),
+            BUILTIN_IDS
+        );
+        assert_eq!(
+            themes
+                .iter()
+                .map(|theme| theme.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Vela", "Raspberry", "Forest", "Ocean", "Amber", "Lavender"]
+        );
+        assert_eq!(new_theme_id("OCEANO", []), "oceano-2");
+        assert_eq!(new_theme_id("Ocean", ["ocean"]), "ocean-2");
     }
 
     #[test]

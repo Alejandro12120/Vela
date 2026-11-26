@@ -507,6 +507,32 @@ async fn within<T>(future: impl Future<Output = Result<T, Error>>) -> T {
 }
 
 #[tokio::test]
+async fn creates_empty_files_exclusively() {
+    let fixture = Fixture::start();
+    let client = client();
+    let session = trust_first(&client, fixture.spec("b.pub")).await;
+    let path = fixture.path("untitled.txt");
+    within(session.create_file(path.clone())).await;
+    assert_eq!(fs::read(&path).unwrap(), b"");
+
+    fs::write(&path, b"keep this").unwrap();
+    let link = fixture.path("dangling");
+    symlink("missing", &link).unwrap();
+    for occupied in [&path, &link] {
+        let result = timeout(SHORT_WAIT, session.create_file(occupied.clone()))
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, Err(Error::Io(error)) if error.kind() == io::ErrorKind::AlreadyExists)
+        );
+    }
+    assert_eq!(fs::read(&path).unwrap(), b"keep this");
+    assert_eq!(fs::read_link(link).unwrap(), Path::new("missing"));
+    assert!(!fixture.path("missing").exists());
+    disconnect(&session).await;
+}
+
+#[tokio::test]
 async fn transfers_and_edits_files_in_place() {
     let fixture = Fixture::start();
     let client = client();
@@ -1084,8 +1110,8 @@ async fn recursive_queue_round_trip_preserves_content_modes_and_mtimes() {
     assert_eq!(summary.totals.bytes, 219);
     assert_eq!(summary.copied, 4);
     assert_eq!(summary.skipped, 2);
-    assert!(results.contains(&ItemResult::Skipped("Omitido: enlace a carpeta".into())));
-    assert!(results.contains(&ItemResult::Skipped("Omitido: enlace roto".into())));
+    assert!(results.contains(&ItemResult::Skipped("Skipped: link to a folder".into())));
+    assert!(results.contains(&ItemResult::Skipped("Skipped: broken link".into())));
     let remote = remote.join("origen");
     symlink(FILES[0], remote.join("enlace remoto")).unwrap();
     symlink("anidada", remote.join("carpeta enlace")).unwrap();
@@ -1604,7 +1630,7 @@ async fn remote_edit_watches_saves_and_preserves_the_remote_inode() {
         b"someone else's remote version\n"
     );
     let copy = within(edit.save_remote_copy(&session)).await;
-    assert_eq!(copy.file_name().unwrap(), "archivo # ñ (remoto).txt");
+    assert_eq!(copy.file_name().unwrap(), "archivo # ñ (remote).txt");
     assert_eq!(fs::read(&copy).unwrap(), fs::read(&remote).unwrap());
     assert_eq!(fs::read(&edit.local_path).unwrap(), b"my local version\n");
     assert_eq!(index.get(&target).unwrap().state, State::Conflict);

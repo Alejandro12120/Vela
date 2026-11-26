@@ -9,18 +9,19 @@ use crate::theme::Theme;
 /// One Tab stop with arrow-key navigation, like a native radio group.
 pub fn segmented(
     id: &'static str,
-    options: &[&'static str],
+    label: &'static str,
+    options: &[(&'static str, Option<&'static str>)],
     selected: usize,
     theme: Theme,
     on_select: impl Fn(usize, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
     let on_select = Rc::new(on_select);
     let key_select = on_select.clone();
-    let len = options.len();
+    let enabled: Vec<_> = options.iter().map(|(_, reason)| reason.is_none()).collect();
     div()
         .id(id)
         .role(Role::RadioGroup)
-        .aria_label(options.join(" | "))
+        .aria_label(label)
         .tab_index(0)
         .flex()
         .flex_none()
@@ -33,29 +34,34 @@ pub fn segmented(
         .bg(theme.panel)
         .focus(move |style| style.border_color(theme.accent))
         .on_key_down(move |event: &KeyDownEvent, window, cx| {
-            let Some(next) = step_segment(event.keystroke.key.as_str(), selected, len) else {
+            let Some(next) = step_segment(event.keystroke.key.as_str(), selected, &enabled) else {
                 return;
             };
             cx.stop_propagation();
             key_select(next, window, cx);
         })
-        .children(options.iter().enumerate().map(|(index, label)| {
-            let on_select = on_select.clone();
-            segment(
-                id,
-                index,
-                label,
-                selected == index,
-                theme,
-                move |window, cx| on_select(index, window, cx),
-            )
-        }))
+        .children(
+            options
+                .iter()
+                .enumerate()
+                .map(|(index, (label, disabled_reason))| {
+                    let on_select = on_select.clone();
+                    segment(
+                        id,
+                        index,
+                        (label, *disabled_reason),
+                        selected == index,
+                        theme,
+                        move |window, cx| on_select(index, window, cx),
+                    )
+                }),
+        )
 }
 
 fn segment(
     group: &'static str,
     index: usize,
-    label: &'static str,
+    (label, disabled_reason): (&'static str, Option<&'static str>),
     selected: bool,
     theme: Theme,
     on_select: impl Fn(&mut Window, &mut App) + 'static,
@@ -66,7 +72,6 @@ fn segment(
         .aria_label(label)
         .aria_selected(selected)
         .flex_none()
-        .cursor_pointer()
         .px(px(10.))
         .py(px(4.))
         .rounded(px(5.))
@@ -78,26 +83,37 @@ fn segment(
                 .bg(theme.hover)
                 .text_color(theme.text)
         })
-        .when(!selected, |segment| {
+        .when(!selected && disabled_reason.is_none(), |segment| {
             segment
                 .text_color(theme.secondary_text)
                 .hover(move |style| style.bg(theme.hover))
         })
+        .when_some(disabled_reason, |segment, reason| {
+            segment
+                .aria_description(reason)
+                .text_color(theme.secondary_text)
+                .opacity(0.55)
+        })
+        .when(disabled_reason.is_none(), |segment| {
+            segment
+                .cursor_pointer()
+                .on_click(move |_: &ClickEvent, window, cx| on_select(window, cx))
+        })
         .child(div().font_weight(FontWeight::MEDIUM).child(label))
-        .on_click(move |_: &ClickEvent, window, cx| on_select(window, cx))
 }
 
 /// Left/Right and Up/Down wrap around the group. Other keys do not move.
-fn step_segment(key: &str, selected: usize, len: usize) -> Option<usize> {
-    if len == 0 {
-        return None;
-    }
+fn step_segment(key: &str, selected: usize, enabled: &[bool]) -> Option<usize> {
     let delta = match key {
         "right" | "down" => 1isize,
         "left" | "up" => -1,
         _ => return None,
     };
-    Some((selected as isize + delta).rem_euclid(len as isize) as usize)
+    (1..enabled.len())
+        .map(|step| {
+            (selected as isize + delta * step as isize).rem_euclid(enabled.len() as isize) as usize
+        })
+        .find(|&index| enabled[index])
 }
 
 #[cfg(test)]
@@ -106,11 +122,17 @@ mod tests {
 
     #[test]
     fn arrows_wrap_and_other_keys_do_not_move() {
-        assert_eq!(step_segment("right", 0, 2), Some(1));
-        assert_eq!(step_segment("left", 1, 2), Some(0));
-        assert_eq!(step_segment("down", 1, 3), Some(2));
-        assert_eq!(step_segment("up", 0, 3), Some(2));
-        assert_eq!(step_segment("enter", 0, 2), None);
-        assert_eq!(step_segment("right", 0, 0), None);
+        assert_eq!(step_segment("right", 0, &[true, true]), Some(1));
+        assert_eq!(step_segment("left", 1, &[true, true]), Some(0));
+        assert_eq!(step_segment("down", 1, &[true, true, true]), Some(2));
+        assert_eq!(step_segment("up", 0, &[true, true, true]), Some(2));
+        assert_eq!(step_segment("enter", 0, &[true, true]), None);
+        assert_eq!(step_segment("right", 0, &[]), None);
+    }
+
+    #[test]
+    fn arrows_skip_disabled_segments() {
+        assert_eq!(step_segment("right", 0, &[true, false]), None);
+        assert_eq!(step_segment("right", 0, &[true, false, true]), Some(2));
     }
 }

@@ -9,7 +9,7 @@ use std::{
 };
 
 use futures_lite::StreamExt;
-use openssh_sftp_client::{Sftp, SftpOptions, metadata::MetaData};
+use openssh_sftp_client::{Sftp, SftpOptions, error::SftpErrorKind, metadata::MetaData};
 use tokio::{
     fs,
     io::{AsyncReadExt, AsyncWriteExt},
@@ -130,9 +130,7 @@ pub(crate) async fn read_dir(sftp: &Sftp, path: &Path) -> Result<Vec<Entry>, Err
             if !matches!(name.components().next(), Some(Component::Normal(_)))
                 || name.file_name() != Some(name.as_os_str())
             {
-                return Err(Error::Sftp(
-                    "Nombre de archivo inválido en el listado remoto".into(),
-                ));
+                return Err(Error::Sftp("Invalid filename in the remote listing".into()));
             }
             entries.push(entry(name.as_os_str().to_owned(), item.metadata()));
         }
@@ -168,6 +166,24 @@ pub(crate) async fn stat(sftp: &Sftp, path: &Path) -> Result<Entry, Error> {
         entry.symlink_target_kind = fs.metadata(path).await.ok().map(|meta| kind(&meta));
     }
     Ok(entry)
+}
+
+pub(crate) async fn create_file(sftp: &Sftp, path: &Path) -> Result<(), Error> {
+    match sftp.options().write(true).create_new(true).open(path).await {
+        Ok(file) => Ok(file.close().await?),
+        Err(error) => {
+            // SFTP v3 reports EEXIST as a generic Failure. LSTAT also detects
+            // occupied names that are dangling symlinks.
+            if matches!(
+                error,
+                openssh_sftp_client::Error::SftpError(SftpErrorKind::Failure, _)
+            ) && sftp.fs().symlink_metadata(path).await.is_ok()
+            {
+                return Err(io::Error::from(io::ErrorKind::AlreadyExists).into());
+            }
+            Err(error.into())
+        }
+    }
 }
 
 pub(crate) fn check_cancel(cancel: &AtomicBool) -> Result<(), Error> {

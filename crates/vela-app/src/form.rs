@@ -31,22 +31,22 @@ pub enum Field {
 }
 
 const FIELDS: [(Field, &str, &str); 6] = [
-    (Field::Name, "Nombre (opcional)", "Igual que el host"),
-    (Field::Host, "Host", "servidor.ejemplo"),
-    (Field::Port, "Puerto", "22"),
-    (Field::User, "Usuario", ""),
-    (Field::Socket, "Socket del agente", ""),
+    (Field::Name, "Name (optional)", "Same as Host"),
+    (Field::Host, "Host", "server.example.com"),
+    (Field::Port, "Port", "22"),
+    (Field::User, "Username", ""),
+    (Field::Socket, "Agent Socket", ""),
     (
         Field::RemotePath,
-        "Carpeta inicial",
-        "Carpeta personal del servidor",
+        "Starting Folder",
+        "Home folder on the server",
     ),
 ];
 
 type FieldError = (Field, &'static str);
 
-const NO_KEY: &str = "Elige una clave";
-const INVALID_FILE: &str = "El archivo no es una clave pública válida.";
+const NO_KEY: &str = "Choose a key";
+const INVALID_FILE: &str = "This file isn't a valid public key.";
 const UNLOCK_HINT_AFTER: Duration = Duration::from_secs(2);
 
 /// The key chosen for agent authentication.
@@ -193,7 +193,7 @@ impl Form {
         });
         let socket_placeholder = effective_socket
             .map(|path| vela_core::path::abbreviate_path(path, 40))
-            .unwrap_or_else(|| "Ningún agente detectado".to_owned());
+            .unwrap_or_else(|| "No SSH agent found".to_owned());
         let inputs = FIELDS.map(|(field, label, placeholder)| {
             let placeholder = if field == Field::Socket {
                 socket_placeholder.clone()
@@ -347,7 +347,7 @@ impl Form {
         {
             "Bitwarden"
         } else {
-            "Agente SSH"
+            "SSH Agent"
         }
     }
 
@@ -357,7 +357,7 @@ impl Form {
             Keys::Ready(keys) if keys.is_empty() => ("bloqueado", theme.warning),
             Keys::Ready(_) => ("disponible", theme.success),
             Keys::Failed(error) => match error {
-                AgentError::Unavailable => ("no encontrado", theme.secondary_text),
+                AgentError::Unavailable => ("not found", theme.secondary_text),
                 AgentError::Refused | AgentError::Timeout => ("bloqueado", theme.warning),
                 AgentError::Protocol(_) => ("error", theme.danger),
             },
@@ -387,7 +387,7 @@ impl Form {
             rows.push(Row {
                 pick: Identity::Stored(path.clone()),
                 key: key.clone(),
-                note: Some("No está en Bitwarden ahora mismo"),
+                note: Some("Currently unavailable in Bitwarden"),
             });
         }
         rows.extend(listed.iter().map(|key| Row {
@@ -474,7 +474,7 @@ impl Form {
                 .flex()
                 .items_center()
                 .gap_1()
-                .child(div().font_weight(FontWeight::MEDIUM).child("Nombre"))
+                .child(div().font_weight(FontWeight::MEDIUM).child("Name"))
                 .child(
                     div()
                         .text_size(px(13.))
@@ -512,10 +512,11 @@ impl Form {
             .flex_col()
             .items_start()
             .gap_2()
-            .child(icon_label(IconName::Lock, "Autenticación", theme))
+            .child(icon_label(IconName::Lock, "Authentication", theme))
             .child(segmented(
                 "form-auth",
-                &["Clave SSH", "Contraseña"],
+                "Authentication",
+                &[("SSH Key", None), ("Password", None)],
                 if self.agent { 0 } else { 1 },
                 theme,
                 move |index, window, cx| listener(&index, window, cx),
@@ -551,7 +552,7 @@ impl Form {
                         open,
                         true,
                     ))
-                    .child("Opciones avanzadas")
+                    .child("Advanced Options")
                     .on_click(cx.listener(|this, _, window, cx| {
                         if let Some(form) = this.editing() {
                             form.toggle_advanced();
@@ -603,7 +604,7 @@ impl Form {
             .child(
                 crate::components::button::icon_button(
                     "refresh-keys",
-                    "Volver a consultar",
+                    "Check Again",
                     IconName::Refresh,
                     Variant::Secondary,
                     theme,
@@ -618,7 +619,7 @@ impl Form {
         let list = div()
             .id("agent-keys")
             .role(Role::ListBox)
-            .aria_label("Claves de Bitwarden")
+            .aria_label("Bitwarden Keys")
             .max_h(px(170.))
             .overflow_y_scroll()
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
@@ -660,7 +661,7 @@ impl Form {
                 .hover(move |style| style.bg(theme.hover))
                 .focus(move |style| style.border_color(theme.accent))
                 .child(icon(IconName::Plus).size(px(14.)).text_color(theme.accent))
-                .child("Usar un archivo de clave…")
+                .child("Use a Key File…")
                 .on_click(cx.listener(|this, _, window, cx| this.choose_identity(window, cx))),
         };
 
@@ -668,7 +669,7 @@ impl Form {
             .flex()
             .flex_col()
             .gap_1()
-            .child(icon_label(IconName::Key, "Clave", theme))
+            .child(icon_label(IconName::Key, "Key", theme))
             .child(
                 div()
                     .flex()
@@ -706,33 +707,27 @@ impl Form {
                                 .mt(px(1.))
                                 .text_color(theme.warning),
                         )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .min_w_0()
-                                .when(since.elapsed() >= UNLOCK_HINT_AFTER, |text| {
-                                    text.child("Si Bitwarden pide desbloquear, hazlo y espera.")
-                                }),
-                        ),
+                        .child(div().flex().flex_col().gap_1().min_w_0().when(
+                            since.elapsed() >= UNLOCK_HINT_AFTER,
+                            |text| {
+                                text.child(
+                                    "If Bitwarden asks you to unlock it, unlock it and wait.",
+                                )
+                            },
+                        )),
                 );
             }
             Keys::Ready(keys) if keys.is_empty() => {
-                "Bitwarden no tiene claves SSH disponibles o está bloqueado."
+                "Bitwarden is locked or has no available SSH keys."
             }
             Keys::Ready(_) => return None,
             Keys::Failed(error) => match error {
                 AgentError::Unavailable => {
-                    "No se encuentra el agente SSH de Bitwarden. Abre Bitwarden y activa el agente SSH en Ajustes."
+                    "Bitwarden SSH agent not found. Open Bitwarden and enable the SSH agent in Settings."
                 }
-                AgentError::Refused => {
-                    "Bitwarden rechazó la consulta. Desbloquéalo e inténtalo de nuevo."
-                }
-                AgentError::Timeout => {
-                    "Bitwarden no respondió a tiempo. Desbloquéalo e inténtalo de nuevo."
-                }
-                AgentError::Protocol(_) => "El agente SSH respondió de forma inesperada.",
+                AgentError::Refused => "Bitwarden rejected the request. Unlock it and try again.",
+                AgentError::Timeout => "Bitwarden didn't respond in time. Unlock it and try again.",
+                AgentError::Protocol(_) => "The SSH agent sent an unexpected response.",
             },
         };
         let _ = cx;
@@ -806,7 +801,7 @@ fn key_row(
     cx: &Context<Workspace>,
 ) -> Stateful<Div> {
     let name = if row.key.comment.is_empty() {
-        "Sin nombre".to_owned()
+        "Untitled".to_owned()
     } else {
         row.key.comment.clone()
     };
@@ -917,7 +912,7 @@ fn file_row(
         )
         .child(link(
             "change-file",
-            "Cambiar…",
+            "Change…",
             theme,
             cx.listener(|this, _, window, cx| this.choose_identity(window, cx)),
         ))
@@ -980,7 +975,7 @@ fn validate(
         || host.starts_with('-')
         || host.contains(|c: char| c.is_whitespace() || c.is_control() || matches!(c, '@' | '/'))
     {
-        fields.push((Field::Host, "Escribe un nombre de host o una dirección IP."));
+        fields.push((Field::Host, "Enter a hostname or IP address."));
     }
     let valid_port = port.bytes().all(|byte| byte.is_ascii_digit());
     let port = port
@@ -988,10 +983,10 @@ fn validate(
         .ok()
         .filter(|port| valid_port && *port > 0);
     if port.is_none() {
-        fields.push((Field::Port, "Usa un número del 1 al 65535."));
+        fields.push((Field::Port, "Enter a number from 1 to 65535."));
     }
     if user.is_empty() || user.contains(|c: char| c.is_whitespace() || c.is_control() || c == '@') {
-        fields.push((Field::User, "Escribe un usuario válido."));
+        fields.push((Field::User, "Enter a valid username."));
     }
     // The agent key's file is only known once it is stored, so it stays empty.
     let (identity_pub, key) = match (agent, identity) {
@@ -1066,7 +1061,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [Field::Host, Field::Port, Field::User]
         );
-        assert_eq!(errors.key, Some("Elige una clave"));
+        assert_eq!(errors.key, Some("Choose a key"));
         for port in ["0", "+22", "22.5", "dos"] {
             assert!(validate(["S", "host", port, "user", "", ""], false, &Identity::None).is_err());
         }
@@ -1076,14 +1071,14 @@ mod tests {
     fn agent_mode_needs_a_key_or_a_file() {
         let values = ["S", "host", "22", "user", "", ""];
         let error = |identity| validate(values, true, &identity).unwrap_err().key;
-        assert_eq!(error(Identity::None), Some("Elige una clave"));
+        assert_eq!(error(Identity::None), Some("Choose a key"));
         assert_eq!(
             error(Identity::File {
                 path: "/tmp/mala.pub".into(),
                 key: None,
                 chosen: true
             }),
-            Some("El archivo no es una clave pública válida.")
+            Some("This file isn't a valid public key.")
         );
         // The path a server already had is kept even if the file is gone.
         assert!(
@@ -1128,7 +1123,7 @@ mod tests {
             }
         );
 
-        let agent_key = key("Servidor");
+        let agent_key = key("Server");
         let submission = validate(
             ["Casa", "host", "22", "ana", "/tmp/agente", ""],
             true,
@@ -1192,7 +1187,7 @@ mod tests {
         let submission = validate(
             ["", "host", "22", "ana", "   ", ""],
             true,
-            &Identity::Agent(key("Servidor")),
+            &Identity::Agent(key("Server")),
         )
         .unwrap();
         assert_eq!(

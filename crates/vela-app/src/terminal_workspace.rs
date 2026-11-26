@@ -107,14 +107,14 @@ impl Workspace {
             terminal.update(cx, |terminal, cx| terminal.start(args, window, cx));
         } else {
             let error = if view.alternate_screen() {
-                Some("La terminal está ocupada")
+                Some("The terminal is busy")
             } else if run
                 .directory
                 .chars()
                 .chain(run.name.chars())
                 .any(char::is_control)
             {
-                Some("El nombre contiene caracteres de control. Usa «Ejecutar en Kitty».")
+                Some("The filename contains control characters. Use “Run in Kitty.”")
             } else {
                 None
             };

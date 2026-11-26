@@ -35,7 +35,7 @@ mod pasteboard {
     pub fn write(_: &[(PathBuf, bool)]) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "Portapapeles de archivos no disponible",
+            "File clipboard unavailable",
         ))
     }
 }
@@ -49,8 +49,8 @@ pub(crate) enum Purpose {
 impl Purpose {
     pub fn caption(self) -> &'static str {
         match self {
-            Self::Copy => "Preparando para copiar…",
-            Self::Drag => "Preparando para arrastrar…",
+            Self::Copy => "Preparing to copy…",
+            Self::Drag => "Preparing to drag…",
         }
     }
 }
@@ -154,13 +154,13 @@ pub fn quit_cleanup(cx: &mut App) -> impl FnOnce() + use<> {
             if staging::referenced(directory.path(), &paths) {
                 directory.keep();
             } else if let Err(error) = directory.remove() {
-                dev::log(format_args!("caché de Finder: {error}"));
+                dev::log(format_args!("Finder cache: {error}"));
             }
         }
         if let Some(root) = root
             && let Err(error) = staging::cleanup(&root, &paths)
         {
-            dev::log(format_args!("caché de Finder: {error}"));
+            dev::log(format_args!("Finder cache: {error}"));
         }
     }
 }
@@ -174,7 +174,7 @@ fn cleanup(cx: &App) {
             Ok(())
         });
         if let Err(error) = result {
-            dev::log(format_args!("caché de Finder: {error}"));
+            dev::log(format_args!("Finder cache: {error}"));
         }
     }
 }
@@ -403,21 +403,17 @@ impl Pane {
                     !request.cancelled.get() && paths == &drag.paths
                 });
             dev::log(format_args!(
-                "arrastre externo remoto: sin payload (preparando={pending})"
+                "remote drag out: no payload (preparing={pending})"
             ));
             if pending && let Some(operations) = &self.operations {
                 operations.transfers.update(cx, |queue, cx| {
-                    queue.finder_notice(
-                        "Preparando… vuelve a arrastrar cuando termine",
-                        window,
-                        cx,
-                    );
+                    queue.finder_notice("Preparing… try dragging again when ready", window, cx);
                 });
             }
             return None;
         };
         dev::log(format_args!(
-            "arrastre externo {:?}: {} rutas",
+            "drag out {:?}: {} paths",
             drag.side,
             entries.len()
         ));
@@ -484,11 +480,7 @@ impl Pane {
                     window,
                     cx,
                 ),
-                None => queue.finder_notice(
-                    "Pegar archivos locales aquí no está disponible",
-                    window,
-                    cx,
-                ),
+                None => queue.finder_notice("Pasting local files here is unavailable", window, cx),
             });
         }
     }
@@ -625,11 +617,11 @@ impl Pane {
                         return match status {
                             Status::Cancelled => Ok(None),
                             Status::Completed if !staged.urls.is_empty() => Ok(Some(staged)),
-                            _ => Err("No se pudieron preparar los archivos para Finder".into()),
+                            _ => Err("Couldn't prepare the files for Finder".into()),
                         };
                     }
                 }
-                Err("La sesión terminó durante la preparación".into())
+                Err("The session ended while preparing the files".into())
             }
             .await;
             let _ = pane.update_in(cx, |pane, window, cx| {
@@ -694,15 +686,15 @@ impl Pane {
                 return;
             }
             dev::log(format_args!(
-                "Finder: portapapeles listo ({} rutas)",
+                "Finder: clipboard ready ({} paths)",
                 staged.urls.len()
             ));
             cx.global_mut::<FinderClipboard>().current = Some(ClipboardCopy { staged, session });
             cleanup(cx);
-            "Listo para pegar en Finder"
+            "Ready to paste in Finder"
         } else {
             self.finder.ready.insert(paths, staged);
-            "Listo para arrastrar"
+            "Ready to drag"
         };
         queue.update(cx, |queue, cx| queue.finder_notice(message, window, cx));
     }
@@ -710,7 +702,7 @@ impl Pane {
 
 fn size_message(bytes: u64) -> String {
     let size = file_metadata::format_size(bytes);
-    format!("Demasiado grande para copiar al portapapeles ({size}). Usa Descargar.")
+    format!("Too large to copy to the clipboard ({size}). Use Download.")
 }
 
 #[cfg(test)]

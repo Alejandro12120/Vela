@@ -69,7 +69,7 @@ fn main() {
             terminal::view::bind_keys(cx);
             components::text_input::bind_keys(cx);
             cx.bind_keys([keybindings::binding(cx, "secondary-q", Quit, None)]);
-            cx.set_menus([Menu::new("Vela").items([MenuItem::action("Salir de Vela", Quit)])]);
+            cx.set_menus([Menu::new("Vela").items([MenuItem::action("Quit Vela", Quit)])]);
 
             cx.set_global(appearance::Appearance::default());
             let dir = dev::config_directory().ok();
@@ -80,7 +80,7 @@ fn main() {
                         Ok(true) => dev::log("migrated the vSCP configuration directory"),
                         Ok(false) => {}
                         Err(error) => dev::log(format_args!(
-                            "no se pudo migrar la configuración de vSCP: {error}"
+                            "couldn't migrate the vSCP configuration: {error}"
                         )),
                     }
                 }
@@ -138,7 +138,7 @@ fn main() {
                                 workspace
                             },
                         )
-                        .expect("No se pudo abrir la ventana de Vela");
+                        .expect("Couldn't open the Vela window");
                     cx.on_action(move |_: &Quit, cx| {
                         if window
                             .update(cx, |workspace, window, cx| {

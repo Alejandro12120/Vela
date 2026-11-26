@@ -60,7 +60,7 @@ impl Kitty {
                 .any(|name| crate::theme::family_key(name) == key)
         {
             crate::dev::log(format!(
-                "Terminal: fuente {} no instalada. Se usa {fallback}.",
+                "Terminal: font {} isn't installed. Using {fallback}.",
                 self.family
             ));
             self.family = fallback.into();

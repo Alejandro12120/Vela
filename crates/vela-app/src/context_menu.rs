@@ -15,6 +15,7 @@ use crate::{
 #[derive(Clone, Copy)]
 pub enum Action {
     NewFolder,
+    NewFile,
     Rename,
     Run,
     RunInKitty,
@@ -23,7 +24,7 @@ pub enum Action {
     Refresh,
 }
 
-/// Whether "Ejecutar" is offered for the selection.
+/// Whether "Run" is offered for the selection.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum RunState {
     Hidden,
@@ -80,14 +81,21 @@ impl Menu {
             Item::new(
                 Action::NewFolder,
                 IconName::FolderPlus,
-                "Nueva carpeta",
+                "New Folder",
                 crate::keybindings::shortcut("⌘⇧N", "Ctrl+⇧N"),
+                true,
+            ),
+            Item::new(
+                Action::NewFile,
+                IconName::FilePlus,
+                "New Text File",
+                "",
                 true,
             ),
             Item::new(
                 Action::Rename,
                 IconName::Pencil,
-                "Renombrar",
+                "Rename",
                 "↵",
                 self.on_row && selected == 1,
             ),
@@ -96,7 +104,7 @@ impl Menu {
             actions.push(Item::new(
                 Action::Run,
                 IconName::Play,
-                "Ejecutar",
+                "Run",
                 "",
                 matches!(run, RunState::Enabled | RunState::Remote),
             ));
@@ -105,7 +113,7 @@ impl Menu {
             actions.push(Item::new(
                 Action::RunInKitty,
                 IconName::ExternalLink,
-                "Ejecutar en Kitty",
+                "Run in Kitty",
                 "",
                 true,
             ));
@@ -114,22 +122,22 @@ impl Menu {
             Item::new(
                 Action::Delete,
                 IconName::Trash,
-                "Eliminar…",
-                crate::keybindings::shortcut("⌘⌫", "Supr"),
+                "Delete…",
+                crate::keybindings::shortcut("⌘⌫", "Delete"),
                 self.on_row && selected > 0,
             )
             .danger(),
             Item::new(
                 Action::Copy,
                 copy_icon,
-                "Copiar al otro panel",
+                "Copy to Other Pane",
                 "F5",
                 self.on_row && selected > 0,
             ),
             Item::new(
                 Action::Refresh,
                 IconName::Refresh,
-                "Refrescar",
+                "Refresh",
                 crate::keybindings::shortcut("⌘R", "Ctrl+R"),
                 true,
             ),

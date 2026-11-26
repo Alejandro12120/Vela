@@ -122,7 +122,7 @@ impl Source {
     fn label(&self) -> &'static str {
         match self {
             Self::Local => "Local",
-            Self::Remote(_) => "Remoto",
+            Self::Remote(_) => "Remote",
         }
     }
 
@@ -176,8 +176,8 @@ impl Source {
                             .await)
                     }
                     Err(Error::Sftp(message)) => Err(match message.trim() {
-                        "Permission denied" => "Permiso denegado".into(),
-                        "No such file" => "La ruta no existe".into(),
+                        "Permission denied" => "Permission denied".into(),
+                        "No such file" => "Path not found".into(),
                         _ => message,
                     }),
                     Err(error) => Err(error.to_string()),
@@ -292,8 +292,8 @@ impl Pane {
     ) -> Self {
         let expanded = memory.borrow().get(&root).cloned().unwrap_or_default();
         let label = match &source {
-            Source::Local => "Ruta local",
-            Source::Remote(_) => "Ruta remota",
+            Source::Local => "Local Path",
+            Source::Remote(_) => "Remote Path",
         };
         let dev_file_drag = dev::file_drag(source.side());
         Self {
@@ -460,7 +460,7 @@ impl Pane {
                         }
                         this.report_rows(window);
                     }
-                    Err(error) => this.path_error = Some(format!("No se puede leer: {error}")),
+                    Err(error) => this.path_error = Some(format!("Couldn't read: {error}")),
                 }
                 cx.notify();
             });
@@ -505,7 +505,7 @@ impl Pane {
         let text = input.value();
         if text.is_empty() {
             self.location.take();
-            self.path_error = Some("Introduce una ruta.".into());
+            self.path_error = Some("Enter a path.".into());
             cx.notify();
             return;
         }
@@ -543,7 +543,7 @@ impl Pane {
             let _ = this.update_in(cx, |this, window, cx| {
                 if this.finish_location(revision) {
                     if let Err(error) = &listings[0].1 {
-                        this.path_error = Some(format!("No se puede leer: {error}"));
+                        this.path_error = Some(format!("Couldn't read: {error}"));
                     } else {
                         this.tree_revision += 1;
                         this.branch_revisions.clear();
@@ -669,7 +669,7 @@ impl Pane {
             .child(
                 icon_button(
                     "back",
-                    "Atrás",
+                    "Back",
                     IconName::Back,
                     self.target(Navigation::Back).is_some(),
                     theme,
@@ -682,7 +682,7 @@ impl Pane {
             .child(
                 icon_button(
                     "forward",
-                    "Adelante",
+                    "Forward",
                     IconName::Forward,
                     self.target(Navigation::Forward).is_some(),
                     theme,
@@ -695,7 +695,7 @@ impl Pane {
             .child(
                 icon_button(
                     "up",
-                    "Subir",
+                    "Enclosing Folder",
                     IconName::Up,
                     self.target(Navigation::Up).is_some(),
                     theme,
@@ -715,7 +715,7 @@ impl Pane {
             .child(
                 icon_button(
                     "copy-other",
-                    "Copiar al otro panel (F5)",
+                    "Copy to Other Pane (F5)",
                     self.copy_icon(),
                     !self.tree.selected.is_empty(),
                     theme,
@@ -723,17 +723,14 @@ impl Pane {
                 .tab_index(0)
                 .tab_stop(!self.tree.selected.is_empty())
                 .focus(move |style| style.bg(theme.selection))
-                .tooltip(|_, cx| {
-                    cx.new(|_| Tooltip("Copiar al otro panel · F5".into()))
-                        .into()
-                })
+                .tooltip(|_, cx| cx.new(|_| Tooltip("Copy to Other Pane · F5".into())).into())
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.list_focus.focus(window, cx);
                     this.copy_to_other(window, cx);
                 })),
             )
             .child(
-                icon_button("refresh", "Actualizar", IconName::Refresh, true, theme).on_click(
+                icon_button("refresh", "Refresh", IconName::Refresh, true, theme).on_click(
                     cx.listener(|this, _, window, cx| {
                         this.list_focus.focus(window, cx);
                         this.refresh(window, cx);
@@ -744,9 +741,9 @@ impl Pane {
                 icon_button(
                     "hidden",
                     if self.tree.show_hidden {
-                        "Ocultar archivos ocultos"
+                        "Hide Hidden Files"
                     } else {
-                        "Mostrar archivos ocultos"
+                        "Show Hidden Files"
                     },
                     if self.tree.show_hidden {
                         IconName::Eye
@@ -834,8 +831,8 @@ impl Pane {
         };
         let Some(entry) = row.entry() else {
             let (text, color) = match &row.state {
-                RowState::Loading => ("Cargando…".into(), theme.secondary_text),
-                RowState::Error(error) => (format!("No se puede leer: {error}"), theme.danger),
+                RowState::Loading => ("Loading…".into(), theme.secondary_text),
+                RowState::Error(error) => (format!("Couldn't read: {error}"), theme.danger),
                 RowState::Entry(_) => unreachable!(),
             };
             let inset = if columns.size { 18. } else { 4. };
@@ -870,7 +867,7 @@ impl Pane {
             disclosure
                 .id("disclose")
                 .role(Role::Button)
-                .aria_label(if expanded { "Contraer" } else { "Expandir" })
+                .aria_label(if expanded { "Collapse" } else { "Expand" })
                 .aria_expanded(expanded)
                 .cursor_pointer()
                 .child(motion::chevron(
@@ -1292,7 +1289,7 @@ impl Render for Pane {
                                     .left(px(8.))
                                     .text_size(px(12.))
                                     .text_color(theme.secondary_text)
-                                    .child("Carpeta vacía"),
+                                    .child("Empty folder"),
                             )
                         })
                         .when(
@@ -1341,15 +1338,13 @@ impl Render for Pane {
                             .child(self.source.label()),
                     )
                     .child(div().truncate().child(match (count, selected) {
-                        (1, 0) => "1 elemento".into(),
-                        (_, 0) => format!("{count} elementos"),
-                        (1, 1) => "1 elemento · 1 seleccionado".into(),
-                        (_, 1) => format!("{count} elementos · 1 seleccionado"),
-                        _ => format!("{count} elementos · {selected} seleccionados"),
+                        (1, 0) => "1 item".into(),
+                        (_, 0) => format!("{count} items"),
+                        (1, 1) => "1 item · 1 selected".into(),
+                        (_, 1) => format!("{count} items · 1 selected"),
+                        _ => format!("{count} items · {selected} selected"),
                     }))
-                    .when(self.location.is_some(), |footer| {
-                        footer.child("· Cargando…")
-                    }),
+                    .when(self.location.is_some(), |footer| footer.child("· Loading…")),
             )
     }
 }
@@ -1434,14 +1429,12 @@ impl Columns {
                     .min_w_0()
                     .pl(px(38.))
                     .truncate()
-                    .child("Nombre"),
+                    .child("Name"),
             )
-            .when(self.size, |row| row.child(Self::size_cell("Tamaño")))
-            .when(self.modified, |row| {
-                row.child(Self::date_cell("Modificado"))
-            })
+            .when(self.size, |row| row.child(Self::size_cell("Size")))
+            .when(self.modified, |row| row.child(Self::date_cell("Modified")))
             .when(self.permissions, |row| {
-                row.child(Self::mode_cell("Permisos"))
+                row.child(Self::mode_cell("Permissions"))
             })
     }
 

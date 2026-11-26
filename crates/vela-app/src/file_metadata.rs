@@ -20,13 +20,7 @@ pub fn format_size(bytes: u64) -> String {
         value /= 1000.;
         if value < 999.95 || unit == "EB" {
             let number = format!("{value:.1}");
-            return format!(
-                "{} {unit}",
-                number
-                    .strip_suffix(".0")
-                    .unwrap_or(&number)
-                    .replace('.', ",")
-            );
+            return format!("{} {unit}", number.strip_suffix(".0").unwrap_or(&number));
         }
     }
     unreachable!()
@@ -62,7 +56,7 @@ pub fn modified(time: Option<SystemTime>, now: SystemTime) -> String {
     let day = if today
         .is_some_and(|today| time.tm_year == today.tm_year && time.tm_yday == today.tm_yday)
     {
-        "Hoy".into()
+        "Today".into()
     } else if today.is_some_and(|today| {
         let year = today.tm_year + 1899;
         let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
@@ -73,10 +67,10 @@ pub fn modified(time: Option<SystemTime>, now: SystemTime) -> String {
         };
         (time.tm_year, time.tm_yday) == yesterday
     }) {
-        "Ayer".into()
+        "Yesterday".into()
     } else {
         let months = [
-            "ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic",
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
         ];
         format!(
             "{} {} {}",
@@ -134,7 +128,7 @@ mod tests {
             mtime: None,
             mode: Some(0o4644),
         };
-        assert_eq!(size(&entry), "1,2 MB");
+        assert_eq!(size(&entry), "1.2 MB");
         assert_eq!(permissions(&entry), "-rwSr--r--");
         entry.kind = EntryKind::Directory;
         entry.mode = Some(0o1755);
@@ -151,8 +145,8 @@ mod tests {
         let start = UNIX_EPOCH + Duration::from_secs(1_767_268_800);
         let today = modified(Some(start), start);
         let previous = start - Duration::from_secs(86_400);
-        assert!(today.starts_with("Hoy, "));
-        assert!(modified(Some(previous), start).starts_with("Ayer, "));
+        assert!(today.starts_with("Today, "));
+        assert!(modified(Some(previous), start).starts_with("Yesterday, "));
         assert_eq!(modified(None, start), "—");
     }
 }

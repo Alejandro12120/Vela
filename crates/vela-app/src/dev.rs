@@ -300,7 +300,7 @@ pub fn edit_root() -> io::Result<PathBuf> {
     }
     std::env::home_dir()
         .map(|home| home.join("Library/Caches/Vela/edit"))
-        .ok_or_else(|| io::Error::other("No se encuentra la carpeta de caché"))
+        .ok_or_else(|| io::Error::other("Cache folder not found"))
 }
 
 /// Opens the floating menu of the server with this display name at its row's centre at startup.
@@ -413,7 +413,7 @@ pub fn editor_roots() -> Vec<PathBuf> {
 }
 
 /// Opens `path` the way a double click should. Text goes to the editor chosen
-/// in Ajustes or, without one, to the default text editor (`open -t`). Anything
+/// in Settings or, without one, to the default text editor (`open -t`). Anything
 /// else opens with its default application. The real path, with symbolic links
 /// resolved, decides whether the file is text.
 pub fn terminal_view() -> bool {
@@ -469,14 +469,14 @@ pub fn open_file(path: &std::path::Path, editor: Option<&std::path::Path>) -> io
                 None => command.arg("-t"),
             };
         }
-        run(command.arg(path), "No se pudo abrir el archivo")
+        run(command.arg(path), "Couldn't open the file")
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = editor;
         run(
             std::process::Command::new("xdg-open").arg(path),
-            "No se pudo abrir el archivo",
+            "Couldn't open the file",
         )
     }
 }
@@ -490,14 +490,14 @@ pub fn open_default(path: &std::path::Path) -> io::Result<()> {
     {
         run(
             std::process::Command::new("/usr/bin/open").arg(path),
-            "No se pudo abrir el archivo",
+            "Couldn't open the file",
         )
     }
     #[cfg(not(target_os = "macos"))]
     {
         run(
             std::process::Command::new("xdg-open").arg(path),
-            "No se pudo abrir el archivo",
+            "Couldn't open the file",
         )
     }
 }
@@ -513,7 +513,7 @@ pub fn open_kitty_ssh(args: &[std::ffi::OsString]) -> io::Result<()> {
             std::process::Command::new("/usr/bin/open")
                 .args(["-na", "kitty", "--args", "/usr/bin/ssh"])
                 .args(args),
-            "No se pudo abrir Kitty",
+            "Couldn't open Kitty",
         )
     }
     #[cfg(not(target_os = "macos"))]
@@ -522,7 +522,7 @@ pub fn open_kitty_ssh(args: &[std::ffi::OsString]) -> io::Result<()> {
             std::process::Command::new("kitty")
                 .args(["--detach", "/usr/bin/ssh"])
                 .args(args),
-            "No se pudo abrir Kitty",
+            "Couldn't open Kitty",
         )
     }
 }

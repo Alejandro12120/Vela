@@ -74,6 +74,38 @@ impl Source {
         unreachable!()
     }
 
+    pub(crate) async fn create_file(
+        &self,
+        parent: PathBuf,
+        executor: &BackgroundExecutor,
+    ) -> Result<PathBuf, Error> {
+        for index in 1.. {
+            let path = parent.join(rename::file_name(index));
+            let result = match self {
+                Self::Local => {
+                    let candidate = path.clone();
+                    executor
+                        .spawn(async move {
+                            std::fs::OpenOptions::new()
+                                .write(true)
+                                .create_new(true)
+                                .open(candidate)
+                                .map(|_| ())
+                                .map_err(Error::Io)
+                        })
+                        .await
+                }
+                Self::Remote(session) => session.create_file(path.clone()).await,
+            };
+            match result {
+                Ok(()) => return Ok(path),
+                Err(Error::Io(error)) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!()
+    }
+
     pub async fn delete(&self, path: PathBuf, executor: &BackgroundExecutor) -> Result<(), Error> {
         match self {
             Self::Local => {
@@ -175,7 +207,7 @@ impl Pane {
         let label = if paths.len() == 1 {
             name.to_owned()
         } else {
-            format!("{} elementos", paths.len())
+            format!("{} items", paths.len())
         };
         Some(Drag {
             side: self.source.side(),
@@ -425,6 +457,7 @@ impl Pane {
         self.list_focus.focus(window, cx);
         match action {
             Action::NewFolder => self.new_folder(folder, window, cx),
+            Action::NewFile => self.new_item(folder, false, window, cx),
             Action::Rename => self.start_selected_rename(window, cx),
             Action::Run => self.run_selected(false, window, cx),
             Action::RunInKitty => self.run_selected(true, window, cx),
@@ -489,7 +522,10 @@ impl Pane {
                         path.parent().and_then(Path::to_str),
                         path.file_name().and_then(std::ffi::OsStr::to_str),
                     ) else {
-                        self.report_error("El nombre no se puede ejecutar como texto.".into(), cx);
+                        self.report_error(
+                            "The filename can't be passed to the shell as text.".into(),
+                            cx,
+                        );
                         return;
                     };
                     if !kitty {
@@ -503,7 +539,7 @@ impl Pane {
                     let command = vela_core::run_script_command(directory, name, executable);
                     let args = session.terminal_command(&command);
                     (
-                        Some("No se pudo abrir Kitty"),
+                        Some("Couldn't open Kitty"),
                         Box::new(move || dev::open_kitty_ssh(&args)),
                     )
                 }
@@ -543,7 +579,7 @@ impl Pane {
         self.scroll_to_cursor();
         self.rename = InlineRename::new(path, directory, window, cx);
         if self.rename.is_none() {
-            self.path_error = Some("El nombre no se puede editar como texto.".into());
+            self.path_error = Some("The name can't be edited as text.".into());
         }
         cx.notify();
     }
@@ -566,7 +602,7 @@ impl Pane {
         }
         let value = input.value();
         if !rename::validate(value) {
-            rename.error = Some("Nombre no válido");
+            rename.error = Some("Invalid name");
             cx.notify();
             return;
         }
@@ -600,9 +636,9 @@ impl Pane {
                                 Error::Io(error)
                                     if error.kind() == io::ErrorKind::AlreadyExists =>
                                 {
-                                    "Ya existe ese nombre"
+                                    "That name is already in use"
                                 }
-                                _ => "No se pudo renombrar",
+                                _ => "Couldn't rename the item",
                             });
                         }
                     }
@@ -625,11 +661,25 @@ impl Pane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.new_item(parent, true, window, cx);
+    }
+
+    fn new_item(
+        &mut self,
+        parent: PathBuf,
+        directory: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let source = self.source.clone();
         let executor = cx.background_executor().clone();
         let revision = self.tree_revision;
         cx.spawn_in(window, async move |this, cx| {
-            let result = source.create_folder(parent.clone(), &executor).await;
+            let result = if directory {
+                source.create_folder(parent.clone(), &executor).await
+            } else {
+                source.create_file(parent.clone(), &executor).await
+            };
             let _ = this.update_in(cx, |this, window, cx| {
                 if this.tree_revision != revision {
                     return;
@@ -642,7 +692,8 @@ impl Pane {
                         this.refresh_changed([parent], Some(path), window, cx);
                     }
                     Err(error) => {
-                        this.path_error = Some(format!("No se pudo crear la carpeta: {error}"))
+                        let item = if directory { "folder" } else { "file" };
+                        this.path_error = Some(format!("Couldn't create the {item}: {error}"));
                     }
                 }
                 cx.notify();

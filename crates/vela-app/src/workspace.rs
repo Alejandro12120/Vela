@@ -344,7 +344,7 @@ impl Workspace {
                                     this.show_stderr = state == dev::ServerState::ErrorDetails;
                                     Connection::Error(Error::ConnectFailed {
                                         status: None,
-                                        stderr: "ssh: connect to host 127.0.0.1 port 2222: Connection refused\n\nDepuración del maestro SSH simulado\nSegunda línea de diagnóstico".into(),
+                                        stderr: "ssh: connect to host 127.0.0.1 port 2222: Connection refused\n\nSimulated SSH master diagnostics\nSecond diagnostic line".into(),
                                     })
                                 }
                                 dev::ServerState::ErrorAuth => Connection::Error(Error::AuthFailed {
@@ -379,7 +379,7 @@ impl Workspace {
                                 }
                                 dev::UpdatePreview::Error => UpdateState::Available {
                                     release: fake_release(),
-                                    error: Some("No se pudo descargar la actualización.".into()),
+                                    error: Some("Couldn't download the update.".into()),
                                 },
                             };
                         }
@@ -426,10 +426,10 @@ impl Workspace {
                         if dev::prompt().as_deref() == Some("password-rejected") {
                             #[cfg(feature = "dev")]
                             {
-                                this.password_attempts.insert("prueba".into(), 1);
+                                this.password_attempts.insert("example".into(), 1);
                                 this.prompts.push_back(askpass::Request::fake(
-                                    "prueba",
-                                    "Contraseña para 'prueba':",
+                                    "example",
+                                    "Password for 'example':",
                                     askpass::Kind::Password,
                                 ));
                                 this.show_next_prompt(window, cx);
@@ -438,9 +438,9 @@ impl Workspace {
                     }
                     Err(err) => {
                         let message = if err.kind() == std::io::ErrorKind::InvalidData {
-                            "El archivo servers.toml contiene errores. No se puede modificar desde la aplicación."
+                            "servers.toml contains errors. Fix them before editing servers in Vela."
                         } else {
-                            "No se pudo leer la configuración de servidores."
+                            "Couldn't read the server configuration."
                         };
                         this.config_error = Some(message);
                     }
@@ -537,7 +537,7 @@ impl Workspace {
                 executor
                     .spawn(async move {
                         if let Err(error) = index.cleanup_synced() {
-                            eprintln!("Vela: No se pudo limpiar la caché de ediciones. {error}");
+                            eprintln!("Vela: couldn't clean the edit cache: {error}");
                         }
                     })
                     .await;
@@ -595,21 +595,18 @@ impl Workspace {
                 }
                 match result {
                     Ok(vela_core::updater::CheckOutcome::UpdateAvailable(release)) => {
-                        dev::log(format_args!(
-                            "actualización disponible: v{}",
-                            release.version
-                        ));
+                        dev::log(format_args!("update available: v{}", release.version));
                         this.update_state = UpdateState::Available {
                             release,
                             error: None,
                         };
                     }
                     Ok(vela_core::updater::CheckOutcome::UpToDate) => {
-                        dev::log("actualización: Vela está al día");
+                        dev::log("update: Vela is up to date");
                         this.update_state = UpdateState::Idle;
                     }
                     Err(err) => {
-                        dev::log(format_args!("actualización: {err}"));
+                        dev::log(format_args!("update: {err}"));
                         this.update_state = UpdateState::Idle;
                     }
                 }
@@ -670,7 +667,7 @@ impl Workspace {
                         return;
                     }
                     vela_core::updater::InstallEvent::Finished(Err(err)) => {
-                        dev::log(format_args!("actualización: {err}"));
+                        dev::log(format_args!("update: {err}"));
                         let message = err.to_string();
                         let _ = this.update(cx, |this, cx| {
                             this.update_state = UpdateState::Available {
@@ -705,7 +702,7 @@ impl Workspace {
             let _ = cx.update(|_, cx| {
                 crate::pane::finder::quit_cleanup(cx)();
                 if let Err(err) = vela_core::updater::relaunch(&relaunch) {
-                    eprintln!("Vela: No se pudo reiniciar tras actualizar: {err}");
+                    eprintln!("Vela: couldn't restart after updating: {err}");
                 }
                 cx.quit();
             });
@@ -927,7 +924,7 @@ impl Workspace {
             .spawn(async move { config::save(&dir, to_save) });
         cx.spawn_in(window, async move |_, _| {
             if let Err(error) = save.await {
-                dev::log(format_args!("no se pudo migrar servers.toml: {error}"));
+                dev::log(format_args!("couldn't migrate servers.toml: {error}"));
             }
         })
         .detach();
@@ -1155,7 +1152,7 @@ impl Workspace {
                             .unwrap_or(path.as_os_str())
                             .to_string_lossy();
                         pane.report_error(
-                            format!("Cierra las ediciones de «{name}» antes de moverlo."),
+                            format!("Close any edits for “{name}” before moving it."),
                             cx,
                         );
                     } else {
@@ -1390,7 +1387,7 @@ impl Workspace {
                     if this.servers == servers {
                         this.servers = previous;
                     }
-                    this.config_error = Some("No se pudo guardar servers.toml.");
+                    this.config_error = Some("Couldn't save servers.toml.");
                 }
                 cx.notify();
             });
@@ -1419,7 +1416,7 @@ impl Workspace {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Elegir clave pública".into()),
+            prompt: Some("Choose Public Key".into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = paths.await;
@@ -1432,7 +1429,7 @@ impl Workspace {
                             }
                         }
                         Ok(Ok(None)) => {}
-                        _ => form.message = Some("No se pudo abrir el selector de archivos."),
+                        _ => form.message = Some("Couldn't open the file picker."),
                     }
                     cx.notify();
                 }
@@ -1487,9 +1484,9 @@ impl Workspace {
                     askpass::Kind::HostKeyConfirm { .. } => None,
                     kind => {
                         let (label, secure) = match kind {
-                            askpass::Kind::Password => ("Contraseña", true),
-                            askpass::Kind::Passphrase => ("Frase de paso", true),
-                            _ => ("Respuesta", false),
+                            askpass::Kind::Password => ("Password", true),
+                            askpass::Kind::Passphrase => ("Passphrase", true),
+                            _ => ("Response", false),
                         };
                         Some(cx.new(|cx| TextInput::new("", label, "", secure, cx)))
                     }
@@ -1624,7 +1621,7 @@ impl Workspace {
                 })
         {
             let message =
-                "Cierra las ediciones del servidor antes de cambiar su destino o eliminarlo.";
+                "Close this server's edits before changing its destination or removing it.";
             if let Some(form) = self.editing() {
                 form.message = Some(message);
             } else {
@@ -1704,7 +1701,7 @@ impl Workspace {
                         server.filter(|server| matches!(server.auth, Auth::Agent { .. }))
                     }
                     Err(_) => {
-                        let message = "No se pudo guardar servers.toml.";
+                        let message = "Couldn't save servers.toml.";
                         if let Some(form) = this.editing() {
                             form.message = Some(message);
                         } else {
@@ -1751,44 +1748,44 @@ impl Workspace {
                     .iter()
                     .find(|theme| &theme.id == id)?;
                 (
-                    "Eliminar tema".into(),
+                    "Delete Theme".into(),
                     Some((IconName::Trash, theme.danger)),
                     div().child(format!(
-                        "Se eliminará «{}». Esta acción no se puede deshacer.",
+                        "“{}” will be deleted. This action can't be undone.",
                         theme_def.name
                     )),
-                    "Eliminar",
+                    "Delete",
                 )
             }
             Dialog::Form(form) => (
                 if form.id.is_some() {
-                    "Editar servidor".into()
+                    "Edit Server".into()
                 } else {
-                    "Añadir servidor".into()
+                    "Add Server".into()
                 },
                 None,
                 form.render(theme, cx),
-                "Guardar",
+                "Save",
             ),
             Dialog::Delete(id) => {
                 let server = self.servers.iter().find(|server| &server.id == id)?;
                 (
-                    "Eliminar servidor".into(),
+                    "Remove Server".into(),
                     Some((IconName::Trash, theme.danger)),
                     div().child(format!(
-                        "¿Eliminar «{}» de la lista de servidores?",
+                        "Remove “{}” from the server list?",
                         server.display_name()
                     )),
-                    "Eliminar",
+                    "Delete",
                 )
             }
             Dialog::EmptyEdits => (
-                "¿Vaciar las copias de edición?".into(),
+                "Clear edit copies?".into(),
                 Some((IconName::Trash, theme.danger)),
                 div().child(
-                    "Se borran las copias ya subidas. Las que tienen cambios sin subir o están abiertas en el editor se conservan.",
+                    "Uploaded copies will be deleted. Copies with unuploaded changes or open in the editor will be kept.",
                 ),
-                "Vaciar",
+                "Clear",
             ),
             Dialog::Prompt(prompt) => {
                 let destination = &prompt.request.destination;
@@ -1799,17 +1796,17 @@ impl Workspace {
                 );
                 match &prompt.request.kind {
                     askpass::Kind::HostKeyConfirm { fingerprint } => (
-                        "Clave del servidor desconocida".into(),
+                        "Unknown Server Key".into(),
                         Some((IconName::Key, theme.accent)),
-                        body.child("Es la primera conexión con este servidor. Comprueba que la huella coincide antes de confiar en su clave.")
+                        body.child("This is your first connection to this server. Verify the fingerprint before trusting its key.")
                             .child(technical_text(fingerprint.clone(), theme)),
-                        "Confiar y conectar",
+                        "Trust and Connect",
                     ),
                     kind => {
                         let (kind_name, label) = match kind {
-                            askpass::Kind::Password => ("Contraseña del servidor", "Contraseña"),
-                            askpass::Kind::Passphrase => ("Frase de paso de la clave", "Frase de paso"),
-                            _ => ("Solicitud de autenticación", prompt.request.prompt.as_str()),
+                            askpass::Kind::Password => ("Server Password", "Password"),
+                            askpass::Kind::Passphrase => ("Key Passphrase", "Passphrase"),
+                            _ => ("Authentication Request", prompt.request.prompt.as_str()),
                         };
                         (
                             format!("{kind_name} · {destination}").into(),
@@ -1824,12 +1821,12 @@ impl Workspace {
                                     matches!(kind, askpass::Kind::Password) && prompt.rejected,
                                     |body| {
                                         body.child(crate::form::error_text(
-                                            "El servidor rechazó la contraseña.",
+                                            "The server rejected the password.",
                                             theme,
                                         ))
                                     },
                                 ),
-                            "Conectar",
+                            "Connect",
                         )
                     }
                 }
@@ -1842,15 +1839,15 @@ impl Workspace {
             .gap_2()
             .child(button(
                 "cancel",
-                "Cancelar",
+                "Cancel",
                 Variant::Secondary,
                 theme,
                 cx.listener(|this, _, window, cx| this.cancel_dialog(window, cx)),
             ))
             .child({
-                let label = if self.saving { "Guardando…" } else { confirm };
+                let label = if self.saving { "Saving…" } else { confirm };
                 let on_click = cx.listener(|this, _, window, cx| this.confirm_dialog(window, cx));
-                if label == "Conectar" {
+                if label == "Connect" {
                     icon_text_button(
                         "confirm",
                         IconName::Plug,
@@ -1889,9 +1886,9 @@ impl Workspace {
         icon_button(
             "toggle-sidebar",
             if self.sidebar_visible.get() {
-                "Ocultar barra lateral"
+                "Hide Sidebar"
             } else {
-                "Mostrar barra lateral"
+                "Show Sidebar"
             },
             IconName::Sidebar,
             true,
@@ -1936,7 +1933,7 @@ impl Workspace {
                         icon_text_button(
                             "open-kitty",
                             IconName::ExternalLink,
-                            "Abrir en Kitty",
+                            "Open in Kitty",
                             Variant::Secondary,
                             None,
                             theme,
@@ -1987,9 +1984,9 @@ impl Workspace {
             .find(|server| Some(&server.id) == self.selected.as_ref())
         else {
             let hint = if self.loading {
-                "Cargando servidores…"
+                "Loading servers…"
             } else {
-                "Conecta un servidor para empezar"
+                "Connect to a server to get started"
             };
             return panel.when(self.config_error.is_none(), |panel| {
                 panel.child(
@@ -2060,7 +2057,7 @@ impl Workspace {
             });
             icon_text_button(
                 "connect",
-                if label == "Reintentar" {
+                if label == "Retry" {
                     IconName::RotateCcw
                 } else {
                     IconName::Plug
@@ -2088,7 +2085,7 @@ impl Workspace {
                             icon(IconName::Spinner).text_color(theme.secondary_text),
                             ("connecting-spinner", *attempt),
                         ))
-                        .child(div().text_color(theme.secondary_text).child("Conectando…")),
+                        .child(div().text_color(theme.secondary_text).child("Connecting…")),
                 );
                 if *can_cancel {
                     let server_id = id.clone();
@@ -2096,7 +2093,7 @@ impl Workspace {
                         icon_text_button(
                             "cancel-connect",
                             IconName::Close,
-                            "Cancelar",
+                            "Cancel",
                             Variant::Secondary,
                             None,
                             theme,
@@ -2123,44 +2120,42 @@ impl Workspace {
                     .child(
                         div()
                             .text_color(theme.secondary_text)
-                            .child("Desconectando…"),
+                            .child("Disconnecting…"),
                     ),
             ),
             Some(Connection::Connected { .. }) => unreachable!("rendered above"),
             Some(Connection::Error(error)) => {
                 let (message, extra, changed, can_edit) = match error {
-                    Error::AuthFailed { .. } => ("Autenticación rechazada", None, false, true),
+                    Error::AuthFailed { .. } => ("Authentication failed", None, false, true),
                     Error::HostKeyChanged { .. } => (
-                        "La clave del servidor ha cambiado. La conexión se ha bloqueado.",
+                        "The server's key changed. The connection was blocked.",
                         None,
                         true,
                         true,
                     ),
                     Error::HostKeyRejected { .. } => {
-                        ("No se aceptó la clave del servidor.", None, false, true)
+                        ("The server's key wasn't accepted.", None, false, true)
                     }
                     Error::Io(_) => (
-                        "No se pudo iniciar o mantener la conexión SSH.",
+                        "Couldn't establish or maintain the SSH connection.",
                         None,
                         false,
                         false,
                     ),
                     Error::Sftp(_) => (
-                        "No se pudo abrir la sesión SFTP o leer la carpeta remota.",
+                        "Couldn't open the SFTP session or read the remote folder.",
                         None,
                         false,
                         false,
                     ),
                     Error::ConnectFailed { stderr, .. } => (
-                        "No se pudo conectar con el servidor.",
+                        "Couldn't connect to the server.",
                         Some(stderr),
                         false,
                         false,
                     ),
-                    Error::SizeLimit(_) => {
-                        ("Se superó el límite de transferencia.", None, false, false)
-                    }
-                    Error::Cancelled => ("Se canceló la conexión.", None, false, false),
+                    Error::SizeLimit(_) => ("The transfer limit was exceeded.", None, false, false),
+                    Error::Cancelled => ("The connection was canceled.", None, false, false),
                 };
                 let mut banner = div()
                     .w_full()
@@ -2222,9 +2217,9 @@ impl Workspace {
                                 .text_color(theme.danger),
                             )
                             .child(if show {
-                                "Ocultar detalles de SSH"
+                                "Hide SSH Details"
                             } else {
-                                "Ver detalles de SSH"
+                                "Show SSH Details"
                             })
                             .hover(move |style| style.bg(theme.hover))
                             .focus_visible(move |style| style.border_color(theme.accent))
@@ -2241,14 +2236,14 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(action("Reintentar", cx));
+                    .child(action("Retry", cx));
                 if can_edit {
                     let edit_id = id.clone();
                     actions = actions.child(
                         icon_text_button(
                             "edit-server",
                             IconName::Pencil,
-                            "Editar servidor",
+                            "Edit Server",
                             Variant::Secondary,
                             None,
                             theme,
@@ -2261,11 +2256,11 @@ impl Workspace {
                 }
                 details.child(banner).child(actions)
             }
-            None if self.client.is_some() => details.child(action("Conectar", cx)),
+            None if self.client.is_some() => details.child(action("Connect", cx)),
             None => details.child(
                 div()
                     .text_color(theme.danger)
-                    .child("No se pudo iniciar el cliente SSH."),
+                    .child("Couldn't start the SSH client."),
             ),
         };
         panel.child(details.child(self.edit_status(id, theme, cx)))
@@ -2304,12 +2299,12 @@ async fn identity_warning(client: &Client, spec: vela_core::ConnectionSpec) -> O
                 .map(|path| path.to_string_lossy().into_owned())
                 .collect::<Vec<_>>();
             Some(format!(
-                "Tu ~/.ssh/config añade otras claves para este host; podrían agotarse los intentos de autenticación.\n{}",
+                "Your ~/.ssh/config adds other keys for this host. This may use up the allowed authentication attempts.\n{}",
                 extra.join("\n")
             ))
         }
         Ok(_) => None,
-        Err(_) => Some("No se pudieron comprobar las claves de ~/.ssh/config.".into()),
+        Err(_) => Some("Couldn't check the keys in ~/.ssh/config.".into()),
     }
 }
 
@@ -2383,7 +2378,7 @@ impl Render for Workspace {
                     && self.selected.as_ref() == Some(id)
                     && panes.view == SessionView::Terminal;
                 terminal.update(cx, |terminal, _| {
-                    terminal.set_palette(theme.terminal);
+                    terminal.set_palette(theme.terminal, self.settings.terminal_colors);
                     terminal.set_selected(visible, window);
                 });
             }
@@ -2621,7 +2616,7 @@ impl Render for Workspace {
                             panel.pt(px(16.) + titlebar_height)
                         })
                         .bg(theme.chrome(theme.background))
-                        .child("Cerrando conexiones…"),
+                        .child("Closing connections…"),
                 )
             })
             .when(!self.quitting, |root| {
@@ -2672,7 +2667,7 @@ mod tests {
         let (workspace, cx) =
             cx.add_window_view(|window, cx| Workspace::new(None, None, None, window, cx));
         cx.run_until_parked();
-        let fake = || askpass::Request::fake("prueba", "Contraseña:", askpass::Kind::Password);
+        let fake = || askpass::Request::fake("prueba", "Password:", askpass::Kind::Password);
         workspace.update_in(cx, |this, window, cx| {
             this.prompts.push_back(fake());
             this.show_next_prompt(window, cx);
@@ -2720,7 +2715,7 @@ mod tests {
         let (workspace, cx) =
             cx.add_window_view(|window, cx| Workspace::new(None, None, None, window, cx));
         cx.run_until_parked();
-        let fake = || askpass::Request::fake("prueba", "Contraseña:", askpass::Kind::Password);
+        let fake = || askpass::Request::fake("prueba", "Password:", askpass::Kind::Password);
         workspace.update_in(cx, |this, window, cx| {
             this.prompts.push_back(fake());
             this.show_next_prompt(window, cx);
@@ -2743,7 +2738,7 @@ mod tests {
     fn spec_fills_a_missing_socket_from_settings_or_detection() {
         let mut server = Server {
             id: "id".into(),
-            name: "Nombre".into(),
+            name: "Name".into(),
             host: "host".into(),
             port: 22,
             user: "u".into(),
@@ -3192,11 +3187,11 @@ mod tests {
         let key = AgentKey {
             key_type: "ssh-ed25519".into(),
             blob: [&[0, 0, 0, 11][..], b"ssh-ed25519"].concat(),
-            comment: "Servidor".into(),
+            comment: "Server".into(),
         };
         let new = Server {
             id: String::new(),
-            name: "Nuevo".into(),
+            name: "New".into(),
             host: "n.example".into(),
             port: 22,
             user: "ana".into(),
@@ -3215,7 +3210,7 @@ mod tests {
         let servers = config::load(dir.path()).unwrap();
         let added = servers.last().unwrap();
         assert!(!added.pinned);
-        assert_eq!(added.name, "Nuevo");
+        assert_eq!(added.name, "New");
         let Auth::Agent { identity_pub, .. } = &added.auth else {
             panic!("expected agent authentication");
         };
@@ -3247,7 +3242,7 @@ mod tests {
         let key = AgentKey {
             key_type: "ssh-ed25519".into(),
             blob: [&[0, 0, 0, 11][..], b"ssh-ed25519"].concat(),
-            comment: "Servidor".into(),
+            comment: "Server".into(),
         };
         let key_path = agent::store_public_key(dir.path(), &key).unwrap();
         let original = Server {
@@ -3372,7 +3367,7 @@ mod tests {
             this.password_attempts.insert(destination.clone(), 2);
             this.prompts.push_back(askpass::Request::fake(
                 &destination,
-                "Contraseña:",
+                "Password:",
                 askpass::Kind::Password,
             ));
             this.show_next_prompt(window, cx);

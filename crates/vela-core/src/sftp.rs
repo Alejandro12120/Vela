@@ -210,6 +210,62 @@ pub(crate) async fn create_file(sftp: &Sftp, path: &Path) -> Result<(), Error> {
     }
 }
 
+pub(crate) async fn chmod(sftp: &Sftp, path: &Path, mode: u32) -> Result<(), Error> {
+    use openssh_sftp_client::metadata::Permissions;
+
+    let mut fs = sftp.fs();
+    fs.set_permissions(path, Permissions::from((mode & 0o7777) as u16))
+        .await?;
+    Ok(())
+}
+
+/// Lee hasta `max_bytes`, sin cargar el archivo completo en memoria. El segundo
+/// valor indica que quedaban más bytes después del límite.
+pub(crate) async fn read_bytes_limited(
+    sftp: &Sftp,
+    path: &Path,
+    max_bytes: u64,
+) -> Result<(Vec<u8>, bool), Error> {
+    let source = sftp.open(path).await?;
+    let mut source = source;
+    let mut result = Vec::new();
+    let mut buffer = Default::default();
+    loop {
+        let remaining = max_bytes.saturating_sub(result.len() as u64);
+        if remaining == 0 {
+            // Comprobar si queda algo para informar de truncamiento sin acumularlo.
+            let probe = source.read(1, buffer).await?;
+            let truncated = probe.is_some();
+            let _ = source.close().await;
+            return Ok((result, truncated));
+        }
+        let wanted = remaining.min(CHUNK_SIZE as u64) as u32;
+        let Some(chunk) = source.read(wanted, buffer).await? else {
+            let _ = source.close().await;
+            return Ok((result, false));
+        };
+        result.extend_from_slice(&chunk);
+        buffer = chunk;
+        buffer.clear();
+    }
+}
+
+/// Escribe todos los bytes y cierra el handle antes de devolver el control.
+pub(crate) async fn write_bytes(sftp: &Sftp, path: &Path, bytes: Vec<u8>) -> Result<(), Error> {
+    let mut destination = sftp
+        .options()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .await?;
+    let result = destination.write_all(&bytes).await;
+    let closed = destination.close().await;
+    result?;
+    closed?;
+    Ok(())
+}
+
 pub(crate) fn check_cancel(cancel: &AtomicBool) -> Result<(), Error> {
     if cancel.load(Ordering::Relaxed) {
         Err(Error::Cancelled)

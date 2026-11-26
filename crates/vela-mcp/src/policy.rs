@@ -2,6 +2,8 @@
 
 use std::{path::PathBuf, time::SystemTime};
 
+use serde::{Deserialize, Serialize};
+
 use crate::{
     command::{self, CommandWarning},
     config::{Decision, HeadlessAskBehavior, McpConfig, ServerAvailability, ServerMcpPolicy},
@@ -341,7 +343,7 @@ impl Default for EvalContext {
 }
 
 /// Avisos no bloqueantes que se muestran junto a una decisión.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum PolicyWarning {
     OutOfScopePath { path: String, reason: String },
     EditsConflict,
@@ -350,7 +352,7 @@ pub enum PolicyWarning {
 }
 
 /// Decisión devuelta por el motor de políticas.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PolicyDecision {
     pub outcome: Decision,
     pub matched_rule: String,

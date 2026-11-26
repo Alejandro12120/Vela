@@ -1,31 +1,45 @@
-//! Núcleo del sistema MCP de Vela (Fase M1).
+//! Núcleo del sistema MCP de Vela (Fases M1 y M2).
 //!
 //! Este crate no depende de GPUI ni de la interfaz: contiene el esquema de
 //! `mcp.toml`, los perfiles de permisos, el ámbito de rutas locales y remotas,
-//! el validador estructurado de comandos, las elevaciones temporales (JIT) y el
-//! [`PolicyEngine`] que decide, con explicación en español, si cada acción del
-//! agente se permite, se pregunta o se deniega.
+//! el validador estructurado de comandos, las elevaciones temporales (JIT), el
+//! [`PolicyEngine`] que decide con explicación en español, el almacén de
+//! copias de seguridad, el parcheador de texto y el ejecutor de las 15
+//! herramientas v1 sobre `vela_core::Session`.
 //!
-//! El motor es puro: todas las decisiones derivan de la configuración, el
-//! perfil efectivo, las rutas canónicas informadas por SFTP y el estado del
-//! entorno pasado en [`EvalContext`]. No realiza E/S de red ni toca archivos.
+//! El motor de políticas es puro. El ejecutor hace E/S únicamente después de
+//! que la política permita la acción o de que la persona haya aprobado una
+//! llamada `Ask`, y vuelve a evaluar la política en ese segundo caso.
 
 pub mod command;
 pub mod config;
+pub mod executor;
 pub mod jit;
+pub mod patch;
 pub mod path;
 pub mod policy;
 pub mod presets;
+pub mod rollback;
 
 pub use command::{CommandCheck, CommandError, CommandWarning, OperatorKind, Token};
 pub use config::{
     Decision, ExecMode, HeadlessAskBehavior, McpConfig, RollbackConfig, ServerAvailability,
     ServerMcpPolicy, to_json,
 };
+pub use executor::{
+    ApprovalMode, ApprovalPreview, ChmodOutput, DeleteOutput, DescribePermissionsInput,
+    ExecCommandInput, Executor, ExecutorError, FileWriteOutput, FsChmodInput, FsDeleteInput,
+    FsEntry, FsListInput, FsListOutput, FsMkdirInput, FsMoveInput, FsPatchInput, FsReadInput,
+    FsReadOutput, FsStatInput, FsStatOutput, FsWriteInput, GetUiContextInput, ListServersInput,
+    McpBackend, MoveOutput, PathOutput, PermissionsInfo, ToolOutcome, TransferDownloadInput,
+    TransferOutput, TransferUploadInput, UiContext,
+};
 pub use jit::JitGrants;
+pub use patch::{PatchError, PatchResult, TextEdit, apply_edits, unified_diff};
 pub use path::{PathAccess, PathError};
 pub use policy::{
     AgentServerInfo, EvalContext, McpAction, PolicyDecision, PolicyEngine, PolicyWarning,
     ServerIdentity,
 };
 pub use presets::{PermissionProfile, critical_denied_paths};
+pub use rollback::{BackupEntry, RollbackStore, RollbackUsage, restore_snapshot};

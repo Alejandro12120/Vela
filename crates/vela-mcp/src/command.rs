@@ -1,5 +1,6 @@
 //! Tokenización POSIX básica y validación estructurada de `exec_command`.
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::config::{Decision, ExecMode};
@@ -30,7 +31,7 @@ pub enum CommandError {
 }
 
 /// Avisos que acompañan a una evaluación de comando.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum CommandWarning {
     ContainsSudo,
     ShellChaining,
@@ -314,11 +315,15 @@ fn hard_denylist_match(command: &str, tokens: &[Token]) -> Option<String> {
             .collect();
         match name {
             "rm" => {
-                let is_flag = |arg: &&str| arg.starts_with('-') && !arg.starts_with("--");
-                let recursive = args
+                let is_short_flag =
+                    |arg: &&str| arg.starts_with('-') && !arg.starts_with("--") && *arg != "-";
+                let recursive = args.iter().any(|arg| {
+                    (is_short_flag(arg) && (arg.contains('r') || arg.contains('R')))
+                        || *arg == "--recursive"
+                });
+                let force = args
                     .iter()
-                    .any(|arg| is_flag(arg) && (arg.contains('r') || arg.contains('R')));
-                let force = args.iter().any(|arg| is_flag(arg) && arg.contains('f'));
+                    .any(|arg| (is_short_flag(arg) && arg.contains('f')) || *arg == "--force");
                 let root_target = args.iter().any(|arg| {
                     if !arg.starts_with('/') {
                         return false;
@@ -943,5 +948,36 @@ mod tests {
             Decision::Allow,
         );
         assert_eq!(safe.outcome, Decision::Ask);
+    }
+
+    #[test]
+    fn catastrophic_rm_recognizes_long_flags() {
+        for command in [
+            "rm --recursive --force /",
+            "rm -r --force //",
+            "rm --recursive -f /.",
+            "rm --no-preserve-root -rf /",
+        ] {
+            let result = check(command, ExecMode::AskAll, &[], &[], Decision::Allow);
+            assert_eq!(result.outcome, Decision::Deny, "{command}");
+            assert!(
+                result.matched_rule.starts_with("hard_denylist:"),
+                "{command}: {}",
+                result.matched_rule
+            );
+        }
+    }
+
+    #[test]
+    fn long_flags_on_a_regular_path_are_not_catastrophic() {
+        let result = check(
+            "rm --recursive --force /tmp/build",
+            ExecMode::AskAll,
+            &[],
+            &[],
+            Decision::Allow,
+        );
+        assert_eq!(result.outcome, Decision::Ask);
+        assert!(!result.matched_rule.starts_with("hard_denylist:"));
     }
 }

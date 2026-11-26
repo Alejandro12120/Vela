@@ -22,12 +22,15 @@ use crate::{
     McpAction, McpConfig, PolicyDecision, PolicyEngine, PolicyWarning, ServerIdentity,
     config::Decision,
     patch::{self, PatchError, TextEdit},
-    path::{glob_match, normalize_lexical},
+    path::{self, PathAccess, glob_match, normalize_lexical},
     rollback::RollbackStore,
 };
 
 /// Tope duro de lectura para `fs_read` (512 KiB).
 pub const MAX_READ_BYTES: u64 = 512 * 1024;
+/// Tope propio de lectura para parchear, independiente del límite de rollback.
+/// Un archivo mayor no puede leerse, pero sí puede recibir un aviso de rollback.
+pub const MAX_PATCH_BYTES: u64 = 32 * 1024 * 1024;
 /// Líneas devueltas por página si el agente no indica otra cosa.
 pub const DEFAULT_MAX_LINES: usize = 500;
 /// Límite superior de líneas por página y de profundidad de `fs_list`.
@@ -47,6 +50,8 @@ pub enum ExecutorError {
     NotFound(String),
     #[error("el archivo es binario: {0}")]
     BinaryFile(String),
+    #[error("el archivo supera el límite de lectura para parcheo: {0}")]
+    FileTooLarge(String),
     #[error("edición no válida: {0}")]
     Patch(#[from] PatchError),
     #[error("no existe una copia de seguridad con identificador {0}")]
@@ -76,6 +81,10 @@ pub struct ApprovalPreview {
     pub command: Option<String>,
     pub unified_diff: Option<String>,
     pub warnings: Vec<String>,
+    /// Motivo enviado por el agente, conservado tal cual.
+    #[serde(default)]
+    pub agent_reason: Option<String>,
+    /// Motivo de la política, distinto del motivo del agente.
     pub reason: String,
     pub matched_rule: String,
 }
@@ -87,7 +96,8 @@ pub enum ToolOutcome<T> {
     Executed(T),
     NeedsApproval {
         decision: PolicyDecision,
-        preview: ApprovalPreview,
+        /// Se boxea para no inflar el tamaño del enum con la vista previa.
+        preview: Box<ApprovalPreview>,
     },
     Denied(PolicyDecision),
 }
@@ -115,6 +125,11 @@ pub trait McpBackend {
     fn edits_dirty(&self, server_id: &str, canonical_path: &str) -> bool;
     /// Contexto de la interfaz: `(server_id, ruta remota actual)`.
     fn ui_context(&self) -> Option<(String, String)>;
+    /// ¿Hay interfaz gráfica abierta para resolver aprobaciones? En modo
+    /// headless la política falla cerrada; M3 podrá devolver `false`.
+    fn vela_gui_open(&self) -> bool {
+        true
+    }
     /// Directorio de configuración de Vela (siempre bloqueado para el agente).
     fn vela_config_dir(&self) -> Option<PathBuf>;
     fn home_dir(&self) -> Option<PathBuf> {
@@ -148,7 +163,7 @@ impl<B: McpBackend> Executor<B> {
     fn context(&self, server_id: &str, dirty: bool) -> crate::EvalContext {
         crate::EvalContext {
             server_connected: self.backend.session(server_id).is_some(),
-            vela_gui_open: true,
+            vela_gui_open: self.backend.vela_gui_open(),
             open_in_edits_dirty: dirty,
             home_dir: self.backend.home_dir(),
             vela_config_dir: self.backend.vela_config_dir(),
@@ -201,7 +216,10 @@ impl<B: McpBackend> Executor<B> {
             return Ok(Some(ToolOutcome::Denied(decision)));
         }
         if decision.outcome == Decision::Ask && mode == ApprovalMode::Normal {
-            return Ok(Some(ToolOutcome::NeedsApproval { decision, preview }));
+            return Ok(Some(ToolOutcome::NeedsApproval {
+                decision,
+                preview: Box::new(preview),
+            }));
         }
         Ok(None)
     }
@@ -394,6 +412,17 @@ impl<B: McpBackend> Executor<B> {
         }
         let effective_exec = policy.exec_mode.unwrap_or(profile.exec_mode);
         let effective_sudo = policy.sudo.unwrap_or(profile.sudo);
+        // Listas efectivas: perfil + servidor, con la denylist crítica ya
+        // incluida por `PermissionProfile::denied_paths()`.
+        let denied_remote_paths = merge_unique(profile.denied_paths(), &policy.denied_remote_paths);
+        let allowed_remote_paths = merge_unique(
+            profile.default_allowed_remote_paths.clone(),
+            &policy.allowed_remote_paths,
+        );
+        let allowed_commands =
+            merge_unique(profile.allowed_commands.clone(), &policy.allowed_commands);
+        let denied_commands =
+            merge_unique(profile.denied_commands.clone(), &policy.denied_commands);
         Ok(ToolOutcome::Executed(PermissionsInfo {
             server_id: info.id,
             alias: info.alias,
@@ -402,9 +431,11 @@ impl<B: McpBackend> Executor<B> {
             connected: info.connected,
             profile_id: info.effective_profile,
             operations,
-            allowed_remote_paths: policy.allowed_remote_paths,
-            denied_remote_paths: policy.denied_remote_paths,
+            allowed_remote_paths,
+            denied_remote_paths,
             allowed_local_paths: policy.allowed_local_paths,
+            allowed_commands,
+            denied_commands,
             exec_mode: format!("{effective_exec:?}").to_lowercase(),
             sudo: format!("{effective_sudo:?}").to_lowercase(),
         }))
@@ -417,20 +448,34 @@ impl<B: McpBackend> Executor<B> {
         input: GetUiContextInput,
         mode: ApprovalMode,
     ) -> Result<ToolOutcome<UiContext>, ExecutorError> {
-        let action = McpAction::GetUiContext {
-            server_id: input.server_id.clone(),
-        };
-        let ctx = self.context(&input.server_id, false);
-        let preview = Self::preview("get_ui_context", &input.server_id, &[]);
-        if let Some(outcome) = self.gate(&action, &ctx, mode, preview)? {
-            return Ok(outcome);
-        }
-        let (server_id, current_remote_path) = self
+        // La ruta abierta pertenece al servidor activo, no al que el agente
+        // diga: se comprueba primero la identidad y después la política de ese
+        // servidor real.
+        let (active_server, current_remote_path) = self
             .backend
             .ui_context()
             .ok_or_else(|| ExecutorError::NotFound("contexto de interfaz".into()))?;
+        if let Some(requested) = &input.server_id
+            && requested != &active_server
+        {
+            return Ok(ToolOutcome::Denied(PolicyDecision {
+                outcome: Decision::Deny,
+                matched_rule: "ui_context_server_mismatch".into(),
+                reason: "El contexto de la interfaz pertenece a otro servidor.".into(),
+                warnings: Vec::new(),
+                requires_launch_vela: false,
+            }));
+        }
+        let action = McpAction::GetUiContext {
+            server_id: active_server.clone(),
+        };
+        let ctx = self.context(&active_server, false);
+        let preview = Self::preview("get_ui_context", &active_server, &[]);
+        if let Some(outcome) = self.gate(&action, &ctx, mode, preview)? {
+            return Ok(outcome);
+        }
         Ok(ToolOutcome::Executed(UiContext {
-            server_id,
+            server_id: active_server,
             current_remote_path,
         }))
     }
@@ -461,8 +506,20 @@ impl<B: McpBackend> Executor<B> {
         }
         let depth = input.depth.unwrap_or(1).clamp(1, MAX_DEPTH);
         let root = PathBuf::from(&canonical);
+        let (allowed, denied) = self
+            .policy
+            .effective_remote_path_scopes(&input.server_id, ctx.now);
         let mut entries = Vec::new();
-        collect_entries(session, &root, &root, depth, &mut entries).await?;
+        collect_entries(
+            session,
+            &root,
+            &root,
+            depth,
+            &mut entries,
+            &allowed,
+            &denied,
+        )
+        .await?;
         if let Some(pattern) = &input.pattern {
             entries.retain(|entry| {
                 let full = root.join(&entry.path).to_string_lossy().into_owned();
@@ -603,6 +660,7 @@ impl<B: McpBackend> Executor<B> {
             &input.server_id,
             std::slice::from_ref(&canonical),
         );
+        preview.agent_reason = input.reason.clone();
         preview.unified_diff = Some(diff.clone());
         if let Some(outcome) = self.gate_decision(decision, mode, preview)? {
             return Ok(outcome);
@@ -645,29 +703,52 @@ impl<B: McpBackend> Executor<B> {
         let session = self.session(&input.server_id)?;
         let canonical = self.canonical_remote(session, &input.path, true).await?;
         let dirty = self.dirty_for(&input.server_id, std::slice::from_ref(&canonical));
-        let limit = self.rollback.config().max_file_bytes;
+        let ctx = self.context(&input.server_id, dirty);
+        // La política va ANTES de leer cualquier byte del archivo: si está
+        // denegado, debe devolver siempre `Denied`, sin filtrar con
+        // `PatchError::NotFound` ni con `BinaryFile` pistas sobre su contenido.
+        let action = McpAction::FsPatch {
+            server_id: input.server_id.clone(),
+            path: input.path.clone(),
+            canonical_path: Some(canonical.clone()),
+            size: None,
+        };
+        let first = self.policy.evaluate(&action, &ctx);
+        let edits_conflict = first
+            .warnings
+            .iter()
+            .any(|warning| matches!(warning, PolicyWarning::EditsConflict));
+        if first.outcome == Decision::Deny || edits_conflict {
+            return Ok(ToolOutcome::Denied(first));
+        }
+        // Tope propio de parcheo: no se usa `rollback.max_file_bytes`, porque
+        // un archivo más grande que el límite de copia debe poder parchearse y
+        // avisar con `FileExceedsRollbackLimit`.
+        let limit = MAX_PATCH_BYTES.max(self.rollback.config().max_file_bytes);
         let (original_bytes, truncated) = session
             .read_bytes_limited(PathBuf::from(&canonical), limit)
             .await?;
         if truncated {
-            return Err(ExecutorError::BinaryFile(canonical.clone()));
+            return Err(ExecutorError::FileTooLarge(canonical.clone()));
         }
         let original = Self::text(&original_bytes, &input.path)?;
         let result = patch::apply_edits(&original, &input.edits)?;
+        // Se reevalúa con el tamaño real para adjuntar el aviso de rollback.
         let action = McpAction::FsPatch {
             server_id: input.server_id.clone(),
             path: input.path.clone(),
             canonical_path: Some(canonical.clone()),
             size: Some(result.updated.len() as u64),
         };
-        let ctx = self.context(&input.server_id, dirty);
+        let decision = self.policy.evaluate(&action, &ctx);
         let mut preview = Self::preview(
             "fs_patch",
             &input.server_id,
             std::slice::from_ref(&canonical),
         );
+        preview.agent_reason = input.reason.clone();
         preview.unified_diff = Some(result.unified_diff.clone());
-        if let Some(outcome) = self.gate(&action, &ctx, mode, preview)? {
+        if let Some(outcome) = self.gate_decision(decision, mode, preview)? {
             return Ok(outcome);
         }
         let backup_id = self
@@ -710,11 +791,12 @@ impl<B: McpBackend> Executor<B> {
             canonical_path: Some(canonical.clone()),
         };
         let ctx = self.context(&input.server_id, dirty);
-        let preview = Self::preview(
+        let mut preview = Self::preview(
             "fs_mkdir",
             &input.server_id,
             std::slice::from_ref(&canonical),
         );
+        preview.agent_reason = input.reason.clone();
         if let Some(outcome) = self.gate(&action, &ctx, mode, preview)? {
             return Ok(outcome);
         }
@@ -741,7 +823,8 @@ impl<B: McpBackend> Executor<B> {
             to_canonical_path: Some(to.clone()),
         };
         let ctx = self.context(&input.server_id, dirty);
-        let preview = Self::preview("fs_move", &input.server_id, &[from.clone(), to.clone()]);
+        let mut preview = Self::preview("fs_move", &input.server_id, &[from.clone(), to.clone()]);
+        preview.agent_reason = input.reason.clone();
         if let Some(outcome) = self.gate(&action, &ctx, mode, preview)? {
             return Ok(outcome);
         }
@@ -767,11 +850,12 @@ impl<B: McpBackend> Executor<B> {
             canonical_path: Some(canonical.clone()),
         };
         let ctx = self.context(&input.server_id, dirty);
-        let preview = Self::preview(
+        let mut preview = Self::preview(
             "fs_delete",
             &input.server_id,
             std::slice::from_ref(&canonical),
         );
+        preview.agent_reason = input.reason.clone();
         if let Some(outcome) = self.gate(&action, &ctx, mode, preview)? {
             return Ok(outcome);
         }
@@ -823,11 +907,12 @@ impl<B: McpBackend> Executor<B> {
             canonical_path: Some(canonical.clone()),
         };
         let ctx = self.context(&input.server_id, dirty);
-        let preview = Self::preview(
+        let mut preview = Self::preview(
             "fs_chmod",
             &input.server_id,
             std::slice::from_ref(&canonical),
         );
+        preview.agent_reason = input.reason.clone();
         if let Some(outcome) = self.gate(&action, &ctx, mode, preview)? {
             return Ok(outcome);
         }
@@ -861,11 +946,12 @@ impl<B: McpBackend> Executor<B> {
             size: Some(size),
         };
         let ctx = self.context(&input.server_id, dirty);
-        let preview = Self::preview(
+        let mut preview = Self::preview(
             "transfer_upload",
             &input.server_id,
             &[local_canonical.clone(), remote.clone()],
         );
+        preview.agent_reason = input.reason.clone();
         if let Some(outcome) = self.gate(&action, &ctx, mode, preview)? {
             return Ok(outcome);
         }
@@ -902,11 +988,12 @@ impl<B: McpBackend> Executor<B> {
             size: None,
         };
         let ctx = self.context(&input.server_id, dirty);
-        let preview = Self::preview(
+        let mut preview = Self::preview(
             "transfer_download",
             &input.server_id,
             &[remote.clone(), local_canonical.clone()],
         );
+        preview.agent_reason = input.reason.clone();
         if let Some(outcome) = self.gate(&action, &ctx, mode, preview)? {
             return Ok(outcome);
         }
@@ -934,19 +1021,23 @@ impl<B: McpBackend> Executor<B> {
     ) -> Result<ToolOutcome<ExecOutput>, ExecutorError> {
         let session = self.session(&input.server_id)?;
         let ctx = self.context(&input.server_id, false);
-        // Primero se resuelve la ruta real del directorio de trabajo; después
-        // se evalúa la política, como en el resto de herramientas.
-        let canonical_cwd = match &input.cwd {
-            Some(cwd) => Some(self.canonical_remote(session, cwd, true).await?),
-            None => None,
-        };
         let action = McpAction::ExecCommand {
             server_id: input.server_id.clone(),
             command: input.command.clone(),
         };
         let mut decision = self.policy.evaluate(&action, &ctx);
+        // Un comando denegado nunca puede rebajarse a `Ask` por un cwd fuera
+        // del ámbito, ni siquiera con aprobación previa.
+        if decision.outcome == Decision::Deny {
+            return Ok(ToolOutcome::Denied(decision));
+        }
         let mut preview = Self::preview("exec_command", &input.server_id, &[]);
-        preview.command = Some(match &input.cwd {
+        preview.agent_reason = input.reason.clone();
+        let canonical_cwd = match &input.cwd {
+            Some(cwd) => Some(self.canonical_remote(session, cwd, true).await?),
+            None => None,
+        };
+        preview.command = Some(match &canonical_cwd {
             Some(cwd) => vela_core::exec_remote_command(&input.command, Some(cwd)),
             None => input.command.clone(),
         });
@@ -962,27 +1053,30 @@ impl<B: McpBackend> Executor<B> {
             if path_decision.outcome == Decision::Deny {
                 return Ok(ToolOutcome::Denied(path_decision));
             }
-            // Un cwd fuera de ámbito o que exige aprobación no puede
-            // sortearse: endurece la decisión global del comando.
-            if path_decision.outcome == Decision::Ask {
-                decision.warnings.extend(path_decision.warnings.clone());
+            // Solo un `Allow` puede elevarse a `Ask`: un `Ask` previo conserva
+            // su regla y su motivo; el `Deny` ya se ha devuelto arriba.
+            if path_decision.outcome == Decision::Ask && decision.outcome == Decision::Allow {
+                let mut warnings = decision.warnings.clone();
+                warnings.extend(path_decision.warnings.clone());
                 decision = PolicyDecision {
                     outcome: Decision::Ask,
                     matched_rule: path_decision.matched_rule.clone(),
                     reason: format!("Directorio de trabajo: {}", path_decision.reason),
-                    warnings: decision.warnings,
+                    warnings,
                     requires_launch_vela: decision.requires_launch_vela
                         || path_decision.requires_launch_vela,
                 };
             } else {
                 decision.warnings.extend(path_decision.warnings);
+                decision.requires_launch_vela |= path_decision.requires_launch_vela;
             }
         }
         if let Some(outcome) = self.gate_decision(decision, mode, preview)? {
             return Ok(outcome);
         }
         let options = ExecOptions {
-            cwd: input.cwd.clone(),
+            // Se ejecuta en la ruta canónica validada, no en la cadena cruda.
+            cwd: canonical_cwd,
             timeout: Duration::from_secs(input.timeout_secs.unwrap_or(30).clamp(1, 300)),
             max_output_bytes: 64 * 1024,
         };
@@ -997,11 +1091,20 @@ async fn collect_entries(
     directory: &Path,
     depth: u8,
     output: &mut Vec<FsEntry>,
+    allowed: &[String],
+    denied: &[String],
 ) -> Result<(), ExecutorError> {
     let mut listed = session.list_dir(directory.to_path_buf()).await?;
     listed.sort_by(|a, b| a.name.cmp(&b.name));
     for entry in listed {
         let full = directory.join(&entry.name);
+        // Ni se listan ni se recorren rutas de la denylist crítica, del perfil
+        // o del servidor (por ejemplo `.ssh` o `.env`).
+        let access = path::check_remote_path(&full.to_string_lossy(), None, allowed, denied);
+        if matches!(access, PathAccess::Denied { .. }) {
+            continue;
+        }
+        let can_descend = matches!(access, PathAccess::Allowed { .. });
         let relative = full
             .strip_prefix(root)
             .unwrap_or(&full)
@@ -1015,8 +1118,20 @@ async fn collect_entries(
             mode: entry.mode,
             mtime_secs: entry.mtime.and_then(system_secs),
         });
-        if depth > 1 && entry.is_directory() {
-            Box::pin(collect_entries(session, root, &full, depth - 1, output)).await?;
+        // Solo se desciende por directorios reales: `entry.is_directory()` es
+        // cierto para symlinks a directorios y permitiría salir del ámbito o
+        // entrar en un ciclo.
+        if depth > 1 && can_descend && entry.kind == vela_core::EntryKind::Directory {
+            Box::pin(collect_entries(
+                session,
+                root,
+                &full,
+                depth - 1,
+                output,
+                allowed,
+                denied,
+            ))
+            .await?;
         }
     }
     Ok(())
@@ -1028,6 +1143,17 @@ async fn previous_mode(session: &Session, path: &str) -> Option<u32> {
         .await
         .ok()
         .and_then(|entry| entry.mode)
+}
+
+/// Fusiona dos listas de reglas conservando el orden y evitando duplicados.
+fn merge_unique(base: Vec<String>, extra: &[String]) -> Vec<String> {
+    let mut merged = base;
+    for value in extra {
+        if !merged.contains(value) {
+            merged.push(value.clone());
+        }
+    }
+    merged
 }
 
 fn system_secs(time: SystemTime) -> Option<u64> {
@@ -1052,7 +1178,9 @@ pub struct DescribePermissionsInput {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct GetUiContextInput {
-    pub server_id: String,
+    /// Si se indica, debe coincidir con el servidor activo de la interfaz.
+    #[serde(default)]
+    pub server_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1210,6 +1338,8 @@ pub struct PermissionsInfo {
     pub allowed_remote_paths: Vec<String>,
     pub denied_remote_paths: Vec<String>,
     pub allowed_local_paths: Vec<String>,
+    pub allowed_commands: Vec<String>,
+    pub denied_commands: Vec<String>,
     pub exec_mode: String,
     pub sudo: String,
 }
@@ -1298,6 +1428,52 @@ pub struct TransferOutput {
 mod tests {
     use super::*;
 
+    #[derive(Clone)]
+    struct TestBackend {
+        ui: Option<(String, String)>,
+        gui_open: bool,
+        dirty: bool,
+    }
+
+    impl McpBackend for TestBackend {
+        fn list_servers(&self) -> Vec<(String, ServerIdentity)> {
+            Vec::new()
+        }
+        fn session(&self, _: &str) -> Option<&Session> {
+            None
+        }
+        fn edits_dirty(&self, _: &str, _: &str) -> bool {
+            self.dirty
+        }
+        fn ui_context(&self) -> Option<(String, String)> {
+            self.ui.clone()
+        }
+        fn vela_gui_open(&self) -> bool {
+            self.gui_open
+        }
+        fn vela_config_dir(&self) -> Option<PathBuf> {
+            None
+        }
+    }
+
+    fn plain_backend() -> TestBackend {
+        TestBackend {
+            ui: None,
+            gui_open: true,
+            dirty: false,
+        }
+    }
+
+    fn executor_with(
+        backend: TestBackend,
+        config: McpConfig,
+    ) -> (tempfile::TempDir, Executor<TestBackend>) {
+        let dir = tempfile::tempdir().unwrap();
+        let rollback =
+            Arc::new(RollbackStore::new(dir.path().join("rollback"), Default::default()).unwrap());
+        (dir, Executor::new(backend, config, rollback))
+    }
+
     #[test]
     fn inputs_and_outputs_round_trip_as_json() {
         let input = FsPatchInput {
@@ -1323,27 +1499,6 @@ mod tests {
 
     #[test]
     fn approved_once_still_denies_edits_conflict() {
-        struct Backend;
-        impl McpBackend for Backend {
-            fn list_servers(&self) -> Vec<(String, ServerIdentity)> {
-                Vec::new()
-            }
-            fn session(&self, _: &str) -> Option<&Session> {
-                None
-            }
-            fn edits_dirty(&self, _: &str, _: &str) -> bool {
-                false
-            }
-            fn ui_context(&self) -> Option<(String, String)> {
-                None
-            }
-            fn vela_config_dir(&self) -> Option<PathBuf> {
-                None
-            }
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let rollback =
-            Arc::new(RollbackStore::new(dir.path().join("rollback"), Default::default()).unwrap());
         let mut config = McpConfig {
             enabled: true,
             ..McpConfig::default()
@@ -1356,7 +1511,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let executor = Executor::new(Backend, config, rollback);
+        let (_dir, executor) = executor_with(plain_backend(), config);
         let mut ctx = executor.context("srv", true);
         ctx.server_connected = true;
         let action = McpAction::FsWrite {
@@ -1375,5 +1530,112 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(outcome.is_denied());
+    }
+
+    #[test]
+    fn get_ui_context_only_exposes_the_active_server_and_its_policy() {
+        let mut config = McpConfig {
+            enabled: true,
+            share_ui_context: true,
+            ..McpConfig::default()
+        };
+        config.servers.insert(
+            "activo".into(),
+            crate::ServerMcpPolicy {
+                availability: crate::ServerAvailability::Disabled,
+                profile_id: "readonly".into(),
+                ..Default::default()
+            },
+        );
+        config.servers.insert(
+            "otro".into(),
+            crate::ServerMcpPolicy {
+                availability: crate::ServerAvailability::Headless,
+                profile_id: "readonly".into(),
+                ..Default::default()
+            },
+        );
+        let backend = TestBackend {
+            ui: Some(("activo".into(), "/srv/activo".into())),
+            ..plain_backend()
+        };
+        let (_dir, executor) = executor_with(backend, config);
+
+        // Pedir un servidor distinto no revela la ruta del activo.
+        let outcome = executor
+            .get_ui_context(
+                GetUiContextInput {
+                    server_id: Some("otro".into()),
+                },
+                ApprovalMode::Normal,
+            )
+            .unwrap();
+        assert!(outcome.is_denied());
+        assert!(outcome.executed().is_none());
+
+        // Sin identificador se evalúa al servidor realmente activo: Disabled.
+        let outcome = executor
+            .get_ui_context(GetUiContextInput { server_id: None }, ApprovalMode::Normal)
+            .unwrap();
+        assert!(outcome.is_denied());
+    }
+
+    #[test]
+    fn vela_gui_open_false_fails_closed_on_ask() {
+        let mut config = McpConfig {
+            enabled: true,
+            ..McpConfig::default()
+        };
+        config.servers.insert(
+            "srv".into(),
+            crate::ServerMcpPolicy {
+                availability: crate::ServerAvailability::Headless,
+                profile_id: "development".into(),
+                allowed_remote_paths: vec!["/srv/api/**".into()],
+                ..Default::default()
+            },
+        );
+        let backend = TestBackend {
+            gui_open: false,
+            ..plain_backend()
+        };
+        let (_dir, executor) = executor_with(backend, config);
+        let ctx = executor.context("srv", false);
+        assert!(!ctx.vela_gui_open);
+        let action = McpAction::FsRead {
+            server_id: "srv".into(),
+            path: "/tmp/fuera".into(),
+            canonical_path: Some("/tmp/fuera".into()),
+        };
+        let decision = executor.policy.evaluate(&action, &ctx);
+        assert_eq!(decision.outcome, Decision::Deny);
+        assert_eq!(decision.matched_rule, "headless_fail_closed");
+    }
+
+    #[test]
+    fn approval_preview_keeps_the_agent_reason() {
+        let decision = PolicyDecision {
+            outcome: Decision::Ask,
+            matched_rule: "regla".into(),
+            reason: "motivo de la política".into(),
+            warnings: Vec::new(),
+            requires_launch_vela: false,
+        };
+        let preview = ApprovalPreview {
+            agent_reason: Some("motivo del agente".into()),
+            ..ApprovalPreview::default()
+        };
+        let (_dir, executor) = executor_with(plain_backend(), McpConfig::default());
+        let outcome: ToolOutcome<PathOutput> = executor
+            .gate_decision(decision, ApprovalMode::Normal, preview)
+            .unwrap()
+            .unwrap();
+        match outcome {
+            ToolOutcome::NeedsApproval { preview, .. } => {
+                assert_eq!(preview.agent_reason.as_deref(), Some("motivo del agente"));
+                assert_eq!(preview.reason, "motivo de la política");
+            }
+            other => panic!("se esperaba NeedsApproval: {other:?}"),
+        }
     }
 }

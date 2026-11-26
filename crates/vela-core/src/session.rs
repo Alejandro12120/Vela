@@ -491,45 +491,53 @@ impl Session {
     pub async fn exec(&self, command: String, options: ExecOptions) -> Result<ExecOutput, Error> {
         let spec = self.terminal.0.clone();
         let control_dir = self.terminal.1.clone();
-        let budget = options.timeout.min(ssh::MAX_EXEC_TIMEOUT);
-        let limit = options.max_output_bytes;
-        let remote = ssh::exec_remote_command(&command, options.cwd.as_deref());
-        let mut child = ssh::exec_process(&spec, &control_dir, &remote).spawn()?;
-        let mut stdout = child.stdout.take().expect("piped stdout");
-        let mut stderr = child.stderr.take().expect("piped stderr");
-        let out = tokio::spawn(async move { read_capped(&mut stdout, limit).await });
-        let err = tokio::spawn(async move { read_capped(&mut stderr, limit).await });
+        // El proceso, las lecturas concurrentes y la espera viven dentro de
+        // `run`, en el worker Tokio `vela-network`. Así se puede llamar desde
+        // el hilo de GPUI (sin reactor) y una desconexión aborta la operación:
+        // `kill_on_drop(true)` mata al `ssh` hijo y el `oneshot` devuelve
+        // `BrokenPipe` al llamante.
+        self.run(move |_sftp| async move {
+            let budget = options.timeout.min(ssh::MAX_EXEC_TIMEOUT);
+            let limit = options.max_output_bytes;
+            let remote = ssh::exec_remote_command(&command, options.cwd.as_deref());
+            let mut child = ssh::exec_process(&spec, &control_dir, &remote).spawn()?;
+            let mut stdout = child.stdout.take().expect("piped stdout");
+            let mut stderr = child.stderr.take().expect("piped stderr");
+            let out = tokio::spawn(async move { read_capped(&mut stdout, limit).await });
+            let err = tokio::spawn(async move { read_capped(&mut stderr, limit).await });
 
-        let started = Instant::now();
-        let (exit_code, timed_out) = match timeout(budget, child.wait()).await {
-            Ok(status) => (status?.code(), false),
-            Err(_) => {
-                let _ = child.start_kill();
-                let _ = timeout(ssh::EXIT_TIMEOUT, child.wait()).await;
-                (None, true)
-            }
-        };
-        let duration = started.elapsed();
-        let (stdout, stdout_truncated) = timeout(ssh::EXIT_TIMEOUT, out)
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or_default();
-        let (stderr, stderr_truncated) = timeout(ssh::EXIT_TIMEOUT, err)
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or_default();
+            let started = Instant::now();
+            let (exit_code, timed_out) = match timeout(budget, child.wait()).await {
+                Ok(status) => (status?.code(), false),
+                Err(_) => {
+                    let _ = child.start_kill();
+                    let _ = timeout(ssh::EXIT_TIMEOUT, child.wait()).await;
+                    (None, true)
+                }
+            };
+            let duration = started.elapsed();
+            let (stdout, stdout_truncated) = timeout(ssh::EXIT_TIMEOUT, out)
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or_default();
+            let (stderr, stderr_truncated) = timeout(ssh::EXIT_TIMEOUT, err)
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or_default();
 
-        Ok(ExecOutput {
-            exit_code,
-            stdout: String::from_utf8_lossy(&stdout).into_owned(),
-            stderr: sanitize_stderr(&String::from_utf8_lossy(&stderr), &control_dir),
-            stdout_truncated,
-            stderr_truncated,
-            timed_out,
-            duration,
+            Ok(ExecOutput {
+                exit_code,
+                stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                stderr: sanitize_stderr(&String::from_utf8_lossy(&stderr), &control_dir),
+                stdout_truncated,
+                stderr_truncated,
+                timed_out,
+                duration,
+            })
         })
+        .await
     }
 
     pub async fn list_dir(&self, path: PathBuf) -> Result<Vec<Entry>, Error> {

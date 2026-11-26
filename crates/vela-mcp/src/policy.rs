@@ -426,6 +426,31 @@ impl PolicyEngine {
         &mut self.jit
     }
 
+    /// Ámbitos remotos efectivos de un servidor: perfil activo (incluida una
+    /// elevación JIT), reglas del servidor y denylist crítica. Se usan también
+    /// al recorrer el árbol para no listar ni atravesar rutas denegadas.
+    pub fn effective_remote_path_scopes(
+        &self,
+        server_id: &str,
+        now: SystemTime,
+    ) -> (Vec<String>, Vec<String>) {
+        let policy = self
+            .config
+            .servers
+            .get(server_id)
+            .cloned()
+            .unwrap_or_default();
+        let profile_id = self
+            .jit
+            .active_profile_override(server_id, now)
+            .unwrap_or(&policy.profile_id)
+            .to_owned();
+        let profile = presets::resolve_profile(&self.config, &profile_id).unwrap_or_default();
+        let denied = path_scopes(&profile, &policy, true);
+        let allowed = path_scopes(&profile, &policy, false);
+        (allowed.remote, denied.remote)
+    }
+
     /// Evalúa una acción completa del agente.
     pub fn evaluate(&self, action: &McpAction, ctx: &EvalContext) -> PolicyDecision {
         if !self.config.enabled {

@@ -521,6 +521,61 @@ async fn fs_read_blocks_symlinks_outside_scope_and_into_ssh() {
     );
 }
 
+#[tokio::test]
+async fn fs_list_does_not_follow_directory_symlinks_or_enter_denied_folders() {
+    let fixture = Fixture::start();
+    let session = connect(&fixture).await;
+    let harness = Harness::new(&fixture, session, "development");
+    let executor = harness.executor();
+    let root = fixture.root();
+
+    // Un symlink a un directorio de otro ámbito dentro de `root`.
+    let outside = tempfile::tempdir().unwrap();
+    let outside_dir = outside.path().join("afuera");
+    fs::create_dir(&outside_dir).unwrap();
+    fs::write(outside_dir.join("secreto.txt"), "secreto\n").unwrap();
+    std::os::unix::fs::symlink(&outside_dir, root.join("enlace-dir")).unwrap();
+
+    // Una carpeta `.ssh` dentro de `root`, denegada por la denylist crítica.
+    let ssh = root.join(".ssh");
+    fs::create_dir(&ssh).unwrap();
+    fs::write(ssh.join("id_ed25519"), "clave privada\n").unwrap();
+
+    // Un subdirectorio normal, que sí debe recorrerse.
+    let sub = root.join("sub");
+    fs::create_dir(&sub).unwrap();
+    fs::write(sub.join("visible.txt"), "visible\n").unwrap();
+
+    let listed = within(executor.fs_list(
+        FsListInput {
+            server_id: "srv".into(),
+            path: root.to_string_lossy().into_owned(),
+            depth: Some(3),
+            pattern: None,
+        },
+        ApprovalMode::Normal,
+    ))
+    .await
+    .executed()
+    .unwrap();
+    let paths: Vec<&str> = listed
+        .entries
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect();
+    assert!(paths.contains(&"sub/visible.txt"), "{paths:?}");
+    // El symlink puede verse como entrado, pero nunca se atraviesa.
+    assert!(
+        !paths.iter().any(|path| path.starts_with("enlace-dir/")),
+        "{paths:?}"
+    );
+    assert!(
+        !paths.iter().any(|path| path.starts_with(".ssh")),
+        "{paths:?}"
+    );
+    assert!(!paths.contains(&"enlace-dir/secreto.txt"), "{paths:?}");
+}
+
 // fs_write, fs_patch y rollback ---------------------------------------------
 
 #[tokio::test]
@@ -636,6 +691,7 @@ async fn needs_approval_patch_shows_a_diff_and_changes_nothing_until_approved() 
         other => panic!("expected approval, got {other:?}"),
     };
     assert_eq!(preview.operation, "fs_patch");
+    assert_eq!(preview.agent_reason.as_deref(), Some("cambio revisado"));
     let diff = preview.unified_diff.unwrap();
     assert!(diff.contains("-antes"));
     assert!(diff.contains("+despues"));
@@ -708,6 +764,36 @@ async fn edits_conflict_denies_write_and_patch_without_touching_the_remote() {
         .await,
     );
     assert_eq!(fs::read(&remote).unwrap(), b"intacto\n");
+}
+
+#[tokio::test]
+async fn fs_patch_on_a_denied_env_file_never_reveals_its_content() {
+    let fixture = Fixture::start();
+    let session = connect(&fixture).await;
+    let harness = Harness::new(&fixture, session, "development");
+    let executor = harness.executor();
+    let secret = fixture.path(".env");
+    let original = b"PASSWORD=super-secreto\n";
+    fs::write(&secret, original).unwrap();
+
+    // `old_text` no existe: antes de la corrección esto devolvía
+    // `Err(PatchError::NotFound)`, distinto de `Denied`, y permitía sondear
+    // el contenido carácter a carácter.
+    let outcome = within(executor.fs_patch(
+        vela_mcp::FsPatchInput {
+            server_id: "srv".into(),
+            path: secret.to_string_lossy().into_owned(),
+            edits: vec![TextEdit {
+                old_text: "no-existe-en-el-archivo".into(),
+                new_text: "x".into(),
+            }],
+            reason: Some("sondeo".into()),
+        },
+        ApprovalMode::ApprovedOnce,
+    ))
+    .await;
+    assert_denied(outcome);
+    assert_eq!(fs::read(&secret).unwrap(), original);
 }
 
 // fs_mkdir, fs_move, fs_delete y fs_chmod -----------------------------------
@@ -1066,6 +1152,36 @@ async fn exec_command_validates_the_working_directory_with_policy() {
     }
 }
 
+#[tokio::test]
+async fn denied_command_is_not_downgraded_to_ask_by_an_out_of_scope_cwd() {
+    let fixture = Fixture::start();
+    let session = connect(&fixture).await;
+    let root = fixture.root();
+    let mut config = config(&root, "custom");
+    config.servers.get_mut("srv").unwrap().exec_mode = Some(ExecMode::AllowExceptDenylist);
+    config.servers.get_mut("srv").unwrap().denied_commands = vec!["rm *".into()];
+    let harness = Harness::with_config(&fixture, session, config);
+    let executor = harness.executor();
+
+    // `/tmp` está fuera del allowlist: antes de la corrección su `Ask` pisaba
+    // el `Deny` del comando y, con aprobación previa, llegaba a ejecutarse.
+    let outcome = within(executor.exec_command(
+        vela_mcp::ExecCommandInput {
+            server_id: "srv".into(),
+            command: "rm -rf /".into(),
+            cwd: Some("/tmp".into()),
+            timeout_secs: Some(10),
+            reason: None,
+        },
+        ApprovalMode::ApprovedOnce,
+    ))
+    .await;
+    match outcome {
+        ToolOutcome::Denied(decision) => assert_eq!(decision.outcome, Decision::Deny),
+        other => panic!("se esperaba Deny: {other:?}"),
+    }
+}
+
 // Introspección -------------------------------------------------------------
 
 #[tokio::test]
@@ -1120,7 +1236,10 @@ async fn list_servers_hides_disabled_and_identity_when_configured() {
 async fn describe_permissions_and_ui_context_work_without_a_live_transfer() {
     let fixture = Fixture::start();
     let session = connect(&fixture).await;
-    let harness = Harness::new(&fixture, session, "readonly");
+    let mut config = config(&fixture.root(), "diagnostics");
+    config.servers.get_mut("srv").unwrap().allowed_commands = vec!["mi-comando *".into()];
+    config.servers.get_mut("srv").unwrap().denied_commands = vec!["rm *".into()];
+    let harness = Harness::with_config(&fixture, session, config);
     let executor = harness.executor();
     let permissions = executor
         .describe_permissions(
@@ -1132,14 +1251,33 @@ async fn describe_permissions_and_ui_context_work_without_a_live_transfer() {
         .unwrap()
         .executed()
         .unwrap();
-    assert_eq!(permissions.profile_id, "readonly");
+    assert_eq!(permissions.profile_id, "diagnostics");
     assert_eq!(permissions.operations["fs_read"], Decision::Allow);
     assert_eq!(permissions.operations["fs_delete"], Decision::Deny);
+    // Listas efectivas: perfil + servidor + denylist crítica.
+    assert!(
+        permissions
+            .allowed_remote_paths
+            .contains(&format!("{}/**", fixture.root().display()))
+    );
+    assert!(
+        permissions
+            .denied_remote_paths
+            .iter()
+            .any(|path| path == "**/.env")
+    );
+    assert!(permissions.allowed_commands.contains(&"ls *".to_owned()));
+    assert!(
+        permissions
+            .allowed_commands
+            .contains(&"mi-comando *".to_owned())
+    );
+    assert!(permissions.denied_commands.contains(&"rm *".to_owned()));
 
     let context = executor
         .get_ui_context(
             vela_mcp::GetUiContextInput {
-                server_id: "srv".into(),
+                server_id: Some("srv".into()),
             },
             ApprovalMode::Normal,
         )

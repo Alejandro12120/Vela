@@ -107,7 +107,13 @@ impl RollbackStore {
         mode: Option<u32>,
         now: SystemTime,
     ) -> io::Result<Option<BackupEntry>> {
-        if !self.config.enabled || bytes.len() as u64 > self.config.max_file_bytes {
+        // No se escribe un blob que `prune()` borraría de inmediato: eso
+        // dejaría un `BackupEntry` colgante en la respuesta al agente.
+        if !self.config.enabled
+            || self.config.retention_hours == 0
+            || bytes.len() as u64 > self.config.max_file_bytes
+            || bytes.len() as u64 > self.config.max_total_bytes
+        {
             return Ok(None);
         }
         let digest = hex(&Sha256::digest(&bytes));
@@ -394,6 +400,39 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn snapshots_larger_than_the_total_quota_and_zero_retention_are_skipped() {
+        let (_dir, quota_store) = store(RollbackConfig {
+            max_total_bytes: 4,
+            ..RollbackConfig::default()
+        });
+        assert!(
+            quota_store
+                .record_snapshot("srv", "/grande", b"12345".to_vec(), None, at(100))
+                .unwrap()
+                .is_none()
+        );
+        assert!(quota_store.list(at(100)).unwrap().is_empty());
+        assert_eq!(
+            fs::read_dir(quota_store.dir().join(BLOBS_DIR))
+                .unwrap()
+                .count(),
+            0
+        );
+
+        let (_dir, no_retention) = store(RollbackConfig {
+            retention_hours: 0,
+            ..RollbackConfig::default()
+        });
+        assert!(
+            no_retention
+                .record_snapshot("srv", "/x", b"x".to_vec(), None, at(100))
+                .unwrap()
+                .is_none()
+        );
+        assert!(no_retention.list(at(100)).unwrap().is_empty());
     }
 
     #[test]

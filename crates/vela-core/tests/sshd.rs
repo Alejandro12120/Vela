@@ -16,7 +16,9 @@ use std::{
 
 use tempfile::TempDir;
 use tokio::time::timeout;
-use vela_core::{Auth, Client, ConnectCancel, ConnectionSpec, EntryKind, Error, Session, askpass};
+use vela_core::{
+    Auth, Client, ConnectCancel, ConnectionSpec, EntryKind, Error, ExecOptions, Session, askpass,
+};
 
 const SHORT_WAIT: Duration = Duration::from_secs(8);
 const CONNECT_WAIT: Duration = Duration::from_secs(40);
@@ -1743,4 +1745,53 @@ async fn remote_edit_watches_saves_and_preserves_the_remote_inode() {
     assert_eq!(fs::read(&remote).unwrap(), b"saved offline\n");
     assert_eq!(index.get(&target).unwrap().state, State::Synced);
     disconnect(&session).await;
+}
+
+#[tokio::test]
+async fn exec_runs_without_a_caller_tokio_runtime_and_stops_after_disconnect() {
+    let fixture = Fixture::start();
+    let client = client();
+    let spec = fixture.spec("b.pub");
+    // La clave del host ya está aceptada: no habrá prompt de askpass.
+    let host_pub = fs::read_to_string(fixture.path("host.pub")).unwrap();
+    fs::write(
+        fixture.path("known_hosts"),
+        format!("[127.0.0.1]:{} {}\n", fixture.port, host_pub.trim()),
+    )
+    .unwrap();
+    let session = connect(&client, spec, unexpected).await.unwrap();
+
+    // GPUI no tiene reactor Tokio: este hilo solo usa futures_lite::block_on.
+    let exec_session = session.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = futures_lite::future::block_on(exec_session.exec(
+            "printf sin-runtime".into(),
+            ExecOptions {
+                timeout: Duration::from_secs(10),
+                max_output_bytes: 4096,
+                ..ExecOptions::default()
+            },
+        ));
+        tx.send(result).unwrap();
+    });
+    let output = timeout(Duration::from_secs(20), async { rx.recv().unwrap() })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(output.stdout, "sin-runtime");
+    assert_eq!(output.exit_code, Some(0));
+
+    disconnect(&session).await;
+    let error = timeout(
+        SHORT_WAIT,
+        session.exec("printf despues".into(), ExecOptions::default()),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(
+        matches!(&error, Error::Io(source) if source.kind() == io::ErrorKind::BrokenPipe),
+        "se esperaba BrokenPipe tras desconectar: {error:?}"
+    );
 }

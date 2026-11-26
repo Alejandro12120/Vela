@@ -57,6 +57,13 @@ pub fn folder_name(number: usize) -> String {
     }
 }
 
+pub fn file_name(number: usize) -> String {
+    match number {
+        1 => "untitled.txt".into(),
+        n => format!("untitled {n}.txt"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,5 +88,12 @@ mod tests {
         }
         assert_eq!(folder_name(1), "untitled folder");
         assert_eq!(folder_name(2), "untitled folder 2");
+    }
+
+    #[test]
+    fn numbers_text_files_before_the_extension() {
+        assert_eq!(file_name(1), "untitled.txt");
+        assert_eq!(file_name(2), "untitled 2.txt");
+        assert_eq!(file_name(3), "untitled 3.txt");
     }
 }

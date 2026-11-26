@@ -15,6 +15,7 @@ use crate::{
 #[derive(Clone, Copy)]
 pub enum Action {
     NewFolder,
+    NewFile,
     Rename,
     Run,
     RunInKitty,
@@ -82,6 +83,13 @@ impl Menu {
                 IconName::FolderPlus,
                 "New Folder",
                 crate::keybindings::shortcut("⌘⇧N", "Ctrl+⇧N"),
+                true,
+            ),
+            Item::new(
+                Action::NewFile,
+                IconName::FilePlus,
+                "New Text File",
+                "",
                 true,
             ),
             Item::new(

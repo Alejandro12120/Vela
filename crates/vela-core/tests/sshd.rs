@@ -507,6 +507,32 @@ async fn within<T>(future: impl Future<Output = Result<T, Error>>) -> T {
 }
 
 #[tokio::test]
+async fn creates_empty_files_exclusively() {
+    let fixture = Fixture::start();
+    let client = client();
+    let session = trust_first(&client, fixture.spec("b.pub")).await;
+    let path = fixture.path("untitled.txt");
+    within(session.create_file(path.clone())).await;
+    assert_eq!(fs::read(&path).unwrap(), b"");
+
+    fs::write(&path, b"keep this").unwrap();
+    let link = fixture.path("dangling");
+    symlink("missing", &link).unwrap();
+    for occupied in [&path, &link] {
+        let result = timeout(SHORT_WAIT, session.create_file(occupied.clone()))
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, Err(Error::Io(error)) if error.kind() == io::ErrorKind::AlreadyExists)
+        );
+    }
+    assert_eq!(fs::read(&path).unwrap(), b"keep this");
+    assert_eq!(fs::read_link(link).unwrap(), Path::new("missing"));
+    assert!(!fixture.path("missing").exists());
+    disconnect(&session).await;
+}
+
+#[tokio::test]
 async fn transfers_and_edits_files_in_place() {
     let fixture = Fixture::start();
     let client = client();

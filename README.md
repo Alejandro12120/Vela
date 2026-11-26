@@ -20,7 +20,7 @@ Vela puts a dual-pane SFTP file manager and an SSH terminal in one native binary
 
 ## What Vela does
 
-- **Dual-pane SFTP browser.** Local files sit on the left and remote files sit on the right. Folders expand in place like Finder inside virtualized lists. Dragging inside a pane moves items, and dragging to the opposite pane copies them through a transfer queue.
+- **Dual-pane SFTP browser.** Local files sit on the left and remote files sit on the right. Folders expand in place like Finder inside virtualized lists. Right-click either pane to create a New Folder or New Text File. Dragging inside a pane moves items, and dragging to the opposite pane copies them through a transfer queue.
 - **System OpenSSH transport.** Vela honors `~/.ssh/config`, `ProxyJump`, and `known_hosts`. It keeps one `ControlMaster` connection per server, so OpenSSH asks for a password, passphrase, or agent approval once per session.
 - **Bitwarden SSH agent and password auth.** The server form lists keys from your Bitwarden SSH agent and passes `IdentitiesOnly=yes` with the chosen public key, so extra keys do not exhaust authentication attempts. Password authentication prompts at connection time and never writes passwords to disk.
 - **Remote editing with upload on save.** Double-clicking a remote text file downloads a working copy and opens it in your editor, including VS Code, Cursor, Zed, Sublime Text, or the OS default. When you save, Vela checks the remote file for conflicts and uploads in place, keeping the remote inode, owner, and permissions.

@@ -74,6 +74,38 @@ impl Source {
         unreachable!()
     }
 
+    pub(crate) async fn create_file(
+        &self,
+        parent: PathBuf,
+        executor: &BackgroundExecutor,
+    ) -> Result<PathBuf, Error> {
+        for index in 1.. {
+            let path = parent.join(rename::file_name(index));
+            let result = match self {
+                Self::Local => {
+                    let candidate = path.clone();
+                    executor
+                        .spawn(async move {
+                            std::fs::OpenOptions::new()
+                                .write(true)
+                                .create_new(true)
+                                .open(candidate)
+                                .map(|_| ())
+                                .map_err(Error::Io)
+                        })
+                        .await
+                }
+                Self::Remote(session) => session.create_file(path.clone()).await,
+            };
+            match result {
+                Ok(()) => return Ok(path),
+                Err(Error::Io(error)) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!()
+    }
+
     pub async fn delete(&self, path: PathBuf, executor: &BackgroundExecutor) -> Result<(), Error> {
         match self {
             Self::Local => {
@@ -425,6 +457,7 @@ impl Pane {
         self.list_focus.focus(window, cx);
         match action {
             Action::NewFolder => self.new_folder(folder, window, cx),
+            Action::NewFile => self.new_item(folder, false, window, cx),
             Action::Rename => self.start_selected_rename(window, cx),
             Action::Run => self.run_selected(false, window, cx),
             Action::RunInKitty => self.run_selected(true, window, cx),
@@ -628,11 +661,25 @@ impl Pane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.new_item(parent, true, window, cx);
+    }
+
+    fn new_item(
+        &mut self,
+        parent: PathBuf,
+        directory: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let source = self.source.clone();
         let executor = cx.background_executor().clone();
         let revision = self.tree_revision;
         cx.spawn_in(window, async move |this, cx| {
-            let result = source.create_folder(parent.clone(), &executor).await;
+            let result = if directory {
+                source.create_folder(parent.clone(), &executor).await
+            } else {
+                source.create_file(parent.clone(), &executor).await
+            };
             let _ = this.update_in(cx, |this, window, cx| {
                 if this.tree_revision != revision {
                     return;
@@ -645,7 +692,8 @@ impl Pane {
                         this.refresh_changed([parent], Some(path), window, cx);
                     }
                     Err(error) => {
-                        this.path_error = Some(format!("Couldn't create the folder: {error}"))
+                        let item = if directory { "folder" } else { "file" };
+                        this.path_error = Some(format!("Couldn't create the {item}: {error}"));
                     }
                 }
                 cx.notify();

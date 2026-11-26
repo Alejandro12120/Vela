@@ -431,6 +431,12 @@ impl Session {
             .await
     }
 
+    /// Creates an empty file exclusively. An occupied name yields AlreadyExists.
+    pub async fn create_file(&self, path: PathBuf) -> Result<(), Error> {
+        self.run(move |sftp| async move { sftp::create_file(&sftp, &path).await })
+            .await
+    }
+
     pub async fn rename(&self, from: PathBuf, to: PathBuf) -> Result<(), Error> {
         self.run(move |sftp| async move {
             transfer::ensure_remote_free(&sftp, &to).await?;

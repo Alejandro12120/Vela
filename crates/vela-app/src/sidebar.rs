@@ -515,10 +515,10 @@ fn update_banner(workspace: &Workspace, theme: Theme) -> Option<AnyElement> {
 }
 
 fn settings_button(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -> Stateful<Div> {
-    let background = if workspace.settings_open() {
-        theme.selection
+    let (background, hover) = if workspace.settings_open() {
+        (theme.selection, theme.selection)
     } else {
-        theme.panel
+        (theme.panel, theme.hover)
     };
 
     div()
@@ -538,7 +538,7 @@ fn settings_button(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>)
         .border_1()
         .border_color(gpui::transparent_black())
         .cursor_pointer()
-        .hover(move |style| style.bg(theme.hover))
+        .hover(move |style| style.bg(hover))
         .active(move |style| style.bg(theme.selection))
         .focus_visible(move |style| style.border_color(theme.accent))
         .child(

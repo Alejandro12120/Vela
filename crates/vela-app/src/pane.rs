@@ -695,7 +695,7 @@ impl Pane {
             .child(
                 icon_button(
                     "up",
-                    "Upload",
+                    "Enclosing Folder",
                     IconName::Up,
                     self.target(Navigation::Up).is_some(),
                     theme,
@@ -1289,7 +1289,7 @@ impl Render for Pane {
                                     .left(px(8.))
                                     .text_size(px(12.))
                                     .text_color(theme.secondary_text)
-                                    .child("Empty Folder"),
+                                    .child("Empty folder"),
                             )
                         })
                         .when(

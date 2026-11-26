@@ -2026,7 +2026,9 @@ impl Workspace {
         let sources = [TerminalColorSource::Theme, TerminalColorSource::Kitty];
         let choose_source = cx.listener(move |this, index: &usize, window, cx| {
             let source = sources[*index];
-            if source == effective {
+            // Compare with the saved choice, so picking Vela theme while a saved
+            // kitty choice falls back (no kitty.conf) still persists it.
+            if source == this.settings.terminal_colors {
                 return;
             }
             let mut next = this.settings.clone();

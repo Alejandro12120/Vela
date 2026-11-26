@@ -145,6 +145,7 @@ pub struct Workspace {
     pub dir: Option<PathBuf>,
     pub saving: bool,
     pub update_state: UpdateState,
+    pub update_tooltip: (gpui::SharedString, gpui::SharedString),
     update_check: Option<gpui::Task<()>>,
     /// The card being dragged in the server list, until the drag ends.
     pub reorder: Option<ServerReorder>,
@@ -370,7 +371,7 @@ impl Workspace {
                                 notes_url: None,
                                 changelog: Some("## What's changed\n- Improved sidebar update controls\n- Imported preferences and pending edits from vSCP".into()),
                             };
-                            this.update_state = match preview {
+                            this.set_update_state(match preview {
                                 dev::UpdatePreview::Checking => UpdateState::Checking,
                                 dev::UpdatePreview::Available | dev::UpdatePreview::Confirm => UpdateState::Available {
                                     release: fake_release(),
@@ -386,7 +387,7 @@ impl Workspace {
                                     release: fake_release(),
                                     error: Some("Couldn't download the update.".into()),
                                 },
-                            };
+                            });
                             if preview == dev::UpdatePreview::Confirm {
                                 this.confirm_update(window, cx);
                             }
@@ -490,6 +491,7 @@ impl Workspace {
             dir: None,
             saving: false,
             update_state: UpdateState::Idle,
+            update_tooltip: sidebar::format_update_tooltip(&UpdateState::Idle),
             update_check: None,
             reorder: None,
             settle: None,
@@ -528,17 +530,22 @@ impl Workspace {
         self.dialog = None;
         self.prompt_task.take();
         self.prompts.clear();
+        let mut terminal_cleanup = Vec::new();
         for connection in self.connections.values() {
             if let Connection::Connected { panes, .. } = connection
                 && let Some(terminal) = &panes.terminal
+                && let Some(task) = terminal.update(cx, |terminal, cx| terminal.stop(cx))
             {
-                terminal.update(cx, |terminal, _| terminal.stop());
+                terminal_cleanup.push(task);
             }
         }
         self.connections.clear();
         let client = self.client.clone();
         let index = self.edits.shutdown();
         async move {
+            for cleanup in terminal_cleanup {
+                cleanup.await;
+            }
             if let Some(client) = client {
                 client.shutdown().await;
             }
@@ -601,7 +608,7 @@ impl Workspace {
             return;
         }
         self.update_check = None;
-        self.update_state = UpdateState::Checking;
+        self.set_update_state(UpdateState::Checking);
         cx.notify();
         let config = self.updater_config();
         let task = cx
@@ -616,18 +623,18 @@ impl Workspace {
                 match result {
                     Ok(vela_core::updater::CheckOutcome::UpdateAvailable(release)) => {
                         dev::log(format_args!("update available: v{}", release.version));
-                        this.update_state = UpdateState::Available {
+                        this.set_update_state(UpdateState::Available {
                             release: *release,
                             error: None,
-                        };
+                        });
                     }
                     Ok(vela_core::updater::CheckOutcome::UpToDate) => {
                         dev::log("update: Vela is up to date");
-                        this.update_state = UpdateState::Idle;
+                        this.set_update_state(UpdateState::Idle);
                     }
                     Err(err) => {
                         dev::log(format_args!("update: {err}"));
-                        this.update_state = UpdateState::Idle;
+                        this.set_update_state(UpdateState::Idle);
                     }
                 }
                 cx.notify();
@@ -635,9 +642,15 @@ impl Workspace {
         }));
     }
 
+    pub(super) fn set_update_state(&mut self, state: UpdateState) {
+        self.update_tooltip = sidebar::format_update_tooltip(&state);
+        self.update_state = state;
+    }
+
     fn set_update_progress(&mut self, value: f32, cx: &mut Context<Self>) {
         if let UpdateState::Installing { progress, .. } = &mut self.update_state {
             *progress = value.clamp(0., 1.);
+            self.update_tooltip = sidebar::format_update_tooltip(&self.update_state);
             cx.notify();
         }
     }
@@ -659,18 +672,18 @@ impl Workspace {
         let target = match vela_core::updater::InstallTarget::detect_current() {
             Ok(target) => target,
             Err(err) => {
-                self.update_state = UpdateState::Available {
+                self.set_update_state(UpdateState::Available {
                     release,
                     error: Some(err.to_string()),
-                };
+                });
                 cx.notify();
                 return;
             }
         };
-        self.update_state = UpdateState::Installing {
+        self.set_update_state(UpdateState::Installing {
             release: release.clone(),
             progress: 0.03,
-        };
+        });
         cx.notify();
         let config = self.updater_config();
         let include_prereleases = config.include_prereleases;
@@ -703,14 +716,14 @@ impl Workspace {
                         let message = err.to_string();
                         let _ = this.update_in(cx, |this, window, cx| {
                             if this.settings.include_prereleases != include_prereleases {
-                                this.update_state = UpdateState::Idle;
+                                this.set_update_state(UpdateState::Idle);
                                 this.recheck_for_updates(window, cx);
                                 return;
                             }
-                            this.update_state = UpdateState::Available {
+                            this.set_update_state(UpdateState::Available {
                                 release: release.clone(),
                                 error: Some(message),
-                            };
+                            });
                             cx.notify();
                         });
                         return;
@@ -1242,12 +1255,15 @@ impl Workspace {
         else {
             return;
         };
-        if let Some(terminal) = panes.terminal {
-            terminal.update(cx, |terminal, _| terminal.stop());
-        }
+        let terminal_cleanup = panes
+            .terminal
+            .and_then(|terminal| terminal.update(cx, |terminal, cx| terminal.stop(cx)));
         let id = id.to_owned();
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
+            if let Some(cleanup) = terminal_cleanup {
+                cleanup.await;
+            }
             let result = session.disconnect().await;
             let _ = this.update_in(cx, |this, _, cx| {
                 match result {
@@ -1730,6 +1746,9 @@ impl Workspace {
                                 || matches!(this.connections.get(id), Some(Connection::Error(_)))
                             {
                                 this.connections.remove(id);
+                            }
+                            if server.is_none() {
+                                this.pane_memory.remove(id);
                             }
                             this.warnings.remove(id);
                         }
@@ -3629,7 +3648,7 @@ mod tests {
                 }
             );
             workspace.update(cx, |this, cx| {
-                this.update_state = state;
+                this.set_update_state(state);
                 cx.notify();
             });
             cx.update(|window, _| window.refresh());
@@ -3673,10 +3692,10 @@ mod tests {
         let (workspace, cx) = open(dir.path(), cx);
         let release = test_release();
         workspace.update(cx, |this, cx| {
-            this.update_state = UpdateState::Available {
+            this.set_update_state(UpdateState::Available {
                 release,
                 error: None,
-            };
+            });
             cx.notify();
         });
         cx.update(|window, _| window.refresh());

@@ -125,6 +125,14 @@ fn main() {
                                 ..Default::default()
                             },
                             |window, cx| {
+                                #[cfg(target_os = "linux")]
+                                window.on_next_frame(|_, cx| {
+                                    cx.background_executor()
+                                        .spawn(async {
+                                            let _ = crate::theme::monospace();
+                                        })
+                                        .detach();
+                                });
                                 let workspace = cx.new(|cx| {
                                     Workspace::new(client, trace_startup, loaded, window, cx)
                                 });

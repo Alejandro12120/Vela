@@ -252,6 +252,11 @@ fn migrate_with_cache(
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
             // The original directory migration copied edits.toml verbatim. Repair
             // outdated paths even if that migration already removed the source config.
+            if fs::metadata(target.join("edits.toml"))
+                .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+            {
+                return Ok(false);
+            }
             return edit::migrate_index(legacy, target, edit_root, legacy_cache);
         }
         Err(err) => return Err(err),

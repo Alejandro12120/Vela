@@ -12,7 +12,8 @@ use futures_lite::StreamExt;
 use openssh_sftp_client::{Sftp, SftpOptions, error::SftpErrorKind, metadata::MetaData};
 use tokio::{
     fs,
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
+    task::JoinSet,
     time::timeout,
 };
 
@@ -22,6 +23,8 @@ use crate::{
 };
 
 const CHUNK_SIZE: usize = 64 * 1024;
+const BULK_CHUNK_SIZE: usize = 3 * CHUNK_SIZE;
+pub(crate) const METADATA_CONCURRENCY: usize = 32;
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -83,8 +86,8 @@ pub(crate) async fn open(master: &Master) -> Result<(Sftp, Process), Error> {
     let stdout = process.child.stdout.take().expect("piped stdout");
     let err = match timeout(
         ssh::CONNECT_TIMEOUT,
-        // File reads and writes are issued serially. Flush each promptly so the
-        // client can receive its reply and issue the next request.
+        // Flush lone requests promptly and allow concurrent requests to share
+        // the outgoing buffer.
         Sftp::new(
             stdin,
             stdout,
@@ -142,18 +145,39 @@ pub(crate) async fn list_dir(sftp: &Sftp, path: &Path) -> Result<Vec<Entry>, Err
     let mut entries = read_dir(sftp, path).await?;
     // READDIR supplies link metadata. Follow just the links to determine whether
     // they can be expanded, keeping broken or inaccessible links in the result.
-    let mut fs = sftp.fs();
-    for entry in entries
-        .iter_mut()
-        .filter(|entry| entry.kind == EntryKind::Symlink)
-    {
-        entry.symlink_target_kind = fs
-            .metadata(path.join(&entry.name))
-            .await
-            .ok()
-            .map(|meta| kind(&meta));
+    let mut requests = JoinSet::new();
+    for index in 0..entries.len() {
+        let entry = &entries[index];
+        if entry.kind != EntryKind::Symlink {
+            continue;
+        }
+        if requests.len() == METADATA_CONCURRENCY {
+            read_link_result(&mut requests, &mut entries).await?;
+        }
+        let remote = path.join(&entries[index].name);
+        let mut fs = sftp.fs();
+        requests.spawn(async move {
+            (
+                index,
+                fs.metadata(remote).await.ok().map(|meta| kind(&meta)),
+            )
+        });
+    }
+    while !requests.is_empty() {
+        read_link_result(&mut requests, &mut entries).await?;
     }
     Ok(entries)
+}
+
+async fn read_link_result(
+    requests: &mut JoinSet<(usize, Option<EntryKind>)>,
+    entries: &mut [Entry],
+) -> Result<(), Error> {
+    if let Some(result) = requests.join_next().await {
+        let (index, kind) = result.map_err(io::Error::other)?;
+        entries[index].symlink_target_kind = kind;
+    }
+    Ok(())
 }
 
 pub(crate) async fn stat(sftp: &Sftp, path: &Path) -> Result<Entry, Error> {
@@ -230,7 +254,7 @@ pub(crate) async fn upload(
         .truncate(true)
         .open(remote)
         .await?;
-    let result = write_file(&mut source, &mut destination, progress, cancel).await;
+    let result = write_file(&mut source, &mut destination, progress, cancel, false).await;
     let closed = destination.close().await;
     result?;
     Ok(closed?)
@@ -243,21 +267,60 @@ pub(crate) async fn read_file(
     cancel: &AtomicBool,
     budget: Option<(u64, u64)>,
 ) -> Result<(), Error> {
+    check_cancel(cancel)?;
     let mut done = 0u64;
-    let mut buffer = Default::default();
-    loop {
-        check_cancel(cancel)?;
-        let Some(chunk) = source.read(CHUNK_SIZE as u32, buffer).await? else {
-            break;
-        };
-        done = done.saturating_add(chunk.len() as u64);
-        if let Some((start, limit)) = budget {
-            crate::transfer::check_size(start.saturating_add(done), limit)?;
+    let mut spare = Default::default();
+    let mut offset = source.offset();
+    let mut chunk = source.read(CHUNK_SIZE as u32, Default::default()).await?;
+    while let Some(mut current) = chunk {
+        if current.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "SFTP server returned an empty data packet",
+            )
+            .into());
         }
-        destination.write_all(&chunk).await?;
-        progress(done);
-        buffer = chunk;
-        buffer.clear();
+        // SFTP servers may return a short read before EOF. The client
+        // advances by the request length, so resume at the last received byte.
+        offset = offset.saturating_add(current.len() as u64);
+        if source.offset() != offset {
+            source.seek(io::SeekFrom::Start(offset)).await?;
+        }
+        let prefetch = current.len() >= CHUNK_SIZE
+            && !cancel.load(Ordering::Relaxed)
+            && budget.is_none_or(|(start, limit)| {
+                start
+                    .saturating_add(done)
+                    .saturating_add(current.len() as u64)
+                    <= limit
+            });
+        let write = async {
+            for (index, part) in current.chunks(CHUNK_SIZE).enumerate() {
+                if index != 0 {
+                    check_cancel(cancel)?;
+                }
+                done = done.saturating_add(part.len() as u64);
+                if let Some((start, limit)) = budget {
+                    crate::transfer::check_size(start.saturating_add(done), limit)?;
+                }
+                destination.write_all(part).await?;
+                progress(done);
+            }
+            Ok::<_, Error>(())
+        };
+        if !prefetch {
+            write.await?;
+            check_cancel(cancel)?;
+            current.clear();
+            chunk = source.read(CHUNK_SIZE as u32, current).await?;
+        } else {
+            let (written, next) = tokio::join!(write, source.read(BULK_CHUNK_SIZE as u32, spare));
+            written?;
+            check_cancel(cancel)?;
+            chunk = next?;
+            current.clear();
+            spare = current;
+        }
     }
     destination.flush().await?;
     source.close().await?;
@@ -269,17 +332,44 @@ pub(crate) async fn write_file(
     destination: &mut openssh_sftp_client::file::File,
     progress: &(dyn Fn(u64) + Send + Sync),
     cancel: &AtomicBool,
+    staged: bool,
 ) -> Result<(), Error> {
+    check_cancel(cancel)?;
     let mut buffer = vec![0; CHUNK_SIZE];
+    let mut spare = Vec::new();
     let mut done = 0;
-    loop {
-        check_cancel(cancel)?;
-        let len = source.read(&mut buffer).await?;
-        if len == 0 {
-            return Ok(());
+    let mut len = source.read(&mut buffer).await?;
+    // A staged upload can combine several acknowledged progress increments
+    // in one packet. An in-place write keeps its original cancellation boundary.
+    let bulk_size = if staged { BULK_CHUNK_SIZE } else { CHUNK_SIZE };
+    while len != 0 {
+        if staged {
+            check_cancel(cancel)?;
         }
-        destination.write_all(&buffer[..len]).await?;
-        done += len as u64;
-        progress(done);
+        if len < CHUNK_SIZE || cancel.load(Ordering::Relaxed) {
+            destination.write_all(&buffer[..len]).await?;
+            done += len as u64;
+            progress(done);
+            check_cancel(cancel)?;
+            len = source.read(&mut buffer).await?;
+        } else {
+            if spare.len() != bulk_size {
+                spare.resize(bulk_size, 0);
+            }
+            // Keep remote writes in order, including in-place edit uploads.
+            let (written, next) = tokio::join!(
+                destination.write_all(&buffer[..len]),
+                source.read(&mut spare),
+            );
+            written?;
+            for part in buffer[..len].chunks(CHUNK_SIZE) {
+                done += part.len() as u64;
+                progress(done);
+                check_cancel(cancel)?;
+            }
+            len = next?;
+            std::mem::swap(&mut buffer, &mut spare);
+        }
     }
+    Ok(())
 }

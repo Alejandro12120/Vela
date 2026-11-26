@@ -18,7 +18,7 @@ use vela_core::{EntryKind, Error, Session, local};
 use crate::{
     components::{motion, text_input::TextInput},
     dev,
-    drop_target::{self, DropTarget, RowInfo, Target},
+    drop_target::{self, DropTarget, Target},
     file_metadata,
     icons::{IconName, icon},
     theme::Theme,
@@ -200,6 +200,36 @@ impl Source {
             )),
         }
         result.map_err(|error| error.split_whitespace().collect::<Vec<_>>().join(" "))
+    }
+
+    async fn list_branches(
+        &self,
+        paths: impl IntoIterator<Item = Arc<Path>>,
+        executor: &BackgroundExecutor,
+    ) -> Vec<Listing> {
+        const CONCURRENT_LISTINGS: usize = 16;
+        let mut paths = paths.into_iter();
+        let mut listings = Vec::new();
+        loop {
+            let tasks: Vec<_> = paths
+                .by_ref()
+                .take(CONCURRENT_LISTINGS)
+                .map(|path| {
+                    let source = self.clone();
+                    let background = executor.clone();
+                    executor.spawn(async move {
+                        let result = source.list(&path, &background).await;
+                        (path, result)
+                    })
+                })
+                .collect();
+            if tasks.is_empty() {
+                return listings;
+            }
+            for task in tasks {
+                listings.push(task.await);
+            }
+        }
     }
 }
 
@@ -526,19 +556,21 @@ impl Pane {
         let task = cx.spawn_in(window, async move |this, cx| {
             let mut queue = vec![root];
             let mut listings: Vec<Listing> = Vec::new();
-            while let Some(path) = queue.pop() {
-                let result = source.list(&path, &executor).await;
-                if let Ok(children) = &result {
-                    queue.extend(
-                        children
-                            .iter()
-                            .filter(|child| {
-                                child.entry.is_directory() && expanded.contains(&child.path)
-                            })
-                            .map(|child| child.path.clone()),
-                    );
+            while !queue.is_empty() {
+                let level = source.list_branches(queue.drain(..), &executor).await;
+                for (_, result) in &level {
+                    if let Ok(children) = result {
+                        queue.extend(
+                            children
+                                .iter()
+                                .filter(|child| {
+                                    child.entry.is_directory() && expanded.contains(&child.path)
+                                })
+                                .map(|child| child.path.clone()),
+                        );
+                    }
                 }
-                listings.push((path, result));
+                listings.extend(level);
             }
             let _ = this.update_in(cx, |this, window, cx| {
                 if this.finish_location(revision) {
@@ -632,7 +664,7 @@ impl Pane {
         };
         let row = &self.tree.rows[index];
         if row.entry().is_some_and(|entry| entry.is_directory()) && row.expanded != right {
-            self.set_expanded(row.path.clone(), right, window, cx);
+            self.set_expanded(row.path().clone(), right, window, cx);
         } else if !right {
             self.tree.select_parent(index);
             self.check_copy_selection();
@@ -644,7 +676,7 @@ impl Pane {
     fn open_folder(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let row = &self.tree.rows[index];
         if row.entry().is_some_and(|entry| entry.is_directory()) {
-            self.open(row.path.to_path_buf(), Navigation::Open, window, cx);
+            self.open(row.path().to_path_buf(), Navigation::Open, window, cx);
         }
     }
 
@@ -771,7 +803,7 @@ impl Pane {
             // Border slices must remain opaque while a spring-loaded branch appears.
             return row.into_any_element();
         }
-        let path = &self.tree.rows[index].path;
+        let path = self.tree.rows[index].path();
         match &self.expansion {
             Some(expansion)
                 if expansion.since.elapsed() < FADE_WINDOW
@@ -831,8 +863,8 @@ impl Pane {
         };
         let Some(entry) = row.entry() else {
             let (text, color) = match &row.state {
-                RowState::Loading => ("Loading…".into(), theme.secondary_text),
-                RowState::Error(error) => (format!("Couldn't read: {error}"), theme.danger),
+                RowState::Loading(_) => ("Loading…".into(), theme.secondary_text),
+                RowState::Error(_, error) => (format!("Couldn't read: {error}"), theme.danger),
                 RowState::Entry(_) => unreachable!(),
             };
             let inset = if columns.size { 18. } else { 4. };
@@ -852,8 +884,8 @@ impl Pane {
 
         let expanded = row.expanded;
         let expandable = entry.is_directory();
-        let selected = self.tree.selected.contains(&row.path);
-        let path = row.path.clone();
+        let selected = self.tree.selected.contains(row.path());
+        let path = row.path().clone();
         let name = entry.name.to_string_lossy().into_owned();
         let file_icon = match entry.kind {
             EntryKind::Directory if expanded || target_folder => IconName::FolderOpen,
@@ -874,10 +906,10 @@ impl Pane {
                     icon(IconName::ChevronRight)
                         .size(px(14.))
                         .text_color(theme.secondary_text),
-                    (ElementId::Path(row.path.clone()), "chevron"),
+                    (ElementId::Path(row.path().clone()), "chevron"),
                     expanded,
                     self.toggled.as_ref().is_some_and(|(toggled, state, at)| {
-                        *toggled == row.path
+                        toggled == row.path()
                             && *state == expanded
                             && at.elapsed() < motion::FAST * 2
                     }),
@@ -896,14 +928,14 @@ impl Pane {
         let editing = self
             .rename
             .as_ref()
-            .filter(|rename| rename.path == row.path.as_ref());
+            .filter(|rename| rename.path == row.path().as_ref());
         let drag = if editing.is_none() {
-            self.drag(&row.path, selected_paths.clone(), &name, file_icon)
+            self.drag(row.path(), selected_paths.clone(), &name, file_icon)
         } else {
             None
         };
         let element = base
-            .id(ElementId::Path(row.path.clone()))
+            .id(ElementId::Path(row.path().clone()))
             .role(Role::TreeItem)
             .aria_label(name.clone())
             .aria_level(row.depth + 1)
@@ -992,7 +1024,7 @@ impl Pane {
                             .entry()
                             .is_some_and(|entry| entry.kind == EntryKind::File)
                         {
-                            let path = row.path.to_path_buf();
+                            let path = row.path().to_path_buf();
                             match this.source {
                                 Source::Local => cx.emit(OpenLocalFile(path)),
                                 Source::Remote(_) => cx.emit(EditFile(path)),
@@ -1008,25 +1040,15 @@ impl Pane {
                 self.wire_finder_drag(element, drag, cx)
             });
         if expandable {
-            self.external_drop_zone(element, Some(row.path.clone()), theme, cx)
+            self.external_drop_zone(element, Some(row.path().clone()), theme, cx)
         } else {
             element
         }
     }
 
-    fn drop_rows(&self) -> Vec<RowInfo<'_>> {
-        self.tree
-            .rows
-            .iter()
-            .map(|row| RowInfo {
-                path: &row.path,
-                depth: row.depth,
-                is_dir: row
-                    .entry()
-                    .is_some_and(|entry| entry.kind == EntryKind::Directory),
-                expanded: row.expanded,
-            })
-            .collect()
+    #[cfg(test)]
+    fn drop_rows(&self) -> impl AsRef<[tree::Row]> + '_ {
+        &self.tree.rows
     }
 
     fn update_drop_decoration(&mut self, active_drag: bool) {
@@ -1042,7 +1064,7 @@ impl Pane {
                 .tree
                 .rows
                 .iter()
-                .any(|row| row.path.as_ref() == source && row.entry().is_some())
+                .any(|row| row.path().as_ref() == source && row.entry().is_some())
             {
                 return;
             }
@@ -1054,23 +1076,23 @@ impl Pane {
                     .tree
                     .rows
                     .iter()
-                    .position(|row| row.path.as_ref() == path)
+                    .position(|row| row.path().as_ref() == path)
                 else {
                     return;
                 };
                 Some(index)
             };
             self.drop_target =
-                drop_target::resolve(&self.drop_rows(), root, hovered, &[source], true);
+                drop_target::resolve(&self.tree.rows, root, hovered, &[source], true);
         } else if let Some(drop) = &self.drop_target {
             // An asynchronous listing or spring expansion can change the visible block
             // while the pointer is stationary.
             if matches!(drop.target, Target::Folder { .. }) {
                 if let Some(row) = self.tree.rows.iter().position(|row| {
-                    row.path.as_ref() == drop.folder
+                    row.path().as_ref() == drop.folder
                         && row.entry().is_some_and(|entry| entry.is_directory())
                 }) {
-                    let target = drop_target::folder_target(&self.drop_rows(), row);
+                    let target = drop_target::folder_target(&self.tree.rows, row);
                     self.drop_target.as_mut().unwrap().target = target;
                 } else {
                     self.drop_target = None;
@@ -1102,7 +1124,7 @@ impl Render for Pane {
             theme,
             columns,
             active,
-            now: SystemTime::now(),
+            now: SystemTime::now().into(),
             selected_paths: self.selected_paths(),
         };
         let list = uniform_list("rows", self.tree.rows.len(), move |range, _, cx| {
@@ -1401,7 +1423,7 @@ struct RowStyle {
     theme: Theme,
     columns: Columns,
     active: bool,
-    now: SystemTime,
+    now: file_metadata::CalendarDay,
     selected_paths: Arc<[PathBuf]>,
 }
 
@@ -1441,7 +1463,7 @@ impl Columns {
     fn metadata(
         self,
         entry: &vela_core::Entry,
-        now: SystemTime,
+        now: file_metadata::CalendarDay,
         theme: Theme,
     ) -> impl Iterator<Item = Div> {
         static TABULAR: LazyLock<FontFeatures> =
@@ -1483,3 +1505,7 @@ impl Columns {
 #[cfg(test)]
 #[path = "pane_keyboard_tests.rs"]
 mod keyboard_tests;
+
+#[cfg(test)]
+#[path = "pane_perf_tests.rs"]
+mod perf_tests;

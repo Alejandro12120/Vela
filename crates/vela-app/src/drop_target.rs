@@ -21,6 +21,7 @@ pub struct DropTarget {
     pub target: Target,
 }
 
+#[cfg(test)]
 pub struct RowInfo<'a> {
     pub path: &'a Path,
     pub depth: usize,
@@ -28,10 +29,49 @@ pub struct RowInfo<'a> {
     pub expanded: bool,
 }
 
+pub trait DropRow {
+    fn path(&self) -> &Path;
+    fn depth(&self) -> usize;
+    fn is_dir(&self) -> bool;
+    fn expanded(&self) -> bool;
+}
+
+impl DropRow for crate::tree::Row {
+    fn path(&self) -> &Path {
+        self.path()
+    }
+    fn depth(&self) -> usize {
+        self.depth
+    }
+    fn is_dir(&self) -> bool {
+        self.entry()
+            .is_some_and(|entry| entry.kind == vela_core::EntryKind::Directory)
+    }
+    fn expanded(&self) -> bool {
+        self.expanded
+    }
+}
+
+#[cfg(test)]
+impl DropRow for RowInfo<'_> {
+    fn path(&self) -> &Path {
+        self.path
+    }
+    fn depth(&self) -> usize {
+        self.depth
+    }
+    fn is_dir(&self) -> bool {
+        self.is_dir
+    }
+    fn expanded(&self) -> bool {
+        self.expanded
+    }
+}
+
 /// `hovered` is the row under the pointer, or None below the rows.
 /// `same_pane` distinguishes a move from an opposite-pane copy.
 pub fn resolve(
-    rows: &[RowInfo<'_>],
+    rows: &[impl DropRow],
     root: &Path,
     hovered: Option<usize>,
     dragged: &[PathBuf],
@@ -39,17 +79,19 @@ pub fn resolve(
 ) -> Option<DropTarget> {
     let folder = hovered.and_then(|index| {
         let row = &rows[index];
-        if row.is_dir {
+        if row.is_dir() {
             Some(index)
-        } else {
+        } else if row.depth() > 0 {
             rows[..index]
                 .iter()
-                .rposition(|parent| parent.depth < row.depth)
+                .rposition(|parent| parent.depth() < row.depth())
+        } else {
+            None
         }
     });
     let target = match folder {
         Some(index) => DropTarget {
-            folder: rows[index].path.to_owned(),
+            folder: rows[index].path().to_owned(),
             target: folder_target(rows, index),
         },
         None => DropTarget {
@@ -68,14 +110,13 @@ pub fn resolve(
     Some(target)
 }
 
-pub fn folder_target(rows: &[RowInfo<'_>], row: usize) -> Target {
-    let RowInfo {
-        depth, expanded, ..
-    } = rows[row];
+pub fn folder_target(rows: &[impl DropRow], row: usize) -> Target {
+    let depth = rows[row].depth();
+    let expanded = rows[row].expanded();
     let last = if expanded {
         row + rows[row + 1..]
             .iter()
-            .take_while(|child| child.depth > depth)
+            .take_while(|child| child.depth() > depth)
             .count()
     } else {
         row

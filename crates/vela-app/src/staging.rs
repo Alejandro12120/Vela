@@ -86,6 +86,30 @@ fn remove_directory(path: &Path) -> io::Result<()> {
 }
 
 pub fn cleanup(root: &Path, paths: &[PathBuf]) -> io::Result<()> {
+    cleanup_matching(root, paths, |_| true)
+}
+
+#[cfg(target_os = "macos")]
+pub fn cleanup_before(
+    root: &Path,
+    paths: &[PathBuf],
+    cutoff: std::time::SystemTime,
+) -> io::Result<()> {
+    // The clipboard snapshot predates any cache directories created during
+    // startup. Leave those to the normal clipboard and quit cleanup paths.
+    cleanup_matching(root, paths, |entry| {
+        entry
+            .metadata()
+            .and_then(|info| info.modified())
+            .is_ok_and(|modified| modified < cutoff)
+    })
+}
+
+fn cleanup_matching(
+    root: &Path,
+    paths: &[PathBuf],
+    eligible: impl Fn(&fs::DirEntry) -> bool,
+) -> io::Result<()> {
     match fs::symlink_metadata(root) {
         Ok(metadata) if metadata.is_dir() => {}
         Ok(_) => return Err(io::Error::other("The cache path isn't a folder")),
@@ -107,6 +131,7 @@ pub fn cleanup(root: &Path, paths: &[PathBuf]) -> io::Result<()> {
             .as_encoded_bytes()
             .starts_with(PREFIX.as_bytes())
             && entry.file_type()?.is_dir()
+            && eligible(&entry)
             && !referenced(&entry.path(), paths)
         {
             let path = entry.path();

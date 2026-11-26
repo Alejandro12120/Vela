@@ -1,4 +1,4 @@
-use std::{ffi::OsString, io, thread::JoinHandle};
+use std::{borrow::Cow, ffi::OsString, io, thread::JoinHandle};
 
 use alacritty_terminal::{
     event::WindowSize,
@@ -56,8 +56,8 @@ impl Process {
         })
     }
 
-    pub fn write(&self, bytes: Vec<u8>) {
-        let _ = self.sender.send(Msg::Input(bytes.into()));
+    pub fn write(&self, bytes: Cow<'static, [u8]>) {
+        let _ = self.sender.send(Msg::Input(bytes));
     }
 
     pub fn resize(&self, size: WindowSize) {

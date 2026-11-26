@@ -183,12 +183,7 @@ impl Pane {
     }
 
     pub(super) fn selected_paths(&self) -> Arc<[PathBuf]> {
-        self.tree
-            .rows
-            .iter()
-            .filter(|row| self.tree.selected.contains(&row.path))
-            .map(|row| row.path.to_path_buf())
-            .collect()
+        self.tree.selected_paths()
     }
 
     pub(super) fn drag(
@@ -271,7 +266,7 @@ impl Pane {
             let index = (y / ROW_HEIGHT).floor() as usize;
             let hovered = (index < self.tree.rows.len()).then_some(index);
             drop_target::resolve(
-                &self.drop_rows(),
+                &self.tree.rows,
                 self.root(),
                 hovered,
                 &drag.paths,
@@ -424,9 +419,9 @@ impl Pane {
         if let Some(index) = index {
             let row = &self.tree.rows[index];
             if row.entry().is_some_and(|entry| entry.is_directory()) {
-                folder = row.path.to_path_buf();
+                folder = row.path().to_path_buf();
             }
-            if !self.tree.selected.contains(&row.path) {
+            if !self.tree.selected.contains(row.path()) {
                 self.tree.select(index, Selection::Single);
                 self.check_copy_selection();
             }
@@ -480,7 +475,7 @@ impl Pane {
             .tree
             .rows
             .iter()
-            .filter(|row| self.tree.selected.contains(&row.path));
+            .filter(|row| self.tree.selected.contains(row.path()));
         let row = rows.next()?;
         if rows.next().is_some() {
             return None;
@@ -509,7 +504,7 @@ impl Pane {
         let Some(row) = self.selected_file() else {
             return;
         };
-        let path = row.path.to_path_buf();
+        let path = row.path().to_path_buf();
         let executable = row
             .entry()
             .and_then(|entry| entry.mode)
@@ -567,7 +562,7 @@ impl Pane {
             .tree
             .rows
             .iter()
-            .position(|row| row.path.as_ref() == path)
+            .position(|row| row.path().as_ref() == path)
         else {
             return;
         };
@@ -767,11 +762,7 @@ impl Pane {
         let executor = cx.background_executor().clone();
         let revision = self.tree_revision;
         cx.spawn_in(window, async move |this, cx| {
-            let mut listings = Vec::new();
-            for path in paths {
-                let listing = source.list(&path, &executor).await;
-                listings.push((path, listing));
-            }
+            let mut listings = source.list_branches(paths, &executor).await;
             let _ = this.update_in(cx, |this, window, cx| {
                 if this.tree_revision == revision {
                     listings
@@ -797,12 +788,14 @@ impl Pane {
                     this.remember();
                     this.load_expanded(window, cx);
                     if !moved.is_empty() {
-                        this.tree.selected = moved
-                            .into_iter()
-                            .filter_map(|(_, dest)| {
-                                dest.starts_with(this.root()).then(|| dest.into())
-                            })
-                            .collect();
+                        this.tree.replace_selection(
+                            moved
+                                .into_iter()
+                                .filter_map(|(_, dest)| {
+                                    dest.starts_with(this.root()).then(|| dest.into())
+                                })
+                                .collect(),
+                        );
                         this.check_copy_selection();
                     }
                     if let Some(path) = rename {

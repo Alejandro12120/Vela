@@ -123,7 +123,22 @@ impl Global for FinderClipboard {}
 
 pub fn initialize(cx: &mut App) {
     cx.set_global(FinderClipboard::default());
-    cleanup(cx);
+    #[cfg(target_os = "macos")]
+    match staging::root() {
+        Ok(root) if root.is_dir() => {
+            let cutoff = std::time::SystemTime::now();
+            let paths = clipboard_paths(cx);
+            cx.background_executor()
+                .spawn(async move {
+                    if let Err(error) = staging::cleanup_before(&root, &paths, cutoff) {
+                        dev::log(format_args!("Finder cache: {error}"));
+                    }
+                })
+                .detach();
+        }
+        Ok(_) => {}
+        Err(error) => dev::log(format_args!("Finder cache: {error}")),
+    }
 }
 
 pub fn cancel_copy(cx: &mut App) {
@@ -433,10 +448,10 @@ impl Pane {
             .cursor_index()
             .map(|index| &self.tree.rows[index])
             .filter(|row| {
-                self.tree.selected.contains(&row.path)
+                self.tree.selected.contains(row.path())
                     && row.entry().is_some_and(|entry| entry.is_directory())
             })
-            .map(|row| row.path.as_ref());
+            .map(|row| row.path().as_ref());
         let destination = folder.unwrap_or(self.root()).to_owned();
         let target = cx.entity().downgrade();
         if self.source.side() == Side::Remote {

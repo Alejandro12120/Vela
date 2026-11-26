@@ -3,6 +3,8 @@
 pub(crate) mod colors;
 pub(crate) mod copy_on_select;
 mod element;
+#[cfg(test)]
+pub(crate) use element::benchmark_prepaint;
 pub(crate) mod font_size;
 mod keys;
 pub(crate) mod kitty;
@@ -11,12 +13,13 @@ mod pty;
 pub(crate) mod view;
 
 use std::{
+    borrow::Cow,
     ffi::OsString,
     future::poll_fn,
     io,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     task::{Poll, Waker},
 };
@@ -146,6 +149,14 @@ struct Listener {
     redraw: Arc<Redraw>,
     io: Arc<Mutex<PtyReplies>>,
     ended: Arc<AtomicBool>,
+    mouse: Arc<MouseSnapshot>,
+}
+
+#[derive(Default)]
+struct MouseSnapshot {
+    reporting: AtomicBool,
+    display_offset: AtomicUsize,
+    dirty: AtomicBool,
 }
 
 impl Listener {
@@ -159,7 +170,11 @@ impl Listener {
 impl EventListener for Listener {
     fn send_event(&self, event: Event) {
         match event {
-            Event::Wakeup => self.redraw.change(|state| state.dirty = true),
+            Event::Wakeup => {
+                self.mouse.dirty.store(true, Ordering::Release);
+                self.redraw.change(|state| state.dirty = true);
+            }
+            Event::MouseCursorDirty => self.mouse.dirty.store(true, Ordering::Release),
             Event::PtyWrite(bytes) => pty::input(&self.io.lock().unwrap().sender, bytes),
             Event::ColorRequest(index, format) => {
                 let io = self.io.lock().unwrap();
@@ -194,6 +209,10 @@ impl Terminal {
                 size: size.window(),
             })),
             ended: Arc::default(),
+            mouse: Arc::new(MouseSnapshot {
+                dirty: AtomicBool::new(true),
+                ..Default::default()
+            }),
         };
         let grid = Arc::new(FairMutex::new(Term::new(
             Self::config(settings),
@@ -250,8 +269,31 @@ impl Terminal {
         self.listener.ended.load(Ordering::Acquire)
     }
 
+    fn refresh_mouse(&self, grid: &Term<Listener>) {
+        self.listener.mouse.reporting.store(
+            grid.mode().intersects(TermMode::MOUSE_MODE),
+            Ordering::Relaxed,
+        );
+        self.listener
+            .mouse
+            .display_offset
+            .store(grid.grid().display_offset(), Ordering::Relaxed);
+        self.listener.mouse.dirty.store(false, Ordering::Release);
+    }
+
+    fn mouse_idle_offset(&self) -> Option<usize> {
+        let mouse = &self.listener.mouse;
+        if mouse.dirty.load(Ordering::Acquire) || mouse.reporting.load(Ordering::Relaxed) {
+            return None;
+        }
+        Some(mouse.display_offset.load(Ordering::Relaxed))
+    }
+
     fn send(&self, bytes: impl Into<Vec<u8>>) {
-        let bytes = bytes.into();
+        self.send_bytes(Cow::Owned(bytes.into()));
+    }
+
+    fn send_bytes(&self, bytes: Cow<'static, [u8]>) {
         #[cfg(test)]
         if let Some(sink) = &self.sink {
             sink.lock().unwrap().extend_from_slice(&bytes);

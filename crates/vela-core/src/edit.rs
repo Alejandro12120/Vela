@@ -767,7 +767,8 @@ pub(crate) async fn upload(
     }
     crate::sftp::check_cancel(cancel)?;
     destination.set_len(0).await?;
-    let result = crate::sftp::write_file(&mut source, &mut destination, &|_| {}, cancel).await;
+    let result =
+        crate::sftp::write_file(&mut source, &mut destination, &|_| {}, cancel, false).await;
     let written = destination.metadata().await;
     let closed = destination.close().await;
     result?;

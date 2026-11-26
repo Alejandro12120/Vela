@@ -343,13 +343,18 @@ pub fn check(config: &Config) -> Result<CheckOutcome, UpdateError> {
     let manifest_path = tmp.path().join("manifest.json");
     let manifest_sig = tmp.path().join("manifest.json.sshsig");
 
-    download_small_file(
-        manifest_url,
-        &manifest_path,
-        MAX_MANIFEST_BYTES,
-        strict_https,
-    )?;
-    download_small_file(signature_url, &manifest_sig, MAX_SIG_BYTES, strict_https)?;
+    std::thread::scope(|scope| {
+        let signature = scope.spawn(|| {
+            download_small_file(signature_url, &manifest_sig, MAX_SIG_BYTES, strict_https)
+        });
+        download_small_file(
+            manifest_url,
+            &manifest_path,
+            MAX_MANIFEST_BYTES,
+            strict_https,
+        )?;
+        signature.join().expect("signature download panicked")
+    })?;
 
     verify_sshsig(
         &manifest_path,

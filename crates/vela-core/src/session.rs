@@ -127,7 +127,7 @@ impl Client {
             let result = tokio::select! {
                 _ = stopping.recv() => Err(Error::Cancelled),
                 result = async {
-                    let askpass = askpass::Server::start(app, requests, spec.destination())?;
+                    let askpass = askpass::Server::start(app, requests, spec.destination(), None)?;
                     ssh::identities(&spec, &askpass).await
                 } => result,
             };
@@ -164,7 +164,8 @@ impl Client {
         spec: ConnectionSpec,
         readiness_timeout: Duration,
     ) -> Result<Session, Error> {
-        self.connect_inner(spec, readiness_timeout, None).await
+        self.connect_inner(spec, readiness_timeout, None, None)
+            .await
     }
 
     pub async fn connect_with_cancel(
@@ -183,7 +184,19 @@ impl Client {
         readiness_timeout: Duration,
         cancel: ConnectCancel,
     ) -> Result<Session, Error> {
-        self.connect_inner(spec, readiness_timeout, Some(cancel))
+        self.connect_inner(spec, readiness_timeout, Some(cancel), None)
+            .await
+    }
+
+    /// Connect using an existing private 0700 directory owned by the caller.
+    /// Reserve it for this connection and keep it until the client shuts down.
+    pub async fn connect_in_control_dir(
+        &self,
+        spec: ConnectionSpec,
+        directory: PathBuf,
+        cancel: ConnectCancel,
+    ) -> Result<Session, Error> {
+        self.connect_inner(spec, ssh::CONNECT_TIMEOUT, Some(cancel), Some(directory))
             .await
     }
 
@@ -192,6 +205,7 @@ impl Client {
         spec: ConnectionSpec,
         readiness_timeout: Duration,
         cancel: Option<ConnectCancel>,
+        directory: Option<PathBuf>,
     ) -> Result<Session, Error> {
         let (send, reply) = oneshot::channel();
         let app = self.app.clone();
@@ -203,7 +217,16 @@ impl Client {
             // until the end of the job, so only `stopping` can interrupt it.
             let (keep_open, unused_cancel) = async_channel::bounded(1);
             let cancel = cancel.unwrap_or(unused_cancel);
-            let result = connect(spec, app, requests, readiness_timeout, &stopping, &cancel).await;
+            let result = connect(
+                spec,
+                app,
+                requests,
+                readiness_timeout,
+                &stopping,
+                &cancel,
+                directory,
+            )
+            .await;
             drop(keep_open);
             match result {
                 Ok((master, channel, process)) => {
@@ -337,11 +360,12 @@ async fn connect(
     readiness_timeout: Duration,
     stopping: &async_channel::Receiver<()>,
     cancel: &async_channel::Receiver<()>,
+    directory: Option<PathBuf>,
 ) -> Result<(ssh::Master, Sftp, ssh::Process), Error> {
     if cancel.is_closed() {
         return Err(Error::Cancelled);
     }
-    let server = askpass::Server::start(app, requests, spec.destination())?;
+    let server = askpass::Server::start(app, requests, spec.destination(), directory)?;
     let mut master =
         ssh::Master::connect(spec, server, readiness_timeout, stopping, cancel).await?;
     let channel = tokio::select! {
@@ -451,6 +475,11 @@ pub struct Session {
 }
 
 impl Session {
+    /// Whether the worker has stopped accepting commands for this session.
+    pub fn is_closed(&self) -> bool {
+        self.commands.is_closed()
+    }
+
     pub async fn closed(&self) {
         self.commands.closed().await;
     }

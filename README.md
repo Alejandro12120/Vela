@@ -86,6 +86,10 @@ Vela carries forward indexed remote-edit copies, including pending changes and c
 
 Vela does not support Windows. On Linux, outbound file drag and file clipboard support for Dolphin are still pending.
 
+## MCP
+
+Run `vela mcp` as a stdio MCP server for Vela's SSH and SFTP tools. See the [MCP setup and integration guide](docs/MCP.md) for permission profiles, headless operation and CLI flags.
+
 ## Keyboard shortcuts
 
 <details>

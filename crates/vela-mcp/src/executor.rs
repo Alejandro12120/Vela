@@ -160,7 +160,7 @@ impl<B: McpBackend> Executor<B> {
         }
     }
 
-    fn context(&self, server_id: &str, dirty: bool) -> crate::EvalContext {
+    pub(crate) fn context(&self, server_id: &str, dirty: bool) -> crate::EvalContext {
         crate::EvalContext {
             server_connected: self.backend.session(server_id).is_some(),
             vela_gui_open: self.backend.vela_gui_open(),

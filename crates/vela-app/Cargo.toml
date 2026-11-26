@@ -14,11 +14,13 @@ alacritty_terminal = { version = "=0.26.0", default-features = false }
 gpui = { package = "gpui-pre", version = "=0.3.11" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["runtime_shaders", "font-kit"] }
 vela-core = { path = "../vela-core" }
+vela-mcp = { path = "../vela-mcp" }
 unicode-segmentation = "=1.13.3"
 libc = "=0.2.191"
 tempfile = "=3.27.0"
 
 [dev-dependencies]
+serde_json = "=1.0.154"
 gpui = { package = "gpui-pre", version = "=0.3.11", features = ["test-support"] }
 vela-core = { path = "../vela-core", features = ["dev"] }
 

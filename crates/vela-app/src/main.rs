@@ -44,6 +44,9 @@ fn main() {
     {
         std::process::exit(vela_core::askpass::client_main());
     }
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == "mcp") {
+        std::process::exit(vela_mcp::cli::main(std::env::args_os().skip(2)));
+    }
 
     let started_at = Instant::now();
     let trace_startup = std::env::var("VELA_TRACE_STARTUP")

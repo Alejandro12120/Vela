@@ -4,13 +4,10 @@
 //! atómica con 0600, y cada alta ejecuta una poda por antigüedad y por cuota.
 
 use std::{
-    fs,
+    fs::{self, File},
     io::{self, Write},
     path::{Path, PathBuf},
-    sync::{
-        Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -21,6 +18,7 @@ use crate::{config::RollbackConfig, executor::ExecutorError};
 
 const INDEX_NAME: &str = "index.json";
 const BLOBS_DIR: &str = "blobs";
+static SNAPSHOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Una copia de seguridad exchangeable con el agente y con la interfaz.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -46,8 +44,6 @@ pub struct RollbackUsage {
 pub struct RollbackStore {
     dir: PathBuf,
     config: RollbackConfig,
-    write_lock: Mutex<()>,
-    counter: AtomicU64,
 }
 
 impl RollbackStore {
@@ -55,12 +51,8 @@ impl RollbackStore {
         let blobs = dir.join(BLOBS_DIR);
         private_dir(&dir)?;
         private_dir(&blobs)?;
-        let store = Self {
-            dir,
-            config,
-            write_lock: Mutex::new(()),
-            counter: AtomicU64::new(0),
-        };
+        let store = Self { dir, config };
+        let _guard = store.lock()?;
         if !store.index_path().exists() {
             store.write_index(&[])?;
         }
@@ -73,6 +65,13 @@ impl RollbackStore {
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    // The GUI and multiple MCP processes can use the same directory.
+    fn lock(&self) -> io::Result<File> {
+        let directory = File::open(&self.dir)?;
+        directory.lock()?;
+        Ok(directory)
     }
 
     fn index_path(&self) -> PathBuf {
@@ -118,11 +117,14 @@ impl RollbackStore {
         }
         let digest = hex(&Sha256::digest(&bytes));
         let created_at_secs = secs(now);
-        let nonce = secs(SystemTime::now());
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
         let id = format!(
-            "{created_at_secs:016x}-{:016x}-{:x}-{}",
-            nonce,
-            self.counter.fetch_add(1, Ordering::Relaxed),
+            "{created_at_secs:016x}-{nonce:024x}-{:x}-{:x}-{}",
+            std::process::id(),
+            SNAPSHOT_COUNTER.fetch_add(1, Ordering::Relaxed),
             &digest[..16]
         );
         let entry = BackupEntry {
@@ -135,10 +137,7 @@ impl RollbackStore {
             created_at_secs,
         };
         {
-            let _guard = self
-                .write_lock
-                .lock()
-                .unwrap_or_else(|err| err.into_inner());
+            let _guard = self.lock()?;
             atomic_write(&self.blob_path(&id), &bytes)?;
             let mut entries = self.read_index()?;
             entries.push(entry.clone());
@@ -156,10 +155,7 @@ impl RollbackStore {
 
     /// Elimina caducados y evicta los más antiguos hasta cumplir la cuota total.
     pub fn prune(&self, now: SystemTime) -> io::Result<usize> {
-        let _guard = self
-            .write_lock
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
+        let _guard = self.lock()?;
         let mut entries = self.read_index()?;
         let before = entries.len();
         let mut removed: Vec<BackupEntry> = Vec::new();
@@ -201,10 +197,7 @@ impl RollbackStore {
         id: &str,
         now: SystemTime,
     ) -> io::Result<Option<(BackupEntry, Vec<u8>)>> {
-        let _guard = self
-            .write_lock
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
+        let _guard = self.lock()?;
         let Some(entry) = self.read_index()?.into_iter().find(|entry| entry.id == id) else {
             return Ok(None);
         };
@@ -216,10 +209,7 @@ impl RollbackStore {
     }
 
     pub fn list(&self, now: SystemTime) -> io::Result<Vec<BackupEntry>> {
-        let _guard = self
-            .write_lock
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
+        let _guard = self.lock()?;
         let mut entries: Vec<_> = self
             .read_index()?
             .into_iter()
@@ -244,10 +234,7 @@ impl RollbackStore {
 
     /// Vacia el almacén y devuelve el número de copias eliminadas.
     pub fn clear(&self) -> io::Result<usize> {
-        let _guard = self
-            .write_lock
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
+        let _guard = self.lock()?;
         let entries = self.read_index()?;
         for entry in &entries {
             match fs::remove_file(self.blob_path(&entry.id)) {
@@ -345,6 +332,34 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = RollbackStore::new(dir.path().join("rollback"), config).unwrap();
         (dir, store)
+    }
+
+    #[test]
+    fn independent_stores_can_record_to_the_same_directory() {
+        let (_dir, first) = store(RollbackConfig::default());
+        let other = RollbackStore::new(first.dir().to_owned(), RollbackConfig::default()).unwrap();
+        let together = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            for store in [&first, &other] {
+                let together = &together;
+                scope.spawn(move || {
+                    together.wait();
+                    for _ in 0..8 {
+                        store
+                            .record_snapshot("srv", "/same", b"identical".to_vec(), None, at(100))
+                            .unwrap()
+                            .unwrap();
+                    }
+                });
+            }
+        });
+        let copies = first.list(at(100)).unwrap();
+        assert_eq!(copies.len(), 16);
+        assert!(
+            copies
+                .iter()
+                .all(|copy| first.get_snapshot(&copy.id, at(100)).unwrap().is_some())
+        );
     }
 
     #[test]

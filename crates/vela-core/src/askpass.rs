@@ -107,8 +107,12 @@ impl Server {
         app: PathBuf,
         requests: async_channel::Sender<Request>,
         destination: String,
+        directory: Option<PathBuf>,
     ) -> io::Result<Self> {
-        let directory = control_dir()?;
+        let directory = match directory {
+            Some(path) => crate::ssh::isolated_control_dir(&path)?,
+            None => control_dir()?,
+        };
         let id = random_hex::<8>()?;
         let server = Self {
             socket: directory.join(format!("askpass-{id}.sock")),
@@ -400,7 +404,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_incorrect_token_without_forwarding_a_prompt() {
         let (send, requests) = async_channel::bounded(1);
-        let server = Server::start(PathBuf::from("/unused"), send, "test".into()).unwrap();
+        let server = Server::start(PathBuf::from("/unused"), send, "test".into(), None).unwrap();
         timeout(IO_TIMEOUT, async {
             let mut stream = UnixStream::connect(&server.socket).await.unwrap();
             let mut wrong_token = server.token.clone().into_bytes();

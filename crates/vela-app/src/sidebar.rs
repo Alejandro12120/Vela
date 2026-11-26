@@ -7,12 +7,13 @@ use vela_core::config::Server;
 
 use crate::{
     components::{
-        button::{Variant, button, icon_button, icon_text_button},
+        button::{Variant, button, icon_button},
         menu::menu_item,
         modal,
         motion::{self, FAST, SPRING},
         status_dot::status_dot,
     },
+    context_menu::Tooltip,
     icons::{IconName, icon},
     theme::Theme,
     workspace::{Connection, UpdateState, Workspace},
@@ -342,22 +343,7 @@ fn body(
                     .pt_2()
                     .border_t_1()
                     .border_color(theme.border)
-                    .child(
-                        icon_text_button(
-                            "settings",
-                            IconName::Settings,
-                            "Settings",
-                            if workspace.settings_open() {
-                                Variant::Selected
-                            } else {
-                                Variant::Secondary
-                            },
-                            None,
-                            theme,
-                            cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
-                        )
-                        .h(px(26.)),
-                    )
+                    .child(settings_button(workspace, theme, cx))
                     .child(update_button(workspace, theme, cx)),
             )
     };
@@ -526,6 +512,42 @@ fn update_banner(workspace: &Workspace, theme: Theme) -> Option<AnyElement> {
         ),
         _ => None,
     }
+}
+
+fn settings_button(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -> Stateful<Div> {
+    let background = if workspace.settings_open() {
+        theme.selection
+    } else {
+        theme.panel
+    };
+
+    div()
+        .id("settings")
+        .debug_selector(|| "settings".into())
+        .role(Role::Button)
+        .aria_label("Settings")
+        .tab_index(0)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(26.))
+        .h(px(26.))
+        .rounded(px(6.))
+        .bg(background)
+        .border_1()
+        .border_color(gpui::transparent_black())
+        .cursor_pointer()
+        .hover(move |style| style.bg(theme.hover))
+        .active(move |style| style.bg(theme.selection))
+        .focus_visible(move |style| style.border_color(theme.accent))
+        .child(
+            icon(IconName::Settings)
+                .size(px(15.))
+                .text_color(theme.text),
+        )
+        .tooltip(|_, cx| cx.new(|_| Tooltip("Settings".into())).into())
+        .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx)))
 }
 
 fn update_button(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -> Stateful<Div> {

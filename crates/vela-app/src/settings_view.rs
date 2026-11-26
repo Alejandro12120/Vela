@@ -454,6 +454,7 @@ impl Workspace {
             Some("agent") => Some(2),
             Some("editor") | Some("editor-low") => Some(3),
             Some("terminal") => Some(4),
+            Some("updates") => Some(5),
             _ => None,
         };
         if let Some(section) = section {
@@ -986,11 +987,47 @@ impl Workspace {
                             .child(self.render_interface(theme, cx))
                             .child(self.agent_section(theme, cx))
                             .child(self.editor_section(theme, cx))
-                            .child(self.terminal_section(theme, window, cx).pb_6()),
+                            .child(self.terminal_section(theme, window, cx))
+                            .child(self.updates_section(theme, cx).pb_6()),
                     ),
             )
             .children(self.render_theme_editor(theme, window, cx))
             .children(self.render_picker(theme, cx))
+    }
+
+    fn updates_section(&self, theme: Theme, cx: &Context<Self>) -> Div {
+        section("Updates").child(settings_group(
+            theme,
+            vec![
+                settings_row(
+                    "Current Version",
+                    None,
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme.secondary_text)
+                        .child(concat!("v", env!("CARGO_PKG_VERSION"))),
+                    theme,
+                ),
+                settings_row(
+                    "Include Prereleases",
+                    Some("Get early versions of Vela through the updater.".into()),
+                    switch(
+                        "include-prereleases",
+                        "Include Prereleases",
+                        self.settings.include_prereleases,
+                        theme,
+                        cx.listener(|this, _, window, cx| {
+                            let mut next = this.settings.clone();
+                            next.include_prereleases = !next.include_prereleases;
+                            this.save_settings(next, window, cx);
+                            this.recheck_for_updates(window, cx);
+                        }),
+                    )
+                    .debug_selector(|| "include-prereleases".into()),
+                    theme,
+                ),
+            ],
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2706,6 +2743,51 @@ mod tests {
         assert_eq!(settings.light_theme, "oceano");
         assert_eq!(settings.dark_theme, "ambar");
         assert_eq!(settings.scheme, Scheme::Dark);
+    }
+
+    #[gpui::test]
+    fn toggling_prereleases_saves_the_setting_and_starts_a_check(cx: &mut gpui::TestAppContext) {
+        use super::super::UpdateState;
+
+        let dir = tempfile::tempdir().unwrap();
+        crate::dev::TEST_CONFIG.with(|config| *config.borrow_mut() = Some(dir.path().to_owned()));
+        crate::dev::TEST_UPDATE_BASE_URL.with(|url| {
+            *url.borrow_mut() = Some(format!("file://{}", dir.path().display()));
+        });
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::new(None, None, None, window, cx));
+        cx.run_until_parked();
+        workspace.update_in(cx, |this, window, cx| this.open_settings(window, cx));
+        cx.run_until_parked();
+        workspace.update_in(cx, |this, window, _| {
+            this.settings_page.scroll.scroll_to_top_of_item(5);
+            window.refresh();
+        });
+        cx.run_until_parked();
+
+        for enabled in [true, false] {
+            workspace.update(cx, |this, _| {
+                this.update_check = None;
+                this.update_state = UpdateState::Available {
+                    release: super::super::tests::test_release(),
+                    error: None,
+                };
+            });
+            let toggle = cx.debug_bounds("include-prereleases").unwrap();
+            cx.simulate_click(toggle.center(), gpui::Modifiers::none());
+            workspace.update(cx, |this, _| {
+                assert_eq!(this.updater_config().include_prereleases, enabled);
+                assert!(this.update_check.is_some());
+                assert!(!matches!(this.update_state, UpdateState::Available { .. }));
+            });
+            cx.run_until_parked();
+            assert_eq!(
+                Settings::load(dir.path()).unwrap().include_prereleases,
+                enabled
+            );
+        }
+        crate::dev::TEST_UPDATE_BASE_URL.with(|url| url.borrow_mut().take());
     }
 
     #[gpui::test]

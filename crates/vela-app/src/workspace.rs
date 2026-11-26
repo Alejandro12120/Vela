@@ -145,6 +145,7 @@ pub struct Workspace {
     pub dir: Option<PathBuf>,
     pub saving: bool,
     pub update_state: UpdateState,
+    update_check: Option<gpui::Task<()>>,
     /// The card being dragged in the server list, until the drag ends.
     pub reorder: Option<ServerReorder>,
     /// A card that just left a drag, with the y where it was let go and when.
@@ -358,6 +359,8 @@ impl Workspace {
                         if let Some(preview) = dev::update_state() {
                             let fake_release = || vela_core::updater::ReleaseInfo {
                                 version: "0.2.0".into(),
+                                is_prerelease: false,
+                                is_downgrade: false,
                                 tag: "v0.2.0".into(),
                                 asset: "vela-0.2.0-preview.tar.gz".into(),
                                 url: String::new(),
@@ -487,6 +490,7 @@ impl Workspace {
             dir: None,
             saving: false,
             update_state: UpdateState::Idle,
+            update_check: None,
             reorder: None,
             settle: None,
             key_requests: 0,
@@ -568,8 +572,11 @@ impl Workspace {
         .detach();
     }
 
-    fn updater_config() -> vela_core::updater::Config {
-        let mut config = vela_core::updater::Config::default();
+    fn updater_config(&self) -> vela_core::updater::Config {
+        let mut config = vela_core::updater::Config {
+            include_prereleases: self.settings.include_prereleases,
+            ..Default::default()
+        };
         if let Some(url) = dev::update_base_url().filter(|url| !url.is_empty()) {
             config.base_url = Some(url);
         }
@@ -586,13 +593,21 @@ impl Workspace {
         if !matches!(self.update_state, UpdateState::Idle) {
             return;
         }
+        self.recheck_for_updates(window, cx);
+    }
+
+    pub(super) fn recheck_for_updates(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if matches!(self.update_state, UpdateState::Installing { .. }) {
+            return;
+        }
+        self.update_check = None;
         self.update_state = UpdateState::Checking;
         cx.notify();
-        let config = Self::updater_config();
+        let config = self.updater_config();
         let task = cx
             .background_executor()
             .spawn(async move { vela_core::updater::check(&config) });
-        cx.spawn_in(window, async move |this, cx| {
+        self.update_check = Some(cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 if !matches!(this.update_state, UpdateState::Checking) {
@@ -602,7 +617,7 @@ impl Workspace {
                     Ok(vela_core::updater::CheckOutcome::UpdateAvailable(release)) => {
                         dev::log(format_args!("update available: v{}", release.version));
                         this.update_state = UpdateState::Available {
-                            release,
+                            release: *release,
                             error: None,
                         };
                     }
@@ -617,8 +632,7 @@ impl Workspace {
                 }
                 cx.notify();
             });
-        })
-        .detach();
+        }));
     }
 
     fn set_update_progress(&mut self, value: f32, cx: &mut Context<Self>) {
@@ -658,7 +672,8 @@ impl Workspace {
             progress: 0.03,
         };
         cx.notify();
-        let config = Self::updater_config();
+        let config = self.updater_config();
+        let include_prereleases = config.include_prereleases;
         let (run, handle) = vela_core::updater::prepare_install(config, release.clone(), target);
         cx.background_executor()
             .spawn(async move { run() })
@@ -686,7 +701,12 @@ impl Workspace {
                     vela_core::updater::InstallEvent::Finished(Err(err)) => {
                         dev::log(format_args!("update: {err}"));
                         let message = err.to_string();
-                        let _ = this.update(cx, |this, cx| {
+                        let _ = this.update_in(cx, |this, window, cx| {
+                            if this.settings.include_prereleases != include_prereleases {
+                                this.update_state = UpdateState::Idle;
+                                this.recheck_for_updates(window, cx);
+                                return;
+                            }
                             this.update_state = UpdateState::Available {
                                 release: release.clone(),
                                 error: Some(message),
@@ -1825,11 +1845,16 @@ impl Workspace {
                             .text_size(px(12.)).text_color(theme.secondary_text)
                             .children(preview.into_iter().map(|line| div().child(line)))
                     ));
+                let (title, action) = if release.is_downgrade {
+                    (format!("Return to stable Vela v{}?", release.version), "Return to Stable")
+                } else {
+                    (format!("Update to Vela v{}?", release.version), "Update")
+                };
                 (
-                    format!("Update to Vela v{}?", release.version).into(),
+                    title.into(),
                     Some((IconName::CircleArrowDown, theme.accent)),
                     body,
-                    "Update",
+                    action,
                 )
             }
             Dialog::Prompt(prompt) => {
@@ -3557,7 +3582,7 @@ mod tests {
                     release: release.clone(),
                     error: None,
                 },
-                "Updates available · v0.2.0",
+                "Download update · v0.2.0",
                 true,
             ),
             (
@@ -3568,7 +3593,20 @@ mod tests {
                     },
                     error: None,
                 },
-                "Updates available · v0.2.0",
+                "Download update · v0.2.0",
+                false,
+            ),
+            (
+                UpdateState::Available {
+                    release: vela_core::updater::ReleaseInfo {
+                        version: "0.1.3".into(),
+                        is_downgrade: true,
+                        changelog: None,
+                        ..release.clone()
+                    },
+                    error: None,
+                },
+                "Return to the latest stable version · v0.1.3",
                 false,
             ),
             (
@@ -3612,9 +3650,11 @@ mod tests {
         );
     }
 
-    fn test_release() -> vela_core::updater::ReleaseInfo {
+    pub(super) fn test_release() -> vela_core::updater::ReleaseInfo {
         vela_core::updater::ReleaseInfo {
             version: "0.2.0".into(),
+            is_prerelease: false,
+            is_downgrade: false,
             tag: "v0.2.0".into(),
             asset: "invalid/file".into(),
             url: String::new(),

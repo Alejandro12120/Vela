@@ -33,6 +33,7 @@ const ALLOWED_URL_PREFIXES: &[&str] = &[
 ];
 
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
+const MAX_RELEASES_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_SIG_BYTES: u64 = 64 * 1024;
 const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
 
@@ -66,6 +67,9 @@ pub struct Config {
     pub platform: Option<String>,
     /// Optional base URL override (e.g. `file:///...` or local HTTP mirror for tests/dev).
     pub base_url: Option<String>,
+    pub include_prereleases: bool,
+    /// Optional override for the GitHub Releases API endpoint.
+    pub releases_api_url: Option<String>,
     /// OpenSSH Ed25519 public key (`ssh-ed25519 AAAA...`).
     pub pubkey: String,
 }
@@ -76,6 +80,8 @@ impl Default for Config {
             current_version: env!("CARGO_PKG_VERSION").to_owned(),
             platform: current_platform().map(str::to_owned),
             base_url: None,
+            include_prereleases: false,
+            releases_api_url: None,
             pubkey: DEFAULT_PUBKEY.to_owned(),
         }
     }
@@ -84,6 +90,8 @@ impl Default for Config {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReleaseInfo {
     pub version: String,
+    pub is_prerelease: bool,
+    pub is_downgrade: bool,
     pub tag: String,
     pub asset: String,
     pub url: String,
@@ -97,7 +105,7 @@ pub struct ReleaseInfo {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CheckOutcome {
     UpToDate,
-    UpdateAvailable(ReleaseInfo),
+    UpdateAvailable(Box<ReleaseInfo>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -201,6 +209,37 @@ struct PlatformEntry {
     size: u64,
 }
 
+#[derive(Deserialize)]
+struct PublishedRelease {
+    tag_name: String,
+    draft: bool,
+    assets: Vec<ReleaseAsset>,
+    #[serde(default, deserialize_with = "optional_notes")]
+    body: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ReleaseAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+impl PublishedRelease {
+    fn asset_url(&self, name: &str) -> Option<&str> {
+        self.assets
+            .iter()
+            .find(|asset| asset.name == name)
+            .map(|asset| asset.browser_download_url.as_str())
+    }
+}
+
+struct SelectedRelease {
+    tag: String,
+    manifest_url: String,
+    signature_url: String,
+    body: Option<String>,
+}
+
 /// Platform identifier matching `manifest.json` keys.
 pub fn current_platform() -> Option<&'static str> {
     if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
@@ -260,7 +299,7 @@ fn xdg_data_dir() -> Option<PathBuf> {
     std::env::home_dir().map(|home| home.join(".local/share"))
 }
 
-/// Checks whether a newer signed release is available for the current platform.
+/// Checks for a signed update or a return to the stable channel.
 pub fn check(config: &Config) -> Result<CheckOutcome, UpdateError> {
     let platform = config
         .platform
@@ -276,21 +315,41 @@ pub fn check(config: &Config) -> Result<CheckOutcome, UpdateError> {
     let tmp = private_tempdir("vela-update-check-")?;
     let allowed_signers = write_allowed_signers(tmp.path(), &config.pubkey)?;
 
+    let selected = if config.include_prereleases
+        && (custom_base.is_none() || config.releases_api_url.is_some())
+    {
+        let Some(release) = latest_published_release(config, tmp.path())? else {
+            return Ok(CheckOutcome::UpToDate);
+        };
+        Some(release)
+    } else {
+        None
+    };
+    let manifest_url = format!("{base}/manifest.json");
+    let signature_url = format!("{base}/manifest.json.sshsig");
+    let (manifest_url, signature_url) = match &selected {
+        Some(release) => {
+            if strict_https {
+                validate_download_url(&release.manifest_url)?;
+                validate_download_url(&release.signature_url)?;
+            }
+            (
+                release.manifest_url.as_str(),
+                release.signature_url.as_str(),
+            )
+        }
+        None => (manifest_url.as_str(), signature_url.as_str()),
+    };
     let manifest_path = tmp.path().join("manifest.json");
     let manifest_sig = tmp.path().join("manifest.json.sshsig");
 
     download_small_file(
-        &format!("{base}/manifest.json"),
+        manifest_url,
         &manifest_path,
         MAX_MANIFEST_BYTES,
         strict_https,
     )?;
-    download_small_file(
-        &format!("{base}/manifest.json.sshsig"),
-        &manifest_sig,
-        MAX_SIG_BYTES,
-        strict_https,
-    )?;
+    download_small_file(signature_url, &manifest_sig, MAX_SIG_BYTES, strict_https)?;
 
     verify_sshsig(
         &manifest_path,
@@ -313,7 +372,18 @@ pub fn check(config: &Config) -> Result<CheckOutcome, UpdateError> {
     let remote = semver::Version::parse(&manifest.version)
         .map_err(|err| UpdateError::InvalidManifest(format!("remote version: {err}")))?;
 
-    if remote <= current {
+    if let Some(release) = &selected
+        && (manifest.tag != release.tag
+            || manifest.version != release.tag.strip_prefix('v').unwrap_or(&release.tag))
+    {
+        return Err(UpdateError::InvalidManifest(
+            "the signed version and tag do not match the selected release".into(),
+        ));
+    }
+
+    let precedence = remote.cmp_precedence(&current);
+    let is_downgrade = !config.include_prereleases && !current.pre.is_empty() && precedence.is_lt();
+    if !precedence.is_gt() && !is_downgrade {
         return Ok(CheckOutcome::UpToDate);
     }
 
@@ -325,22 +395,30 @@ pub fn check(config: &Config) -> Result<CheckOutcome, UpdateError> {
     validate_asset_name(&entry.asset)?;
     validate_sha256(&entry.sha256)?;
 
-    let (url, sig_url) = if let Some(base) = custom_base {
+    let (url, sig_url) = if let Some(base) = custom_base.filter(|_| selected.is_none()) {
         (
             format!("{base}/{}", entry.asset),
             format!("{base}/{}.sshsig", entry.asset),
         )
     } else {
-        validate_download_url(&entry.url)?;
+        if strict_https {
+            validate_download_url(&entry.url)?;
+        }
         (entry.url.clone(), format!("{}.sshsig", entry.url))
     };
 
     let mut changelog = manifest.notes.or(manifest.changelog);
-    if changelog.is_none() && custom_base.is_none() {
-        changelog = github_release_notes(&manifest.tag, tmp.path());
+    if changelog.is_none() {
+        changelog = match selected {
+            Some(release) => release.body,
+            None if strict_https => github_release_notes(&manifest.tag, tmp.path()),
+            None => None,
+        };
     }
-    Ok(CheckOutcome::UpdateAvailable(ReleaseInfo {
+    Ok(CheckOutcome::UpdateAvailable(Box::new(ReleaseInfo {
         version: manifest.version,
+        is_prerelease: !remote.pre.is_empty(),
+        is_downgrade,
         tag: manifest.tag,
         asset: entry.asset.clone(),
         url,
@@ -349,7 +427,51 @@ pub fn check(config: &Config) -> Result<CheckOutcome, UpdateError> {
         size: entry.size,
         notes_url: manifest.notes_url,
         changelog,
-    }))
+    })))
+}
+
+fn latest_published_release(
+    config: &Config,
+    dir: &Path,
+) -> Result<Option<SelectedRelease>, UpdateError> {
+    let default_url = format!("https://api.github.com/repos/{REPO}/releases?per_page=20");
+    let url = config.releases_api_url.as_deref().unwrap_or(&default_url);
+    let mut command = curl_command(config.releases_api_url.is_none(), "60");
+    command
+        .args([
+            "--header",
+            "Accept: application/vnd.github+json",
+            "--user-agent",
+        ])
+        .arg(format!("Vela/{}", config.current_version))
+        .args(["--", url]);
+    let path = dir.join("releases.json");
+    download_small_response(command, &path, MAX_RELEASES_BYTES)?;
+    let releases: Vec<PublishedRelease> = serde_json::from_slice(&fs::read(path)?)
+        .map_err(|err| UpdateError::DownloadFailed(format!("invalid release list: {err}")))?;
+    Ok(releases
+        .into_iter()
+        .filter(|release| !release.draft)
+        .filter_map(|release| {
+            let version = release
+                .tag_name
+                .strip_prefix('v')
+                .unwrap_or(&release.tag_name);
+            let version = semver::Version::parse(version).ok()?;
+            let manifest_url = release.asset_url("manifest.json")?.to_owned();
+            let signature_url = release.asset_url("manifest.json.sshsig")?.to_owned();
+            Some((
+                version,
+                SelectedRelease {
+                    tag: release.tag_name,
+                    manifest_url,
+                    signature_url,
+                    body: release.body,
+                },
+            ))
+        })
+        .max_by(|(left, _), (right, _)| left.cmp_precedence(right))
+        .map(|(_, release)| release))
 }
 
 // Display metadata is optional even when an older producer wrote it with
@@ -661,9 +783,10 @@ fn write_allowed_signers(dir: &Path, pubkey: &str) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-fn curl_command(url: &str, strict_https: bool, max_time: &str) -> Command {
+fn curl_command(strict_https: bool, max_time: &str) -> Command {
     let mut cmd = Command::new("curl");
     cmd.args([
+        "-q",
         "-f",
         "-s",
         "-S",
@@ -678,9 +801,8 @@ fn curl_command(url: &str, strict_https: bool, max_time: &str) -> Command {
         "1",
     ]);
     if strict_https {
-        cmd.args(["--proto", "=https", "--tlsv1.2"]);
+        cmd.args(["--proto", "=https", "--proto-redir", "=https", "--tlsv1.2"]);
     }
-    cmd.arg("--").arg(url);
     cmd
 }
 
@@ -690,7 +812,9 @@ fn download_small_file(
     max_bytes: u64,
     strict_https: bool,
 ) -> Result<(), UpdateError> {
-    download_small_response(curl_command(url, strict_https, "60"), dest, max_bytes)
+    let mut command = curl_command(strict_https, "60");
+    command.args(["--", url]);
+    download_small_response(command, dest, max_bytes)
 }
 
 fn download_small_response(
@@ -741,7 +865,8 @@ fn download_archive_with_progress(
     strict_https: bool,
     mut on_chunk: impl FnMut(u64, u64),
 ) -> Result<String, UpdateError> {
-    let mut child = curl_command(url, strict_https, "600")
+    let mut child = curl_command(strict_https, "600")
+        .args(["--", url])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -853,7 +978,7 @@ fn validate_asset_name(name: &str) -> Result<(), UpdateError> {
         || name.contains("..")
         || !name
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'+'))
     {
         return Err(UpdateError::InvalidManifest(format!(
             "invalid filename: '{name}'"
@@ -1442,6 +1567,7 @@ echo hidden
             platform: Some(platform.clone()),
             base_url: Some(format!("file://{}", dist.display())),
             pubkey: pubkey.clone(),
+            ..Config::default()
         };
 
         let outcome = check(&config).unwrap();
@@ -1493,7 +1619,9 @@ echo hidden
                 current_version: "0.1.0".into(),
                 platform: Some(platform),
                 base_url: Some(format!("file://{}", dist.display())),
+                include_prereleases: true,
                 pubkey,
+                ..Config::default()
             })
             .unwrap();
             let CheckOutcome::UpdateAvailable(release) = outcome else {
@@ -1501,6 +1629,176 @@ echo hidden
             };
             assert_eq!(release.changelog.as_deref(), Some(notes));
         }
+    }
+
+    #[test]
+    fn stable_channel_can_return_from_a_prerelease() {
+        let (_tmp, pubkey, dist, platform) = create_signed_fixture("0.2.0", None);
+        let mut config = Config {
+            platform: Some(platform),
+            base_url: Some(format!("file://{}", dist.display())),
+            pubkey,
+            ..Config::default()
+        };
+        for (current, expected_downgrade) in [
+            ("0.1.3", Some(false)),
+            ("0.2.0", None),
+            ("0.3.0", None),
+            ("0.3.0-rc.1", Some(true)),
+            ("0.2.0-rc.1", Some(false)),
+        ] {
+            config.current_version = current.into();
+            match (check(&config).unwrap(), expected_downgrade) {
+                (CheckOutcome::UpToDate, None) => {}
+                (CheckOutcome::UpdateAvailable(release), Some(downgrade)) => {
+                    assert_eq!(release.version, "0.2.0");
+                    assert!(!release.is_prerelease);
+                    assert_eq!(release.is_downgrade, downgrade);
+                }
+                (outcome, _) => panic!("{current}: unexpected result {outcome:?}"),
+            }
+        }
+    }
+
+    fn release_listing(tag: &str, base: &str, draft: bool, assets: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "tag_name": tag,
+            "draft": draft,
+            "body": "Release notes from GitHub",
+            "assets": assets.iter().map(|name| serde_json::json!({
+                "name": name,
+                "browser_download_url": format!("{base}/{name}"),
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    const MANIFEST_ASSETS: &[&str] = &["manifest.json", "manifest.json.sshsig"];
+
+    fn write_release_list(dir: &Path, releases: &[serde_json::Value]) -> String {
+        let path = dir.join("releases.json");
+        fs::write(&path, serde_json::to_vec(releases).unwrap()).unwrap();
+        format!("file://{}", path.display())
+    }
+
+    #[test]
+    fn prerelease_channel_selects_the_highest_complete_published_version() {
+        for (current, wanted, prerelease) in [
+            ("0.1.3", "0.2.0-rc.1", true),
+            ("0.2.0-rc.1", "0.2.0-rc.2", true),
+            ("0.2.0-rc.2", "0.2.0", false),
+            ("0.2.0-rc.2", "0.2.0-rc.10", true),
+        ] {
+            let (tmp, pubkey, dist, platform) = create_signed_fixture(wanted, None);
+            let missing = "file:///no-such-vela-release";
+            let api_url = write_release_list(
+                tmp.path(),
+                &[
+                    release_listing("v0.1.3", missing, false, MANIFEST_ASSETS),
+                    release_listing("v9.0.0", missing, true, MANIFEST_ASSETS),
+                    release_listing("v8.0.0", missing, false, &["manifest.json"]),
+                    release_listing("v7.0.0", missing, false, &["manifest.json.sshsig"]),
+                    release_listing("v6.0.0-rc.01", missing, false, MANIFEST_ASSETS),
+                    release_listing(
+                        &format!("v{wanted}"),
+                        &format!("file://{}", dist.display()),
+                        false,
+                        MANIFEST_ASSETS,
+                    ),
+                    release_listing(&format!("v{current}"), missing, false, MANIFEST_ASSETS),
+                ],
+            );
+            let config = Config {
+                current_version: current.into(),
+                platform: Some(platform),
+                base_url: Some(missing.into()),
+                include_prereleases: true,
+                releases_api_url: Some(api_url),
+                pubkey,
+            };
+            let CheckOutcome::UpdateAvailable(release) = check(&config).unwrap() else {
+                panic!("expected {wanted} to be available");
+            };
+            assert_eq!(release.version, wanted);
+            assert_eq!(release.is_prerelease, prerelease);
+            assert!(!release.is_downgrade);
+            assert_eq!(
+                release.changelog.as_deref(),
+                Some("Release notes from GitHub")
+            );
+            assert_eq!(
+                check(&Config {
+                    current_version: wanted.into(),
+                    ..config
+                })
+                .unwrap(),
+                CheckOutcome::UpToDate,
+            );
+        }
+    }
+
+    #[test]
+    fn prerelease_channel_rejects_disallowed_manifest_and_signature_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..2 {
+            let mut release = release_listing(
+                "v0.2.0-rc.1",
+                &format!("{}v0.2.0-rc.1", ALLOWED_URL_PREFIXES[0]),
+                false,
+                MANIFEST_ASSETS,
+            );
+            release["assets"][index]["browser_download_url"] =
+                "https://example.invalid/file".into();
+            let config = Config {
+                current_version: "0.1.3".into(),
+                include_prereleases: true,
+                releases_api_url: Some(write_release_list(dir.path(), &[release])),
+                ..Config::default()
+            };
+            assert!(matches!(
+                check(&config),
+                Err(UpdateError::InvalidManifest(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn prerelease_channel_rejects_tampered_signatures_and_mismatched_tags() {
+        let (tmp, pubkey, dist, platform) = create_signed_fixture("0.2.0-rc.1", None);
+        let base = format!("file://{}", dist.display());
+        let mut config = Config {
+            current_version: "0.1.3".into(),
+            platform: Some(platform),
+            base_url: Some(base.clone()),
+            include_prereleases: true,
+            releases_api_url: Some(write_release_list(
+                tmp.path(),
+                &[release_listing(
+                    "v0.2.0-rc.2",
+                    &base,
+                    false,
+                    MANIFEST_ASSETS,
+                )],
+            )),
+            pubkey,
+        };
+        assert!(matches!(
+            check(&config),
+            Err(UpdateError::InvalidManifest(_))
+        ));
+        config.releases_api_url = Some(write_release_list(
+            tmp.path(),
+            &[release_listing(
+                "v0.2.0-rc.1",
+                &base,
+                false,
+                MANIFEST_ASSETS,
+            )],
+        ));
+        fs::write(dist.join("manifest.json.sshsig"), "invalid signature").unwrap();
+        assert!(matches!(
+            check(&config),
+            Err(UpdateError::SignatureInvalid(_))
+        ));
     }
 
     #[test]
@@ -1526,6 +1824,7 @@ echo hidden
             platform: Some(platform.clone()),
             base_url: Some(format!("file://{}", dist.display())),
             pubkey: wrong_pub,
+            ..Config::default()
         };
         assert!(matches!(
             check(&bad_key_cfg),
@@ -1538,6 +1837,7 @@ echo hidden
             platform: Some(platform),
             base_url: Some(format!("file://{}", dist.display())),
             pubkey,
+            ..Config::default()
         };
         let CheckOutcome::UpdateAvailable(release) = check(&valid_cfg).unwrap() else {
             panic!("expected update");

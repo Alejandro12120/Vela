@@ -615,7 +615,11 @@ pub(crate) fn update_tooltip(state: &UpdateState) -> (String, Vec<String>) {
         UpdateState::Idle => ("Check for updates".into(), Vec::new()),
         UpdateState::Checking => ("Checking for updates…".into(), Vec::new()),
         UpdateState::Available { release, .. } => (
-            format!("Updates available · v{}", release.version),
+            if release.is_downgrade {
+                format!("Return to the latest stable version · v{}", release.version)
+            } else {
+                format!("Download update · v{}", release.version)
+            },
             release
                 .changelog
                 .as_deref()

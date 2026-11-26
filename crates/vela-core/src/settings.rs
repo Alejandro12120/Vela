@@ -30,6 +30,8 @@ pub struct Settings {
     pub terminal_copy_on_select: Option<bool>,
     /// Terminal palette source. Kitty falls back to the theme without a configuration file.
     pub terminal_colors: TerminalColorSource,
+    #[serde(default)]
+    pub include_prereleases: bool,
     pub appearance: AppearanceSettings,
 }
 
@@ -114,6 +116,26 @@ impl Settings {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn prereleases_default_to_off_and_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("settings.toml"),
+            "terminal_colors = 'kitty'",
+        )
+        .unwrap();
+        let mut settings = Settings::load(dir.path()).unwrap();
+        assert!(!settings.include_prereleases);
+        for enabled in [true, false] {
+            settings.include_prereleases = enabled;
+            settings.save(dir.path()).unwrap();
+            assert_eq!(
+                Settings::load(dir.path()).unwrap().include_prereleases,
+                enabled
+            );
+        }
+    }
 
     #[test]
     fn editor_and_appearance_survive_separate_saves() {

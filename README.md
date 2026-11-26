@@ -54,6 +54,8 @@ The install script detects your OS and CPU architecture, downloads the matching 
 - **macOS.** On Apple Silicon, the script installs `Vela.app` into `/Applications` with its native app icon so Spotlight and the Dock find it.
 - **Linux.** On x86_64 Wayland systems, the script installs the `vela` binary, its `.desktop` file, and its icon so Rofi, Fuzzel, Walker, and other launchers list it.
 
+The installer defaults to the latest stable release. To include prereleases, use `sh -s -- --prerelease` at the end of the command above, or set `VELA_PRERELEASE=1` for the shell running the installer. Prerelease discovery requires Python 3. Use `--version <tag>` to install a specific release.
+
 ### Manual install
 
 Download the archive for your system from [Releases](https://github.com/Alejandro12120/Vela/releases).
@@ -66,6 +68,8 @@ Every release includes detached `.sig` and `.sshsig` files, `SHA256SUMS.txt`, an
 ## Updating
 
 Click the check-for-updates button on the right side of the sidebar footer. When an update is available, hover over the button for the version and a short preview of the release notes. Click the button to review and confirm the update. Vela verifies the signed manifest and release archive, shows installation progress above the footer, and restarts automatically when the update finishes.
+
+**Settings → Updates** shows the installed version. Turn on **Include Prereleases** to check for the highest published version, including release candidates. Vela checks again as soon as you change the setting. Turning it off while running a prerelease offers the latest stable version, even when that version is older.
 
 You can also update by running the install script again or downloading a release by hand.
 

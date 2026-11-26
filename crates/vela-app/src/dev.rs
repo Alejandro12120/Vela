@@ -16,6 +16,7 @@ thread_local! {
     /// Lets a test own the configuration directory without touching the
     /// process environment. GPUI tests run their tasks on the test thread.
     pub static TEST_CONFIG: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    pub static TEST_UPDATE_BASE_URL: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
     pub static TEST_EDITOR_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
     pub static TEST_EDITOR_PICKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -116,6 +117,10 @@ pub fn update_state() -> Option<UpdatePreview> {
 }
 
 pub fn update_base_url() -> Option<String> {
+    #[cfg(test)]
+    if let Some(url) = TEST_UPDATE_BASE_URL.with(|url| url.borrow().clone()) {
+        return Some(url);
+    }
     value("VELA_DEV_UPDATE_URL")
 }
 

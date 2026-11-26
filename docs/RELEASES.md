@@ -32,13 +32,21 @@ En el repositorio: **Settings → Secrets and variables → Actions → New repo
 
 ## 3. Publicar una release (`.github/workflows/release.yml`)
 
+Abre **Actions → Release → Run workflow** y elige la rama que quieres publicar.
+
+- **`prerelease`** es el modo predeterminado. Puedes indicar una versión completa como `0.2.0-rc.3` o una base como `0.2.0` para usar el siguiente `rc.N` disponible. Con el campo vacío se usa la base de Cargo y se incrementa el parche si ya existe el tag estable. La versión se aplica durante la compilación de los artefactos. El tag apunta al commit seleccionado y la rama conserva su historial.
+- **`release`** publica una versión estable. Indica una versión `X.Y.Z` o deja el campo vacío para usar la base de Cargo. El tag debe estar disponible. Si cambia la versión, el workflow actualiza los dos manifiestos y `Cargo.lock`, publica el commit en la rama seleccionada y crea la release a partir de ese commit. El bot de Actions necesita permiso para hacer push a la rama.
+- **`draft`** está desactivado por defecto. Actívalo para revisar la release antes de que aparezca en el instalador o el actualizador.
+
+### Publicar mediante un tag
+
 1. Actualiza la versión en `crates/vela-app/Cargo.toml` y `crates/vela-core/Cargo.toml` (ambas deben coincidir exactamente) y actualiza `Cargo.lock` si corresponde.
 2. Haz commit y crea el tag `v<versión>`:
    ```sh
    git tag v0.1.0
    git push origin main v0.1.0
    ```
-   Si la versión lleva sufijo (por ejemplo `v0.1.0-rc.1`), la release se marca automáticamente como *pre-release*. También puedes probar el flujo desde la pestaña **Actions → Release → Run workflow** con `draft: true`.
+   Si la versión lleva sufijo (por ejemplo `v0.1.0-rc.1`), la release se marca automáticamente como prerelease.
 
 ### Artefactos generados
 
@@ -47,7 +55,7 @@ En el repositorio: **Settings → Secrets and variables → Actions → New repo
 - `SHA256SUMS.txt` + `SHA256SUMS.txt.sig` + `SHA256SUMS.txt.sshsig`
 - `manifest.json` + `manifest.json.sig` + `manifest.json.sshsig` (esquema `1` para `install.sh` y Vela, disponible en `.../releases/latest/download/manifest.json`)
 
-`scripts/sign-release.py --notes-file <archivo.md>` incluye las notas Markdown en el campo opcional `notes` del manifiesto firmado. El flujo habitual genera las notas en GitHub. Si el manifiesto no incluye notas, Vela consulta el cuerpo de la release por su etiqueta con un límite de tres segundos y sigue mostrando la actualización aunque falle la consulta. Los repositorios espejo configurados con una URL personalizada usan las notas del manifiesto.
+`scripts/sign-release.py --notes-file <archivo.md>` incluye las notas Markdown en el campo opcional `notes` del manifiesto firmado. El flujo habitual genera las notas en GitHub. Si el manifiesto no incluye notas, el canal estable consulta el cuerpo de la release por su etiqueta con un límite de tres segundos. Con **Include Prereleases** activado, Vela usa las notas de la lista de releases de GitHub. Los repositorios espejo configurados con una URL personalizada usan las notas del manifiesto.
 
 Las firmas `.sig` (Ed25519 raw de 64 bytes) y `.sshsig` (OpenSSH SSHSIG, namespace `vela-release`) se generan a partir del mismo secreto `VELA_SIGNING_KEY`. Las claves públicas correspondientes están en [packaging/vela-release.pub](../packaging/vela-release.pub) y [packaging/vela-release-public.pem](../packaging/vela-release-public.pem).
 

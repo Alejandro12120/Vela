@@ -24,7 +24,7 @@ use vela_core::{
         save_user_theme, unused_theme_id,
     },
     path::abbreviate_path,
-    settings::Settings,
+    settings::{Settings, TerminalColorSource},
 };
 
 use super::{Context, Dialog, Theme, Variant, Window, Workspace, button, div};
@@ -33,13 +33,17 @@ use crate::{
     components::{
         button::{icon_button, icon_text_button, small_button, small_icon_text_button},
         dropdown::{self, Placement, dropdown_item, dropdown_panel, menu_height, place},
+        segmented::segmented,
         status_dot::status_dot,
         switch::switch,
         text_input::TextInput,
     },
     context_menu::Tooltip,
     icons::{IconName, icon},
-    terminal::font_size,
+    terminal::{
+        colors::{effective_source, terminal_palette},
+        font_size,
+    },
 };
 
 struct ThemeCardFocus {
@@ -570,10 +574,14 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let Some(dir) = self.dir.clone() else { return };
+        let colors_changed = self.settings.terminal_colors != next.terminal_colors;
         self.settings = next.clone();
         crate::terminal::copy_on_select::set(next.terminal_copy_on_select, cx);
         if self.settings_page.busy || self.settings_page.glass_drag.is_some() {
             self.settings_page.pending_settings = Some(next);
+            if colors_changed {
+                cx.notify();
+            }
             return;
         }
         self.settings_page.busy = true;
@@ -1832,7 +1840,9 @@ impl Workspace {
             .or(self.kitty_settings.as_ref())
             .cloned()
             .unwrap_or_default();
-        let palette = kitty.palette.with_theme(theme.terminal);
+        let kitty_found = kitty.path.is_some();
+        let source = self.settings.terminal_colors;
+        let palette = terminal_palette(source, kitty_found, kitty.palette, theme.terminal);
         let size = font_size::effective(kitty.size, cx);
         let green = gpui::rgb(palette.ansi[2]);
         let blue = gpui::rgb(palette.ansi[4]);
@@ -2001,58 +2011,63 @@ impl Workspace {
 
         let appearance = cx.global::<Appearance>();
         let variant = appearance.variant_for(window);
-        let theme_name = appearance.selected(variant).name.clone();
-        let theme_id = appearance.selected(variant).id.clone();
-        let colors_control = div()
-            .id("terminal-colors")
-            .role(Role::Button)
-            .tab_index(0)
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .text_size(px(13.))
-            .text_color(theme.accent)
-            .cursor_pointer()
-            .hover(move |style| style.text_color(theme.text))
-            .focus(move |style| style.border_color(theme.accent))
-            .child(format!("From the “{theme_name}” theme"))
-            .child(
-                icon(IconName::ArrowRight)
-                    .size(px(14.))
-                    .text_color(theme.accent),
+        let effective = effective_source(source, kitty_found);
+        let colors_description: SharedString = match effective {
+            TerminalColorSource::Theme => format!(
+                "Uses the terminal colors of the “{}” theme.",
+                appearance.selected(variant).name,
             )
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.settings_page.scroll.scroll_to_top_of_item(0);
-                if let Some(focus) = this.settings_page.themes.get(&theme_id) {
-                    match variant {
-                        ColorVariant::Light => focus.light.focus(window, cx),
-                        ColorVariant::Dark => focus.dark.focus(window, cx),
-                    }
-                }
-                cx.notify();
+            .into(),
+            TerminalColorSource::Kitty => "Uses the colors from kitty.conf.".into(),
+        };
+        let unavailable = (!kitty_found).then_some("kitty.conf not found");
+        let sources = [TerminalColorSource::Theme, TerminalColorSource::Kitty];
+        let choose_source = cx.listener(move |this, index: &usize, window, cx| {
+            let source = sources[*index];
+            if source == effective {
+                return;
+            }
+            let mut next = this.settings.clone();
+            next.terminal_colors = source;
+            this.save_settings(next, window, cx);
+        });
+        let colors_control = div()
+            .flex()
+            .flex_col()
+            .items_end()
+            .gap(px(4.))
+            .child(segmented(
+                "terminal-colors",
+                "Colors",
+                &[("Vela theme", None), ("kitty.conf", unavailable)],
+                usize::from(effective == TerminalColorSource::Kitty),
+                theme,
+                move |index, window, cx| choose_source(&index, window, cx),
+            ))
+            .children(unavailable.map(|reason| {
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme.secondary_text)
+                    .child(reason)
             }));
 
-        let (path_label, kitty_description, show) = match &kitty.path {
-            Some(path) => (abbreviate_path(path, 40), None, Some(path.clone())),
-            None => (
-                String::new(),
-                Some("File not found. Using Kitty defaults."),
-                None,
-            ),
-        };
+        let show = kitty.path.clone();
         let kitty_control = div()
             .flex()
             .items_center()
             .gap(px(8.))
-            .when(show.is_some(), |row| {
-                row.child(
-                    div()
-                        .font_family(crate::theme::monospace())
-                        .text_size(px(12.))
-                        .text_color(theme.secondary_text)
-                        .child(path_label),
-                )
-            })
+            .when_some(
+                show.as_deref().map(|path| abbreviate_path(path, 40)),
+                |row, path_label| {
+                    row.child(
+                        div()
+                            .font_family(crate::theme::monospace())
+                            .text_size(px(12.))
+                            .text_color(theme.secondary_text)
+                            .child(path_label),
+                    )
+                },
+            )
             .children(show.map(|path| {
                 small_button(
                     "show-kitty",
@@ -2134,13 +2149,8 @@ impl Workspace {
                             )),
                         theme,
                     ),
-                    settings_row("Colors", None, colors_control, theme),
-                    settings_row(
-                        "kitty.conf",
-                        kitty_description.map(Into::into),
-                        kitty_control,
-                        theme,
-                    ),
+                    settings_row("Colors", Some(colors_description), colors_control, theme),
+                    settings_row("kitty.conf", None, kitty_control, theme),
                 ],
             ))
             .when_some(self.settings_error.clone(), |section, error| {

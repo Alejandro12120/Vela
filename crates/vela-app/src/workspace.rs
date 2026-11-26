@@ -2378,7 +2378,7 @@ impl Render for Workspace {
                     && self.selected.as_ref() == Some(id)
                     && panes.view == SessionView::Terminal;
                 terminal.update(cx, |terminal, _| {
-                    terminal.set_palette(theme.terminal);
+                    terminal.set_palette(theme.terminal, self.settings.terminal_colors);
                     terminal.set_selected(visible, window);
                 });
             }

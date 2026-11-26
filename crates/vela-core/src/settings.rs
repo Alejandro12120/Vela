@@ -9,6 +9,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::appearance::AppearanceSettings;
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TerminalColorSource {
+    #[default]
+    Theme,
+    Kitty,
+}
+
 #[derive(Clone, Default, Deserialize, Serialize)]
 pub struct Settings {
     pub editor: Option<PathBuf>,
@@ -22,6 +30,9 @@ pub struct Settings {
     /// Whether selecting terminal text copies it. When absent, `kitty.conf` decides.
     #[serde(default)]
     pub terminal_copy_on_select: Option<bool>,
+    /// Terminal palette source. Kitty falls back to the theme without a configuration file.
+    #[serde(default)]
+    pub terminal_colors: TerminalColorSource,
     #[serde(default)]
     pub appearance: AppearanceSettings,
 }
@@ -104,6 +115,38 @@ mod tests {
         .save(path)
         .unwrap();
         assert_eq!(Settings::load(path).unwrap().terminal_font_size, Some(20.));
+    }
+
+    #[test]
+    fn terminal_colors_round_trip_as_lowercase() {
+        let dir = tempfile::tempdir().unwrap();
+        for (terminal_colors, value) in [
+            (TerminalColorSource::Theme, "theme"),
+            (TerminalColorSource::Kitty, "kitty"),
+        ] {
+            Settings {
+                terminal_colors,
+                ..Settings::default()
+            }
+            .save(dir.path())
+            .unwrap();
+            assert_eq!(
+                Settings::load(dir.path()).unwrap().terminal_colors,
+                terminal_colors
+            );
+            let text = fs::read_to_string(dir.path().join("settings.toml")).unwrap();
+            assert!(text.contains(&format!("terminal_colors = \"{value}\"")));
+        }
+    }
+
+    #[test]
+    fn older_settings_default_to_theme_terminal_colors() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("settings.toml"), "terminal_font_size = 14").unwrap();
+        assert_eq!(
+            Settings::load(dir.path()).unwrap().terminal_colors,
+            TerminalColorSource::Theme
+        );
     }
 
     #[test]

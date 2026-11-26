@@ -2,8 +2,9 @@ use alacritty_terminal::{
     term::color::Colors,
     vte::ansi::{Color, NamedColor, Rgb},
 };
+use vela_core::{appearance::TerminalColors, settings::TerminalColorSource};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette {
     pub foreground: u32,
     pub background: u32,
@@ -12,6 +13,26 @@ pub struct Palette {
     pub selection_foreground: Option<u32>,
     pub selection_background: Option<u32>,
     pub ansi: [u32; 16],
+}
+
+pub fn effective_source(source: TerminalColorSource, kitty_found: bool) -> TerminalColorSource {
+    if kitty_found {
+        source
+    } else {
+        TerminalColorSource::Theme
+    }
+}
+
+pub fn terminal_palette(
+    source: TerminalColorSource,
+    kitty_found: bool,
+    kitty_palette: Palette,
+    theme_colors: TerminalColors,
+) -> Palette {
+    match effective_source(source, kitty_found) {
+        TerminalColorSource::Theme => kitty_palette.with_theme(theme_colors),
+        TerminalColorSource::Kitty => kitty_palette,
+    }
 }
 
 impl Default for Palette {
@@ -174,6 +195,33 @@ mod tests {
         assert_eq!(result.ansi[1], 0x663300);
         assert_eq!(result.ansi[2], 0x334455);
         assert_eq!(result.ansi[3], Palette::default().ansi[3]);
+    }
+
+    #[test]
+    fn kitty_palette_requires_a_configuration_file() {
+        let kitty = Palette::default();
+        let theme = TerminalColors {
+            background: Some(0x9988_77ff),
+            ..Default::default()
+        };
+        let merged = kitty.with_theme(theme);
+
+        assert_eq!(
+            terminal_palette(TerminalColorSource::Kitty, true, kitty, theme),
+            kitty
+        );
+        assert_eq!(
+            terminal_palette(TerminalColorSource::Theme, true, kitty, theme),
+            merged
+        );
+        assert_eq!(
+            terminal_palette(TerminalColorSource::Kitty, false, kitty, theme),
+            merged
+        );
+        assert_eq!(
+            terminal_palette(TerminalColorSource::Theme, false, kitty, theme),
+            merged
+        );
     }
 
     #[test]

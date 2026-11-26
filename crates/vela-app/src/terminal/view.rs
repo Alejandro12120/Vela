@@ -14,6 +14,7 @@ use gpui::{
     MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollEvent, Subscription, Task, UTF16Selection,
     Window, actions, div, font, prelude::*, px,
 };
+use vela_core::{appearance::TerminalColors, settings::TerminalColorSource};
 
 use crate::{
     components::button::{Variant, button},
@@ -23,7 +24,7 @@ use crate::{
 
 use super::{
     GridSize, Terminal,
-    colors::Palette,
+    colors::{Palette, terminal_palette},
     copy_on_select,
     element::{Geometry, Surface},
     font_size, keys,
@@ -93,6 +94,7 @@ pub struct TerminalView {
     pub(super) terminal: Option<Terminal>,
     pub(super) settings: Kitty,
     pub(super) palette: Palette,
+    color_source: TerminalColorSource,
     kitty_size: f32,
     pub(super) focus: FocusHandle,
     pub(super) fonts: [Font; 4],
@@ -125,6 +127,7 @@ impl TerminalView {
             terminal: None,
             settings: Kitty::default(),
             palette: Palette::default(),
+            color_source: TerminalColorSource::default(),
             kitty_size: Kitty::default().size,
             focus: cx.focus_handle(),
             fonts: std::array::from_fn(|_| font(crate::theme::monospace())),
@@ -192,6 +195,7 @@ impl TerminalView {
 
     pub fn reload(&mut self, settings: Kitty, window: &Window, cx: &mut Context<Self>) {
         self.set_settings(settings, cx);
+        self.set_palette(Theme::current(window, cx).terminal, self.color_source);
         if self.selected && window.is_window_active() {
             cx.notify();
         }
@@ -376,8 +380,14 @@ impl TerminalView {
         cx.notify();
     }
 
-    pub fn set_palette(&mut self, colors: vela_core::appearance::TerminalColors) {
-        let palette = self.settings.palette.with_theme(colors);
+    pub fn set_palette(&mut self, colors: TerminalColors, source: TerminalColorSource) {
+        self.color_source = source;
+        let palette = terminal_palette(
+            source,
+            self.settings.path.is_some(),
+            self.settings.palette,
+            colors,
+        );
         if self.palette != palette {
             self.palette = palette;
             if let Some(terminal) = &self.terminal {
@@ -551,7 +561,7 @@ impl TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current(window, cx);
-        self.set_palette(theme.terminal);
+        self.set_palette(theme.terminal, self.color_source);
         let ended = self.terminal.as_ref().is_some_and(Terminal::ended) || self.error.is_some();
         let status = self
             .error
@@ -843,7 +853,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn changing_theme_updates_a_running_pty_palette(cx: &mut TestAppContext) {
+    fn changing_colors_updates_a_running_pty_palette(cx: &mut TestAppContext) {
         let (_, terminal, _, cx) = open(cx);
         let grid = terminal.update(cx, |view, _| {
             let child = Terminal::spawn("/bin/cat", Vec::new(), &view.settings, GridSize::INITIAL)
@@ -889,6 +899,27 @@ mod tests {
             assert!(Arc::ptr_eq(&view.terminal.as_ref().unwrap().grid, &grid));
             assert_eq!(view.palette.ansi[1], 0x113355);
             assert_eq!(view.palette.background, 0x171f1b);
+        });
+
+        terminal.update_in(cx, |view, window, cx| {
+            let theme = Theme::current(window, cx);
+            let kitty = Kitty {
+                path: Some("kitty.conf".into()),
+                ..view.settings().clone()
+            };
+            view.set_palette(theme.terminal, TerminalColorSource::Kitty);
+            assert_eq!(view.palette.background, 0x171f1b);
+
+            view.reload(kitty.clone(), window, cx);
+            assert_eq!(view.palette, kitty.palette);
+            view.reload(Kitty::default(), window, cx);
+            assert_eq!(view.palette.background, 0x171f1b);
+            view.reload(kitty.clone(), window, cx);
+            assert_eq!(view.palette, kitty.palette);
+
+            let child = view.terminal.as_ref().unwrap();
+            assert!(Arc::ptr_eq(&child.grid, &grid));
+            assert_eq!(child.listener.io.lock().unwrap().palette, kitty.palette);
         });
     }
     #[gpui::test]

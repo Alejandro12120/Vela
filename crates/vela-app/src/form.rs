@@ -515,7 +515,8 @@ impl Form {
             .child(icon_label(IconName::Lock, "Authentication", theme))
             .child(segmented(
                 "form-auth",
-                &["SSH Key", "Password"],
+                "Authentication",
+                &[("SSH Key", None), ("Password", None)],
                 if self.agent { 0 } else { 1 },
                 theme,
                 move |index, window, cx| listener(&index, window, cx),

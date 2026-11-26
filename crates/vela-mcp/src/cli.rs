@@ -186,6 +186,13 @@ fn status(mut args: impl Iterator<Item = OsString>) -> i32 {
                 id.display_name(),
                 path.map_or_else(String::new, |path| path.display().to_string())
             );
+            if let HarnessStatus::Detected { entry, .. } = status {
+                match entry {
+                    EntryState::Conflict { found } => println!("  Ocupada por: {found}"),
+                    EntryState::Outdated { found } => println!("  Ejecutable anterior: {found}"),
+                    _ => {}
+                }
+            }
         }
     }
     0

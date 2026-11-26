@@ -95,7 +95,7 @@ impl VelaCommand {
         &self.program
     }
 
-    fn classify(&self, program: Option<&str>, args_match: bool) -> EntryState {
+    fn classify(&self, program: Option<&str>, args_match: bool, url: Option<&str>) -> EntryState {
         if let Some(found) = program.filter(|_| args_match) {
             if found == self.program {
                 return EntryState::Installed;
@@ -103,14 +103,77 @@ impl VelaCommand {
             let path = Path::new(found);
             if path.is_absolute() && path.file_name().is_some_and(|name| name == "vela") {
                 return EntryState::Outdated {
-                    found: found.to_owned(),
+                    found: display_program(found),
                 };
             }
         }
-        EntryState::Conflict {
-            found: "La entrada está ocupada por otro comando o transporte.".into(),
-        }
+        // Arguments may carry credentials. Only describe the executable or remote host.
+        let found = match (url, program.filter(|program| !program.trim().is_empty())) {
+            (Some(url), _) => display_url(url),
+            (None, Some(program)) => display_program(program),
+            (None, None) => "(sin comando)".into(),
+        };
+        EntryState::Conflict { found }
     }
+}
+
+fn display_program(program: &str) -> String {
+    if program.contains("://") {
+        return display_url(program);
+    }
+    let mut chars = program.chars();
+    let mut display: String = chars
+        .by_ref()
+        .take(200)
+        .map(|ch| if ch.is_control() { '�' } else { ch })
+        .collect();
+    if chars.next().is_some() {
+        display.push('…');
+    }
+    display
+}
+
+fn display_url(url: &str) -> String {
+    let host = url_host(url).unwrap_or("(sin host)");
+    format!("url: {host}")
+}
+
+fn url_host(url: &str) -> Option<&str> {
+    let (scheme, rest) = url.split_once("://")?;
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return None;
+    }
+    let authority = rest.split(['/', '?', '#']).next()?;
+    // Reject backslashes (ambiguous URL separators) before extracting credentials or host.
+    if authority.contains('\\') {
+        return None;
+    }
+    let host_port = authority.rsplit('@').next()?;
+    let (host, port) = if let Some(ipv6) = host_port.strip_prefix('[') {
+        let (ip, suffix) = ipv6.split_once(']')?;
+        ip.parse::<std::net::Ipv6Addr>().ok()?;
+        let port = if suffix.is_empty() {
+            None
+        } else {
+            Some(suffix.strip_prefix(':')?)
+        };
+        (&host_port[..ip.len() + 2], port)
+    } else {
+        let (host, port) = host_port
+            .split_once(':')
+            .map_or((host_port, None), |(host, port)| (host, Some(port)));
+        if !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+        {
+            return None;
+        }
+        (host, port)
+    };
+    if let Some(port) = port {
+        port.parse::<u16>().ok()?;
+    }
+    (!host.is_empty() && host.len() <= 195).then_some(host)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -214,7 +277,14 @@ impl Problem {
 
 enum Document<'a> {
     Json(json::Config<'a>),
-    Toml(toml::Config),
+    Toml(toml::Config<'a>),
+}
+
+#[derive(Clone, Copy)]
+enum Edit<'a> {
+    Install(&'a VelaCommand),
+    UpdateProgram(&'a VelaCommand),
+    Remove,
 }
 
 impl<'a> Document<'a> {
@@ -244,10 +314,10 @@ impl<'a> Document<'a> {
         }
     }
 
-    fn edit(self, cmd: Option<&VelaCommand>) -> String {
+    fn edit(self, edit: Edit<'_>) -> String {
         match self {
-            Self::Json(config) => config.edit(cmd),
-            Self::Toml(config) => config.edit(cmd),
+            Self::Json(config) => config.edit(edit),
+            Self::Toml(config) => config.edit(edit),
         }
     }
 }
@@ -344,7 +414,7 @@ fn change(
         if matches!(entry, EntryState::Conflict { .. }) && !opts.force {
             return Err(HarnessError::Conflict { config_path: path });
         }
-        let action = match (installing, entry) {
+        let action = match (installing, &entry) {
             (true, EntryState::Installed) => Action::AlreadyUpToDate,
             (true, EntryState::NotInstalled) => Action::Created,
             (true, _) => Action::Updated,
@@ -361,7 +431,12 @@ fn change(
         if matches!(action, Action::AlreadyUpToDate | Action::NothingToRemove) {
             return Ok(report);
         }
-        let updated = doc.edit(installing.then_some(cmd));
+        let edit = match (installing, entry) {
+            (true, EntryState::Outdated { .. }) => Edit::UpdateProgram(cmd),
+            (true, _) => Edit::Install(cmd),
+            (false, _) => Edit::Remove,
+        };
+        let updated = doc.edit(edit);
         if opts.dry_run {
             let original = snapshot.as_ref().map_or("", |s| {
                 std::str::from_utf8(&s.bytes).expect("validated UTF-8")
@@ -437,7 +512,7 @@ fn document<'a>(
     if ambiguous {
         let legacy = matches!(
             Document::parse(id, path, snapshot),
-            Err(Problem::Manual(_, true))
+            Ok(Document::Json(config)) if config.is_legacy()
         );
         return Err(Problem::Manual(
             "Coexisten opencode.json y opencode.jsonc. Revisa ambos archivos.".into(),

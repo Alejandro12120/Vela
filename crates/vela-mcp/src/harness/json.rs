@@ -1,9 +1,9 @@
-use std::ops::Range;
+use std::{borrow::Cow, ops::Range};
 
 use serde::{Serialize, de::IgnoredAny};
 use serde_json::{Value, json, ser::PrettyFormatter};
 
-use super::{EntryState, HarnessId, Problem, VelaCommand};
+use super::{Edit, EntryState, HarnessId, Problem, VelaCommand};
 
 const SERVERS: &str = "mcpServers";
 const MODERN: &[&str] = &["mcp", "servers"];
@@ -11,35 +11,35 @@ const LEGACY: &[&str] = &["mcp"];
 
 pub(super) struct Config<'a> {
     source: &'a str,
+    parsed: Cow<'a, str>,
+    trailing_commas: Vec<usize>,
     id: HarnessId,
     legacy: bool,
     container: Option<Object>,
     missing: &'static [&'static str],
+    program: Option<Range<usize>>,
 }
 
 impl<'a> Config<'a> {
     pub fn parse(id: HarnessId, source: &'a str, jsonc: bool) -> Result<Self, Problem> {
-        if jsonc
-            || (id == HarnessId::OpenCode
-                && !source.trim().is_empty()
-                && serde_json::from_str::<IgnoredAny>(source).is_err())
+        let (parsed, trailing_commas) = if id == HarnessId::OpenCode
+            && (jsonc
+                || (!source.trim().is_empty()
+                    && serde_json::from_str::<IgnoredAny>(source).is_err()))
         {
-            let stripped = strip_jsonc(source);
-            let config = Config::strict(id, stripped.as_deref().unwrap_or(source))?;
-            return Err(Problem::Manual(
-                "OpenCode usa JSONC. Edita el archivo a mano.".into(),
-                config.legacy,
-            ));
-        }
-        Self::strict(id, source)
-    }
+            let (stripped, commas) = strip_jsonc(source)
+                .filter(|(stripped, _)| stripped.len() == source.len())
+                .ok_or_else(|| Problem::Malformed("JSONC inválido.".into()))?;
+            (Cow::Owned(stripped), commas)
+        } else {
+            (Cow::Borrowed(source), Vec::new())
+        };
 
-    fn strict(id: HarnessId, source: &'a str) -> Result<Self, Problem> {
         let root = if source.trim().is_empty() {
             None
         } else {
-            serde_json::from_str::<IgnoredAny>(source).map_err(malformed)?;
-            Some(Object::parse(source, skip_space(source, 0))?)
+            serde_json::from_str::<IgnoredAny>(&parsed).map_err(malformed)?;
+            Some(Object::parse(&parsed, skip_space(&parsed, 0))?)
         };
         let path = if id == HarnessId::OpenCode {
             MODERN
@@ -48,10 +48,13 @@ impl<'a> Config<'a> {
         };
         let mut config = Self {
             source,
+            parsed,
+            trailing_commas,
             id,
             legacy: false,
             container: root,
             missing: path,
+            program: None,
         };
         while let [key, rest @ ..] = config.missing {
             let Some(value) = config
@@ -63,7 +66,7 @@ impl<'a> Config<'a> {
             else {
                 break;
             };
-            let child = Object::parse(source, value.value.start)?;
+            let child = Object::parse(&config.parsed, value.value.start)?;
             if id == HarnessId::OpenCode
                 && *key == "mcp"
                 && child.find("servers")?.is_some()
@@ -78,7 +81,7 @@ impl<'a> Config<'a> {
                 && *key == "mcp"
                 && child.find("servers")?.is_none()
                 && child.members.iter().any(|member| {
-                    serde_json::from_str::<Value>(&source[member.value.clone()])
+                    serde_json::from_str::<Value>(&config.parsed[member.value.clone()])
                         .is_ok_and(|value| value.get("type").is_some_and(Value::is_string))
                 })
             {
@@ -89,10 +92,30 @@ impl<'a> Config<'a> {
             }
             config.container = Some(child);
         }
-        if config.missing.is_empty() {
-            config.member()?;
+        if let Some(member) = config.member()?
+            && config.parsed.as_bytes()[member.value.start] == b'{'
+        {
+            let object = Object::parse(&config.parsed, member.value.start)?;
+            if let Some(command) = object.find("command")? {
+                let range = command.value.clone();
+                config.program =
+                    if id == HarnessId::OpenCode && config.parsed.as_bytes()[range.start] == b'[' {
+                        let start = skip_space(&config.parsed, range.start + 1);
+                        if config.parsed.as_bytes()[start] == b']' {
+                            None
+                        } else {
+                            Some(start..value_end(&config.parsed, start)?)
+                        }
+                    } else {
+                        Some(range)
+                    };
+            }
         }
         Ok(config)
+    }
+
+    pub fn is_legacy(&self) -> bool {
+        self.legacy
     }
 
     fn member(&self) -> Result<Option<&Member>, Problem> {
@@ -108,9 +131,13 @@ impl<'a> Config<'a> {
         let Some(member) = self.member().expect("validated entry") else {
             return EntryState::NotInstalled;
         };
-        let Ok(value) = serde_json::from_str::<Value>(&self.source[member.value.clone()]) else {
-            return cmd.classify(None, false);
+        let Ok(value) = serde_json::from_str::<Value>(&self.parsed[member.value.clone()]) else {
+            return cmd.classify(None, false, None);
         };
+        let url = ["url", "serverUrl", "httpUrl"]
+            .iter()
+            .find_map(|key| value.get(key))
+            .map(|url| url.as_str().unwrap_or_default());
         let (program, args_match) = if self.id == HarnessId::OpenCode {
             let command = value.get("command").and_then(Value::as_array);
             (
@@ -124,41 +151,34 @@ impl<'a> Config<'a> {
             (
                 value.get("command").and_then(Value::as_str),
                 value.get("type").is_none_or(|kind| kind == "stdio")
-                    && ["url", "serverUrl", "httpUrl"]
-                        .iter()
-                        .all(|key| value.get(key).is_none())
                     && value
                         .get("args")
                         .and_then(Value::as_array)
                         .is_some_and(|items| items.len() == 1 && items[0] == "mcp"),
             )
         };
-        cmd.classify(program, args_match)
+        cmd.classify(program, args_match && url.is_none(), url)
     }
 
-    pub fn edit(&self, command: Option<&VelaCommand>) -> String {
+    pub fn edit(&self, edit: Edit<'_>) -> String {
         let member = self.member().expect("validated entry");
-        let Some(command) = command else {
-            let member = member.expect("removal requires an entry");
-            let container = self.container.as_ref().unwrap();
-            let index = container
-                .members
-                .iter()
-                .position(|item| item.start == member.start)
-                .unwrap();
-            let remove = if index > 0 {
-                container.members[index - 1].value.end..member.value.end
-            } else if let Some(next) = container.members.get(1) {
-                member.start..next.start
-            } else {
-                container.start + 1..member.value.end
-            };
-            return replace(self.source, remove, "");
+        let command = match edit {
+            Edit::Install(command) => command,
+            Edit::UpdateProgram(command) => {
+                let range = self.program.clone().expect("update requires a program");
+                return replace(
+                    self.source,
+                    range,
+                    &json!(command.program_str()).to_string(),
+                );
+            }
+            Edit::Remove => return self.remove(member.expect("removal requires an entry")),
         };
 
         let format = Format::detect(self.source);
         let entry = entry(self.id, self.legacy, command);
         if let Some(member) = member {
+            // A forced replacement may discard comments inside the old Vela value.
             let base = line_indent(self.source, member.start);
             return replace(
                 self.source,
@@ -202,6 +222,8 @@ impl<'a> Config<'a> {
 
         let mut delta = String::new();
         let position = if let Some(last) = container.members.last() {
+            // Insert before the original trivia and reuse any trailing comma at
+            // the end of the new member. Removing the insertion restores both.
             delta.push(',');
             last.value.end
         } else {
@@ -213,6 +235,65 @@ impl<'a> Config<'a> {
         }
         delta.push_str(&insertion);
         replace(self.source, position..position, &delta)
+    }
+
+    fn remove(&self, member: &Member) -> String {
+        let container = self.container.as_ref().unwrap();
+        let index = container
+            .members
+            .iter()
+            .position(|item| item.start == member.start)
+            .unwrap();
+        let preceding = container.members[..index].last();
+        let following = container.members.get(index + 1);
+        let (separator, span, gap) = if let Some(previous) = preceding {
+            let comma = skip_space(&self.parsed, previous.value.end);
+            (
+                Some(comma),
+                previous.value.end..member.value.end,
+                previous.value.end..member.start,
+            )
+        } else if let Some(next) = following {
+            let comma = skip_space(&self.parsed, member.value.end);
+            (
+                Some(comma),
+                member.start..next.start,
+                member.value.end..next.start,
+            )
+        } else {
+            let end = self
+                .trailing_commas
+                .partition_point(|pos| *pos < container.end);
+            let comma = self.trailing_commas[..end]
+                .last()
+                .copied()
+                .filter(|pos| *pos >= member.value.end);
+            (
+                comma,
+                container.start + 1..comma.map_or(member.value.end, |pos| pos + 1),
+                container.start + 1..member.start,
+            )
+        };
+        let whitespace = |range: Range<usize>| {
+            range
+                .filter(|pos| Some(*pos) != separator)
+                .all(|pos| self.source.as_bytes()[pos].is_ascii_whitespace())
+        };
+        // Preserve comments between members. With comments in the gap, delete
+        // only Vela's member and its comma as separate ranges.
+        if whitespace(gap) && whitespace(member.value.end..span.end) {
+            return replace(self.source, span, "");
+        }
+        let mut result = self.source.to_owned();
+        let entry = member.start..member.value.end;
+        if let Some(comma) = separator.filter(|pos| *pos >= entry.end) {
+            result.remove(comma);
+        }
+        result.replace_range(entry, "");
+        if let Some(comma) = separator.filter(|pos| *pos < member.start) {
+            result.remove(comma);
+        }
+        result
     }
 }
 
@@ -240,12 +321,15 @@ pub(super) fn snippet(id: HarnessId, legacy: bool, command: &VelaCommand) -> Str
     };
     Config {
         source: "",
+        parsed: Cow::Borrowed(""),
+        trailing_commas: Vec::new(),
         id,
         legacy,
         container: None,
         missing: path,
+        program: None,
     }
-    .edit(Some(command))
+    .edit(Edit::Install(command))
 }
 
 struct Object {
@@ -278,13 +362,7 @@ impl Object {
             let name = key.next().expect("validated JSON key").map_err(malformed)?;
             let colon = skip_space(source, position + key.byte_offset());
             let value_start = skip_space(source, colon + 1);
-            let mut value = serde_json::Deserializer::from_str(&source[value_start..])
-                .into_iter::<IgnoredAny>();
-            value
-                .next()
-                .expect("validated JSON value")
-                .map_err(malformed)?;
-            let end = value_start + value.byte_offset();
+            let end = value_end(source, value_start)?;
             members.push(Member {
                 key: name,
                 start: position,
@@ -312,6 +390,15 @@ impl Object {
         }
         Ok(found)
     }
+}
+
+fn value_end(source: &str, start: usize) -> Result<usize, Problem> {
+    let mut value = serde_json::Deserializer::from_str(&source[start..]).into_iter::<IgnoredAny>();
+    value
+        .next()
+        .expect("validated JSON value")
+        .map_err(malformed)?;
+    Ok(start + value.byte_offset())
 }
 
 fn skip_space(source: &str, start: usize) -> usize {
@@ -394,12 +481,13 @@ fn malformed(error: serde_json::Error) -> Problem {
     ))
 }
 
-fn strip_jsonc(source: &str) -> Option<String> {
+fn strip_jsonc(source: &str) -> Option<(String, Vec<usize>)> {
     // Replace comments with spaces, respecting quoted strings, then remove trailing commas.
     let mut bytes = source.as_bytes().to_vec();
     let mut pos = 0;
     let mut previous = None;
     let mut comma = None;
+    let mut trailing_commas = Vec::new();
     while pos < bytes.len() {
         match bytes[pos] {
             b'"' => {
@@ -410,7 +498,7 @@ fn strip_jsonc(source: &str) -> Option<String> {
                 previous = Some(b'"');
             }
             b'/' if bytes.get(pos + 1) == Some(&b'/') => {
-                while pos < bytes.len() && bytes[pos] != b'\n' {
+                while pos < bytes.len() && !matches!(bytes[pos], b'\n' | b'\r') {
                     bytes[pos] = b' ';
                     pos += 1;
                 }
@@ -439,11 +527,12 @@ fn strip_jsonc(source: &str) -> Option<String> {
                     && let Some(comma) = comma
                 {
                     bytes[comma] = b' ';
+                    trailing_commas.push(comma);
                 }
                 previous = Some(byte);
             }
         }
         pos += 1;
     }
-    String::from_utf8(bytes).ok()
+    Some((String::from_utf8(bytes).ok()?, trailing_commas))
 }

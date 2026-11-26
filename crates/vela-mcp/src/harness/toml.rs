@@ -1,18 +1,16 @@
-use toml_edit::{Array, DocumentMut, Item, Table, value};
+use toml_edit::{Array, Document, Item, Table, Value, value};
 
-use super::{EntryState, Problem, VelaCommand};
+use super::{Edit, EntryState, Problem, VelaCommand};
 
 const GROUP: &str = "mcp_servers";
 
-pub(super) struct Config {
-    doc: DocumentMut,
-    final_newline: bool,
-    crlf: bool,
+pub(super) struct Config<'a> {
+    doc: Document<&'a str>,
 }
 
-impl Config {
-    pub fn parse(source: &str) -> Result<Self, Problem> {
-        let doc = source.parse::<DocumentMut>().map_err(|error| {
+impl<'a> Config<'a> {
+    pub fn parse(source: &'a str) -> Result<Self, Problem> {
+        let doc = Document::parse(source).map_err(|error| {
             Problem::Malformed(error.span().map_or_else(
                 || "TOML inválido.".into(),
                 |span| format!("TOML inválido cerca del byte {}.", span.start),
@@ -25,15 +23,7 @@ impl Config {
                 standard_table(entry)?;
             }
         }
-        Ok(Self {
-            doc,
-            final_newline: source.is_empty() || source.ends_with('\n'),
-            crlf: source.contains("\r\n")
-                && source
-                    .split_inclusive('\n')
-                    .filter(|line| line.ends_with('\n'))
-                    .all(|line| line.ends_with("\r\n")),
-        })
+        Ok(Self { doc })
     }
 
     pub fn entry(&self, cmd: &VelaCommand) -> EntryState {
@@ -42,18 +32,40 @@ impl Config {
         };
         let program = entry.get("command").and_then(Item::as_str);
         let args = entry.get("args").and_then(Item::as_array);
-        let stdio = entry.get("url").is_none();
+        let url = entry.get("url").map(|url| url.as_str().unwrap_or_default());
         cmd.classify(
             program,
             args.is_some_and(|args| {
                 args.len() == 1 && args.get(0).and_then(toml_edit::Value::as_str) == Some("mcp")
-            }) && stdio,
+            }) && url.is_none(),
+            url,
         )
     }
 
-    pub fn edit(mut self, command: Option<&VelaCommand>) -> String {
-        let group = self
-            .doc
+    pub fn edit(self, edit: Edit<'_>) -> String {
+        let source = self.doc.raw();
+        let command = match edit {
+            Edit::Install(command) => Some(command),
+            Edit::Remove => None,
+            Edit::UpdateProgram(command) => {
+                let span = self.doc[GROUP]["vela"]["command"]
+                    .span()
+                    .expect("outdated entry has a command span");
+                // The value's span excludes its decoration. Edit just the token
+                // to preserve every other byte, including mixed line endings.
+                let mut updated = source.to_owned();
+                updated.replace_range(span, &Value::from(command.program_str()).to_string());
+                return updated;
+            }
+        };
+        let final_newline = source.is_empty() || source.ends_with('\n');
+        let crlf = source.contains("\r\n")
+            && source
+                .split_inclusive('\n')
+                .filter(|line| line.ends_with('\n'))
+                .all(|line| line.ends_with("\r\n"));
+        let mut doc = self.doc.into_mut();
+        let group = doc
             .entry(GROUP)
             .or_insert_with(|| {
                 let mut table = Table::new();
@@ -79,11 +91,11 @@ impl Config {
                 group.set_implicit(false);
             }
         }
-        let mut edited = self.doc.to_string();
-        if !self.final_newline && edited.ends_with('\n') {
+        let mut edited = doc.to_string();
+        if !final_newline && edited.ends_with('\n') {
             edited.pop();
         }
-        if self.crlf {
+        if crlf {
             // toml_edit emits LF even when the entire source uses CRLF.
             edited = edited.replace('\n', "\r\n");
         }
@@ -108,9 +120,7 @@ fn standard_table(item: &Item) -> Result<&Table, Problem> {
 
 pub(super) fn snippet(command: &VelaCommand) -> String {
     Config {
-        doc: DocumentMut::new(),
-        final_newline: true,
-        crlf: false,
+        doc: Document::new(),
     }
-    .edit(Some(command))
+    .edit(Edit::Install(command))
 }

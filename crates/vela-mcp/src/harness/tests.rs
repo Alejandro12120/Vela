@@ -238,10 +238,153 @@ fn updates_outdated_and_requires_force_for_conflicts() {
         }
         assert_eq!(fs::read_to_string(&f.path).unwrap(), competing);
         assert_eq!(f.install(id, &FORCE).unwrap().action, Action::Updated);
+        assert_eq!(fs::read_to_string(&f.path).unwrap(), initial);
         f.put(&competing);
         assert_eq!(f.uninstall(id, &FORCE).unwrap().action, Action::Removed);
         assert_eq!(f.state(id), EntryState::NotInstalled);
     }
+}
+
+#[test]
+fn updates_only_the_program_and_preserves_custom_settings() {
+    const OLD: &str = "/old/Vela.app/Contents/MacOS/vela";
+    for id in HarnessId::ALL {
+        let f = Fixture::new(id);
+        let initial = match id {
+            HarnessId::Codex => {
+                r#"# Keep
+[mcp_servers.vela] # Vela
+command   =   '/old/Vela.app/Contents/MacOS/vela'   # program
+args = [ "mcp" ] # arguments
+startup_timeout_sec = 30
+tool_timeout_sec = 45
+enabled_tools = ["list"]
+enabled = false
+cwd = '/tmp'
+
+[mcp_servers.vela.env] # custom environment
+VAR = 'fake'
+"#
+            }
+            HarnessId::OpenCode => {
+                r#"{"mcp":{"servers":{"vela":{
+  "type":"local","command":[ "/old/Vela.app/Contents/MacOS/vela" , "mcp" ],
+  "environment":{"VAR":"fake"},"enabled":false,"timeout":30000
+}}}}"#
+            }
+            _ => {
+                r#"{"mcpServers" : {"vela":{
+  "command" : "/old/Vela.app/Contents/MacOS/vela", "args" : [ "mcp" ],
+  "env":{"VAR":"fake"},"cwd":"/tmp","disabled":true,"timeout":30000
+}}}"#
+            }
+        };
+        let new = if id == HarnessId::Codex {
+            format!("'{}'", f.cmd.program_str())
+        } else {
+            serde_json::to_string(f.cmd.program_str()).unwrap()
+        };
+        let old = if id == HarnessId::Codex {
+            format!("'{OLD}'")
+        } else {
+            serde_json::to_string(OLD).unwrap()
+        };
+        for initial in [
+            initial.to_owned(),
+            initial.replace('\n', "\r\n"),
+            initial.trim_end().replacen('\n', "\r\n", 1),
+        ] {
+            f.put(&initial);
+            assert_eq!(f.state(id), EntryState::Outdated { found: OLD.into() });
+            assert_eq!(f.install(id, &DEFAULT).unwrap().action, Action::Updated);
+            assert_eq!(f.state(id), EntryState::Installed);
+            assert_eq!(
+                fs::read_to_string(&f.path).unwrap(),
+                initial.replace(&old, &new)
+            );
+        }
+        f.put(&initial.replace(OLD, "/bin/other"));
+        assert!(matches!(f.state(id), EntryState::Conflict { .. }));
+        f.install(id, &FORCE).unwrap();
+        assert_eq!(f.state(id), EntryState::Installed);
+        let forced = fs::read_to_string(&f.path).unwrap();
+        assert!(!forced.contains("fake") && !forced.contains("timeout"));
+    }
+}
+
+#[test]
+fn conflict_descriptions_only_show_the_program_or_remote_host() {
+    for id in HarnessId::ALL {
+        let f = Fixture::new(id);
+        let local = match id {
+            HarnessId::Codex => {
+                "[mcp_servers.vela]\ncommand = 'other'\nargs = ['SECRET']\n[mcp_servers.vela.env]\nSECRET = 'fake'\n"
+            }
+            HarnessId::OpenCode => {
+                r#"{"mcp":{"servers":{"vela":{"type":"local","command":["other","SECRET"],"environment":{"SECRET":"fake"}}}}}"#
+            }
+            _ => {
+                r#"{"mcpServers":{"vela":{"command":"other","args":["SECRET"],"env":{"SECRET":"fake"}}}}"#
+            }
+        };
+        f.put(local);
+        assert_eq!(
+            f.state(id),
+            EntryState::Conflict {
+                found: "other".into()
+            }
+        );
+        let remote = match id {
+            HarnessId::Codex => {
+                "[mcp_servers.vela]\nurl = 'https://SECRET:fake@example.org:8443/SECRET?token=fake#SECRET'\n[mcp_servers.vela.http_headers]\nAuthorization = 'fake'\n"
+            }
+            HarnessId::OpenCode => {
+                r#"{"mcp":{"servers":{"vela":{"type":"remote","url":"https://SECRET:fake@example.org:8443/SECRET?token=fake#SECRET","headers":{"Authorization":"fake"}}}}}"#
+            }
+            _ => {
+                r#"{"mcpServers":{"vela":{"url":"https://SECRET:fake@example.org:8443/SECRET?token=fake#SECRET","headers":{"Authorization":"fake"}}}}"#
+            }
+        };
+        f.put(remote);
+        assert_eq!(
+            f.state(id),
+            EntryState::Conflict {
+                found: "url: example.org".into()
+            }
+        );
+    }
+    let id = HarnessId::Cursor;
+    let f = Fixture::new(id);
+    f.put(r#"{"mcpServers":{"vela":{"env":{"SECRET":"fake"}}}}"#);
+    assert_eq!(
+        f.state(id),
+        EntryState::Conflict {
+            found: "(sin comando)".into()
+        }
+    );
+    f.put(
+        r#"{"mcpServers":{"vela":{"httpUrl":"http://SECRET:fake@[::1]:1234/private?token=fake"}}}"#,
+    );
+    assert_eq!(
+        f.state(id),
+        EntryState::Conflict {
+            found: "url: [::1]".into()
+        }
+    );
+    f.put(r#"{"mcpServers":{"vela":{"serverUrl":"https://SECRET:fake"}}}"#);
+    assert_eq!(
+        f.state(id),
+        EntryState::Conflict {
+            found: "url: (sin host)".into()
+        }
+    );
+    let program = format!("other\n{}", "é".repeat(250));
+    f.put(&serde_json::json!({"mcpServers":{"vela":{"command":program}}}).to_string());
+    let EntryState::Conflict { found } = f.state(id) else {
+        panic!("se esperaba un conflicto");
+    };
+    assert!(found.starts_with("other�") && found.ends_with('…'));
+    assert_eq!(found.chars().count(), 201);
 }
 
 #[test]
@@ -371,32 +514,154 @@ fn opencode_legacy_and_jsonc_preserve_the_active_shape() {
         f.path.set_extension(extension);
         let jsonc = r#"{"mcp": {/* A note */ "otro": {"type": "remote"},}, "literal": "https://example.org/*text*/,}"}"#;
         f.put(jsonc);
-        let HarnessStatus::ManualRequired { snippet, .. } = detect(id, &f.env, &f.cmd) else {
-            panic!("JSONC debe editarse a mano");
-        };
-        let snippet: serde_json::Value = serde_json::from_str(&snippet).unwrap();
-        assert_eq!(snippet["mcp"]["vela"]["enabled"], true);
-        assert!(matches!(
-            f.install(id, &FORCE),
-            Err(HarnessError::ManualRequired { .. })
-        ));
-        assert!(matches!(
-            f.uninstall(id, &FORCE),
-            Err(HarnessError::ManualRequired { .. })
-        ));
+        assert_eq!(f.install(id, &DEFAULT).unwrap().action, Action::Created);
+        assert_eq!(f.state(id), EntryState::Installed);
+        let installed = fs::read_to_string(&f.path).unwrap();
+        assert!(installed.contains(r#""enabled":true"#));
+        assert!(installed.contains("/* A note */"));
+        assert!(installed.contains("https://example.org/*text*/,}"));
+        assert!(!installed.contains(",,"));
+        assert_eq!(f.uninstall(id, &DEFAULT).unwrap().action, Action::Removed);
         assert_eq!(fs::read_to_string(&f.path).unwrap(), jsonc);
-        assert!(!backup(&f.path).exists());
         fs::remove_file(&f.path).unwrap();
     }
-    f.put("{}");
+    f.put(legacy);
     let json = f.path.with_extension("json");
     fs::write(&json, "{}").unwrap();
-    assert!(matches!(
-        f.install(id, &DEFAULT),
-        Err(HarnessError::ManualRequired { .. })
-    ));
+    let HarnessStatus::ManualRequired { snippet, .. } = detect(id, &f.env, &f.cmd) else {
+        panic!("se esperaba edición manual por coexistencia de archivos");
+    };
+    let snippet: serde_json::Value = serde_json::from_str(&snippet).unwrap();
+    assert_eq!(snippet["mcp"]["vela"]["enabled"], true);
+    for result in [f.install(id, &FORCE), f.uninstall(id, &FORCE)] {
+        assert!(matches!(result, Err(HarnessError::ManualRequired { .. })));
+    }
+    assert_eq!(fs::read_to_string(&f.path).unwrap(), legacy);
     assert_eq!(fs::read_to_string(json).unwrap(), "{}");
-    assert_eq!(fs::read_to_string(&f.path).unwrap(), "{}");
+    fs::remove_file(f.path.with_extension("json")).unwrap();
+    let mixed = r#"{"mcp":{/* v1 */"vela":{"type":"local"},"servers":{},}}"#;
+    f.put(mixed);
+    for result in [f.install(id, &FORCE), f.uninstall(id, &FORCE)] {
+        assert!(matches!(result, Err(HarnessError::ManualRequired { .. })));
+    }
+    assert_eq!(fs::read_to_string(&f.path).unwrap(), mixed);
+}
+
+#[test]
+fn opencode_jsonc_v2_round_trip_preserves_comments_trailing_commas_and_crlf() {
+    let id = HarnessId::OpenCode;
+    let mut f = Fixture::new(id);
+    f.path.set_extension("jsonc");
+    for last_member in [
+        "",
+        "\t\t\t\"otro\": {\"type\":\"remote\"} /* ñ, */, // last member\n",
+        "\t\t\t\"otro\": {\"type\":\"remote\"} // last member\n",
+    ] {
+        let initial = format!(
+            "// root\n{{\n\t\"mcp\": {{\n\t\t\"servers\": {{ // before members\n{last_member}\t\t\t/* end of servers */\n\t\t}},\n\t}},\n}} // EOF"
+        ).replace('\n', "\r\n");
+        f.put(&initial);
+        assert_eq!(f.install(id, &DEFAULT).unwrap().action, Action::Created);
+        assert_eq!(f.state(id), EntryState::Installed);
+        let installed = fs::read_to_string(&f.path).unwrap();
+        assert!(installed.contains("\r\n\t\t\t\"vela\":"));
+        assert!(
+            installed
+                .split_inclusive('\n')
+                .all(|line| !line.ends_with('\n') || line.ends_with("\r\n"))
+        );
+        f.uninstall(id, &DEFAULT).unwrap();
+        assert_eq!(fs::read_to_string(&f.path).unwrap(), initial);
+    }
+}
+
+#[test]
+fn opencode_jsonc_removes_only_the_entry_and_its_separator_near_comments() {
+    let id = HarnessId::OpenCode;
+    let mut f = Fixture::new(id);
+    f.path.set_extension("jsonc");
+    let vela = r#""vela":{"type":"local",/* inside */"command":["/old/vela","mcp"]}"#;
+    for (members, expected) in [
+        (
+            format!(r#"{vela} /* a */, /* b */ "next":{{}}"#),
+            r#" /* a */ /* b */ "next":{}"#,
+        ),
+        (
+            format!(r#""prev":{{}} /* a */, /* b */ {vela}, /* c */ "next":{{}}"#),
+            r#""prev":{} /* a */ /* b */ , /* c */ "next":{}"#,
+        ),
+        (
+            format!(r#""prev":{{}} /* a */, /* b */ {vela}, /* c */"#),
+            r#""prev":{} /* a */ /* b */ , /* c */"#,
+        ),
+        (
+            format!(r#"/* a */ {vela} /* b */, /* c */"#),
+            r#"/* a */  /* b */ /* c */"#,
+        ),
+    ] {
+        let wrap = |members: &str| format!(r#"{{"mcp":{{"servers":{{{members}}}}}}}"#);
+        f.put(&wrap(&members));
+        assert_eq!(f.uninstall(id, &DEFAULT).unwrap().action, Action::Removed);
+        assert_eq!(f.state(id), EntryState::NotInstalled);
+        assert_eq!(fs::read_to_string(&f.path).unwrap(), wrap(expected));
+    }
+}
+
+#[test]
+fn opencode_jsonc_updates_only_the_first_command_item() {
+    let id = HarnessId::OpenCode;
+    let mut f = Fixture::new(id);
+    f.path.set_extension("jsonc");
+    let vela = r#""vela":{
+      "type":"local",
+      "command":[/* before */ "/old/vela" /* after */, // keep this
+                 "mcp",],
+      "environment":{"VAR":"fake"},"enabled":false,"timeout":30000,
+    }"#;
+    for members in [vela.to_owned(), format!(r#""servers":{{{vela},}}"#)] {
+        let initial = format!(r#"{{"mcp":{{{members},}},}}"#);
+        f.put(&initial);
+        assert_eq!(
+            f.state(id),
+            EntryState::Outdated {
+                found: "/old/vela".into()
+            }
+        );
+        assert_eq!(f.install(id, &DEFAULT).unwrap().action, Action::Updated);
+        assert_eq!(f.state(id), EntryState::Installed);
+        assert_eq!(
+            fs::read_to_string(&f.path).unwrap(),
+            initial.replace(
+                r#""/old/vela""#,
+                &serde_json::to_string(f.cmd.program_str()).unwrap()
+            )
+        );
+    }
+}
+
+#[test]
+fn opencode_jsonc_rejects_unclosed_comments_and_invalid_json() {
+    let id = HarnessId::OpenCode;
+    let mut f = Fixture::new(id);
+    f.path.set_extension("jsonc");
+    for broken in [
+        "/* SECRET",
+        "{\"mcp\": {,}}",
+        "{\"mcp\": {},,}",
+        r#"{"mcp":{"servers":{"vela":{"command":[],"command":["/old/vela","mcp"]}}}}"#,
+    ] {
+        f.put(broken);
+        assert!(matches!(
+            detect(id, &f.env, &f.cmd),
+            HarnessStatus::Malformed { .. }
+        ));
+        assert!(matches!(
+            f.install(id, &FORCE),
+            Err(HarnessError::Malformed { .. })
+        ));
+        assert_eq!(fs::read_to_string(&f.path).unwrap(), broken);
+        assert!(!backup(&f.path).exists());
+    }
 }
 
 #[test]

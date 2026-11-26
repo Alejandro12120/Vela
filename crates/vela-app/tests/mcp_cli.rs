@@ -164,6 +164,52 @@ fn vela_mcp_cli_uses_distinct_exit_codes_for_usage_conflicts_and_errors() {
     assert!(!String::from_utf8_lossy(&output.stderr).contains("fake"));
 }
 
+#[cfg(any(not(target_os = "macos"), feature = "dev"))]
+#[test]
+fn vela_mcp_status_describes_conflicts_and_outdated_paths_without_secrets() {
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join(".cursor/mcp.json");
+    std::fs::create_dir(path.parent().unwrap()).unwrap();
+    let run = |args: &[&str]| {
+        let output = isolated_command(home.path()).args(args).output().unwrap();
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(!stdout.contains("SECRET") && !stdout.contains("fake"));
+        stdout
+    };
+    for (entry, state, label, found) in [
+        (
+            json!({"command":"other","args":["SECRET"],"env":{"SECRET":"fake"}}),
+            "conflict",
+            "Ocupada por",
+            "other",
+        ),
+        (
+            json!({"url":"https://SECRET:fake@example.org/SECRET?token=fake",
+                "headers":{"Authorization":"fake"}}),
+            "conflict",
+            "Ocupada por",
+            "url: example.org",
+        ),
+        (
+            json!({"command":"/old/vela","args":["mcp"],"env":{"SECRET":"fake"}}),
+            "outdated",
+            "Ejecutable anterior",
+            "/old/vela",
+        ),
+    ] {
+        std::fs::write(&path, json!({"mcpServers":{"vela":entry}}).to_string()).unwrap();
+        let text = run(&["status"]);
+        assert!(
+            text.lines()
+                .any(|line| line == format!("  {label}: {found}"))
+        );
+        let json: Vec<Value> = serde_json::from_str(&run(&["status", "--json"])).unwrap();
+        assert_eq!(json[2]["entry"], json!({"state":state, "found":found}));
+    }
+}
+
 #[cfg(feature = "dev")]
 #[test]
 fn vela_mcp_dev_home_overrides_the_inherited_home_paths_and_harness_overrides() {

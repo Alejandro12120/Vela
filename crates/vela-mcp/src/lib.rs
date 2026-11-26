@@ -1,4 +1,4 @@
-//! Núcleo del sistema MCP de Vela (Fases M1 a M3).
+//! Núcleo del sistema MCP de Vela (Fases M1 a M4).
 //!
 //! Este crate no depende de GPUI ni de la interfaz: contiene el esquema de
 //! `mcp.toml`, los perfiles de permisos, el ámbito de rutas locales y remotas,
@@ -16,6 +16,7 @@ pub mod cli;
 pub mod command;
 pub mod config;
 pub mod executor;
+pub mod harness;
 pub mod headless;
 pub mod ipc;
 pub mod jit;

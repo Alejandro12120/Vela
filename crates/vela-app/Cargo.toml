@@ -25,7 +25,7 @@ gpui = { package = "gpui-pre", version = "=0.3.11", features = ["test-support"] 
 vela-core = { path = "../vela-core", features = ["dev"] }
 
 [features]
-dev = ["vela-core/dev"]
+dev = ["vela-core/dev", "vela-mcp/dev"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["wayland"] }

@@ -46,6 +46,7 @@ User themes live in `themes/<id>.toml` under the configuration directory. `setti
 
 Use an isolated configuration directory for development runs. The `dev` Cargo feature enables these environment variables in both debug and release binaries.
 
+- `VELA_MCP_HARNESS_HOME=<absolute path>` gives `vela mcp status|install|uninstall` an isolated harness home with no inherited harness path overrides, PATH probes, or application probes. Use a temporary directory for registration tests. See the [MCP guide](docs/MCP.md).
 - `VELA_CONFIG_DIR` sets the directory for `servers.toml` and the OpenSSH `known_hosts` file.
 - `VELA_DEV_AUTOCONNECT` connects to the server with the given display name after loading the list.
 - `VELA_DEV_VIEW=terminal` opens the Terminal view after autoconnect.

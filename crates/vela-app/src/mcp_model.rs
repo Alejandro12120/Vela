@@ -22,6 +22,24 @@ pub enum Tone {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiffLine {
+    Header,
+    Added,
+    Removed,
+    Context,
+}
+
+pub fn classify_diff_line(line: &str) -> DiffLine {
+    match line {
+        "--- original" | "+++ propuesta" => DiffLine::Header,
+        _ if line.starts_with("@@") => DiffLine::Header,
+        _ if line.starts_with('+') => DiffLine::Added,
+        _ if line.starts_with('-') => DiffLine::Removed,
+        _ => DiffLine::Context,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Change {
     Add,
     Remove,
@@ -380,6 +398,14 @@ pub fn decision_tone(decision: Decision) -> Tone {
     }
 }
 
+pub fn simulation_tone(decision: &vela_mcp::PolicyDecision) -> Tone {
+    if decision.outcome == Decision::Allow && decision.matched_rule == "allow_except_denylist" {
+        Tone::Warning
+    } else {
+        decision_tone(decision.outcome)
+    }
+}
+
 pub fn exec_label(mode: ExecMode) -> &'static str {
     match mode {
         ExecMode::Disabled => "Denegar",
@@ -389,7 +415,7 @@ pub fn exec_label(mode: ExecMode) -> &'static str {
     }
 }
 
-pub fn profile_summary(profile: &PermissionProfile) -> String {
+pub fn profile_summary(profile: &PermissionProfile) -> [String; 4] {
     let summary = |decision, allowed, denied| match decision {
         Decision::Allow => allowed,
         Decision::Ask => "pregunta",
@@ -401,12 +427,21 @@ pub fn profile_summary(profile: &PermissionProfile) -> String {
         ExecMode::AskAll => "pregunta",
         ExecMode::AllowExceptDenylist => "permitido salvo prohibidos",
     };
-    format!(
-        "Lectura: {} · Escritura: {} · Borrado: {} · SSH: {exec}",
-        summary(profile.fs_read, "permitida", "denegada"),
-        summary(profile.fs_write, "permitida", "denegada"),
-        summary(profile.fs_delete, "permitido", "denegado"),
-    )
+    [
+        format!(
+            "Lectura: {}",
+            summary(profile.fs_read, "permitida", "denegada")
+        ),
+        format!(
+            "Escritura: {}",
+            summary(profile.fs_write, "permitida", "denegada")
+        ),
+        format!(
+            "Borrado: {}",
+            summary(profile.fs_delete, "permitido", "denegado")
+        ),
+        format!("SSH: {exec}"),
+    ]
 }
 
 pub fn profile_usage(config: &McpConfig, id: &str) -> usize {
@@ -450,10 +485,27 @@ mod tests {
     use vela_mcp::{EvalContext, PolicyEngine, path::valid_scope_pattern};
 
     #[test]
+    fn classifies_unified_diff_lines_for_display() {
+        use DiffLine::*;
+
+        let diff =
+            "--- original\r\n+++ propuesta\r\n@@ -1,2 +1,2 @@\r\n-old\r\n+  new\r\n +context\r\n";
+        assert_eq!(
+            diff.lines().map(classify_diff_line).collect::<Vec<_>>(),
+            [Header, Header, Header, Removed, Added, Context],
+        );
+    }
+
+    #[test]
     fn readonly_summary_reflects_the_preset_without_changing_permissions() {
         assert_eq!(
             profile_summary(&presets::readonly_profile()),
-            "Lectura: permitida · Escritura: pregunta · Borrado: denegado · SSH: denegado"
+            [
+                "Lectura: permitida",
+                "Escritura: pregunta",
+                "Borrado: denegado",
+                "SSH: denegado"
+            ]
         );
     }
 
@@ -703,7 +755,7 @@ mod tests {
         let original = profile_summary(&profile);
         profile.fs_read = Decision::Deny;
         assert_ne!(original, profile_summary(&profile));
-        assert!(profile_summary(&profile).contains("Lectura: denegada"));
+        assert_eq!(profile_summary(&profile)[0], "Lectura: denegada");
         let mut config = McpConfig::default();
         assert_eq!(profile_usage(&config, &profile.id), 0);
         config

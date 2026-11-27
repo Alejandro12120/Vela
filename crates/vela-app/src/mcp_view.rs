@@ -63,7 +63,7 @@ pub(super) struct McpView {
     select_trigger: Option<FocusHandle>,
     simulator: Option<Entity<TextInput>>,
     simulate_target: Target,
-    simulation: Option<Result<(String, vela_mcp::PolicyDecision), String>>,
+    simulation: Option<Result<vela_mcp::PolicyDecision, String>>,
 }
 
 #[derive(Clone)]

@@ -748,8 +748,8 @@ impl Workspace {
         let effective = current.or(inherited);
         let tone = effective.map_or(Tone::Neutral, |mode| match mode {
             ExecMode::Disabled => Tone::Danger,
-            ExecMode::AskAll => Tone::Warning,
-            ExecMode::Allowlist | ExecMode::AllowExceptDenylist => Tone::Success,
+            ExecMode::AskAll | ExecMode::AllowExceptDenylist => Tone::Warning,
+            ExecMode::Allowlist => Tone::Success,
         });
         let value = if current.is_none() && inherited.is_some() {
             format!("Según perfil · {}", label(effective))

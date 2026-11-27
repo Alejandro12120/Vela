@@ -2,7 +2,7 @@ use gpui::ClipboardItem;
 use vela_mcp::harness::{self, HarnessError};
 
 use super::*;
-use crate::mcp_model::{harness_error, harness_result, harness_row};
+use crate::mcp_model::{DiffLine, classify_diff_line, harness_error, harness_result, harness_row};
 
 impl Workspace {
     pub(super) fn open_mcp_harnesses(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -479,21 +479,27 @@ fn code_box(
                 .text_size(px(11.))
                 .line_height(px(15.))
                 .children(text.lines().map(|line| {
-                    let color = match line {
-                        _ if !diff => theme.text,
-                        "--- original" | "+++ propuesta" => theme.secondary_text,
-                        _ if line.starts_with('+') => theme.success,
-                        _ if line.starts_with('-') => theme.danger,
-                        _ if line.starts_with("@@") => theme.secondary_text,
-                        _ => theme.text,
+                    let kind = if diff {
+                        classify_diff_line(line)
+                    } else {
+                        DiffLine::Context
+                    };
+                    let color = match kind {
+                        DiffLine::Header => theme.secondary_text,
+                        DiffLine::Added => theme.success,
+                        DiffLine::Removed => theme.danger,
+                        DiffLine::Context => theme.text,
                     };
                     div()
                         .whitespace_nowrap()
                         .text_color(color)
+                        .when(matches!(kind, DiffLine::Added | DiffLine::Removed), |row| {
+                            row.font_weight(FontWeight::MEDIUM)
+                        })
                         .child(line.to_owned())
                 })),
         )
         .when_some(scroll, |code, scroll| {
-            code.child(modal::scroll_indicator(scroll, theme))
+            code.child(modal::scroll_indicator(scroll, theme, false))
         })
 }

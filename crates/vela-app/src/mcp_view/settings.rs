@@ -3,7 +3,7 @@ use vela_mcp::{EvalContext, PolicyEngine, config::HeadlessAskBehavior};
 use super::*;
 use crate::{
     components::{segmented::segmented, switch::switch_with_state},
-    mcp_model::{decision_label, decision_tone, profile_summary, profile_usage, rollback_limits},
+    mcp_model::{decision_label, profile_summary, profile_usage, rollback_limits, simulation_tone},
     workspace::settings_view::{section, settings_group, settings_row, subtitle},
 };
 
@@ -104,9 +104,14 @@ impl Workspace {
             theme,
         )
         .font_family(crate::theme::monospace());
-        let rows = [top, div().px(px(14.)).py_2().child(socket)]
-            .into_iter()
-            .chain(details)
+        let dimmed = |element: Div| element.when(!enabled, |element| element.opacity(0.72));
+        let rows = std::iter::once(top)
+            .chain(
+                [div().px(px(14.)).py_2().child(socket)]
+                    .into_iter()
+                    .chain(details)
+                    .map(dimmed),
+            )
             .collect();
         panel = panel
             .child(settings_group(theme, rows))
@@ -125,8 +130,8 @@ impl Workspace {
                 ))
             });
         panel
-            .child(self.profiles_section(config, theme, cx))
-            .child(self.rollback_section(config, theme, cx))
+            .child(dimmed(self.profiles_section(config, theme, cx)))
+            .child(dimmed(self.rollback_section(config, theme, cx)))
     }
 
     fn profiles_section(&self, config: &McpConfig, theme: Theme, cx: &Context<Self>) -> Div {
@@ -169,7 +174,13 @@ impl Workspace {
                                         theme,
                                     )),
                             )
-                            .child(muted(profile_summary(&profile), theme)),
+                            .child(
+                                div().flex().flex_wrap().gap_x_3().children(
+                                    profile_summary(&profile).map(|pair| {
+                                        muted(pair, theme).whitespace_nowrap().flex_none()
+                                    }),
+                                ),
+                            ),
                     )
                     .child(small(
                         format!("edit-mcp-profile-{profile_id}"),
@@ -272,29 +283,24 @@ impl Workspace {
             );
         }
         match &self.mcp.simulation {
-            Some(Ok((profile, decision))) => row.child(
+            Some(Ok(decision)) => row.child(
                 div()
                     .flex()
                     .gap_2()
                     .items_center()
                     .child(
-                        stack()
+                        div()
+                            .flex()
+                            .flex_wrap()
                             .flex_1()
                             .min_w_0()
-                            .gap_0()
-                            .child(muted(format!("Perfil: {profile}"), theme))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_wrap()
-                                    .gap_x_1()
-                                    .child(muted("Regla aplicada:", theme))
-                                    .child(technical(decision.matched_rule.clone(), theme)),
-                            ),
+                            .gap_x_1()
+                            .child(muted("Regla aplicada:", theme))
+                            .child(technical(decision.matched_rule.clone(), theme)),
                     )
                     .child(badge(
                         decision_label(decision.outcome),
-                        decision_tone(decision.outcome),
+                        simulation_tone(decision),
                         theme,
                     )),
             ),
@@ -318,11 +324,11 @@ impl Workspace {
                 true,
             ),
         };
-        let Some(profile) = presets::resolve_profile(config, profile) else {
+        if presets::resolve_profile(config, profile).is_none() {
             self.mcp.simulation = Some(Err("El perfil seleccionado ya no existe.".into()));
             cx.notify();
             return;
-        };
+        }
         let context = EvalContext {
             home_dir: std::env::var_os("HOME").map(PathBuf::from),
             vela_config_dir: self.dir.clone(),
@@ -337,7 +343,7 @@ impl Workspace {
         self.mcp.simulation = Some(if decision.matched_rule == "unknown_simulated_input" {
             Err("Formato esperado: fs_read /var/log/nginx/error.log o exec sudo nginx -t".into())
         } else {
-            Ok((profile.name, decision))
+            Ok(decision)
         });
         cx.notify();
     }
@@ -353,7 +359,7 @@ impl Workspace {
             .as_ref()
             .and_then(|usage| usage.as_ref().ok());
         let total = usage.map_or(0, |usage| usage.total_bytes);
-        let percent = (100. * total as f32 / limits.max_total_bytes.max(1) as f32).min(100.);
+        let fraction = (total as f32 / limits.max_total_bytes.max(1) as f32).min(1.);
         let gauge = div()
             .flex()
             .items_center()
@@ -365,14 +371,20 @@ impl Workspace {
                     .flex_1()
                     .h(px(4.))
                     .rounded_full()
-                    .bg(theme.control_border)
-                    .child(
-                        div()
-                            .h_full()
-                            .w(gpui::relative(percent / 100.))
-                            .rounded_full()
-                            .bg(theme.accent),
-                    ),
+                    .overflow_hidden()
+                    .bg(theme.hover)
+                    .border_1()
+                    .border_color(theme.control_border)
+                    .when(total > 0, |track| {
+                        track.child(
+                            div()
+                                .h_full()
+                                .w(gpui::relative(fraction))
+                                .min_w(px(2.))
+                                .rounded_full()
+                                .bg(theme.accent),
+                        )
+                    }),
             )
             .child(muted(
                 usage.map_or_else(

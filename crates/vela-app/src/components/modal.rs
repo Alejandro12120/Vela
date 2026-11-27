@@ -1,7 +1,7 @@
 use gpui::{
     Animation, AnimationExt, AnyElement, Bounds, Context, Div, FocusHandle, FontWeight,
     MouseButton, Rgba, ScrollHandle, SharedString, actions, canvas, div, ease_out_quint, fill,
-    point, prelude::*, px, size,
+    linear_color_stop, linear_gradient, point, prelude::*, px, size,
 };
 
 use super::motion;
@@ -94,9 +94,9 @@ pub fn overlay_with_width<T: 'static>(
                 scroller
                     .track_scroll(scroll)
                     .pr_3()
-                    .child(div().pb_3().child(body)),
+                    .child(div().pb_4().child(body)),
             )
-            .child(scroll_indicator(scroll, theme))
+            .child(scroll_indicator(scroll, theme, true))
             .into_any_element()
     } else {
         scroller.child(body).into_any_element()
@@ -182,7 +182,7 @@ pub fn overlay_with_width<T: 'static>(
         .child(panel)
 }
 
-pub fn scroll_indicator(scroll: &ScrollHandle, theme: Theme) -> impl IntoElement {
+pub fn scroll_indicator(scroll: &ScrollHandle, theme: Theme, fade_edges: bool) -> impl IntoElement {
     let scroll = scroll.clone();
     canvas(
         |_, _, _| (),
@@ -192,20 +192,46 @@ pub fn scroll_indicator(scroll: &ScrollHandle, theme: Theme) -> impl IntoElement
             if overflow <= px(0.) || height <= px(0.) {
                 return;
             }
+            let bar_width = px(4.);
+            let bar_left = bounds.right() - bar_width;
             let thumb =
                 (height * (height / (height + overflow))).clamp(px(20.).min(height), height);
-            let progress = (-scroll.offset().y / overflow).clamp(0., 1.);
+            let offset = (-scroll.offset().y).clamp(px(0.), overflow);
+            let progress = offset / overflow;
             let top = bounds.top() + (height - thumb) * progress;
-            window.paint_quad(fill(bounds, theme.selection));
             window.paint_quad(fill(
-                Bounds::new(point(bounds.left(), top), size(bounds.size.width, thumb)),
-                theme.control_border,
+                Bounds::new(point(bar_left, bounds.top()), size(bar_width, height)),
+                theme.selection,
             ));
+            window.paint_quad(fill(
+                Bounds::new(point(bar_left, top), size(bar_width, thumb)),
+                theme.secondary_text,
+            ));
+            if fade_edges {
+                let fade_height = px(12.).min(height / 2.);
+                let fade_size = size(bounds.size.width - bar_width, fade_height);
+                for (visible, y, angle) in [
+                    (offset > px(0.), bounds.top(), 180.),
+                    (offset < overflow, bounds.bottom() - fade_height, 0.),
+                ] {
+                    if visible {
+                        window.paint_quad(fill(
+                            Bounds::new(point(bounds.left(), y), fade_size),
+                            linear_gradient(
+                                angle,
+                                linear_color_stop(theme.raised, 0.),
+                                linear_color_stop(theme.raised.opacity(0.), 1.),
+                            ),
+                        ));
+                    }
+                }
+            }
         },
     )
     .absolute()
     .top_0()
     .bottom_0()
     .right_0()
-    .w(px(4.))
+    .when(fade_edges, |canvas| canvas.left_0())
+    .when(!fade_edges, |canvas| canvas.w(px(4.)))
 }

@@ -1137,7 +1137,13 @@ impl Render for Pane {
         .flex_1()
         .min_h_0()
         .w_full()
-        .track_scroll(&self.scroll);
+        .track_scroll(&self.scroll)
+        .when(self.menu.is_some(), |list| {
+            list.on_scroll(cx.listener(|this, _, window, cx| {
+                this.dismiss_menu(cx);
+                this.list_focus.focus(window, cx);
+            }))
+        });
 
         let count = self.tree.count;
         let selected = self.tree.selected.len();

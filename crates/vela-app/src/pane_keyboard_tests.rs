@@ -32,6 +32,38 @@ fn open_pane<'a>(
 }
 
 #[gpui::test]
+async fn scrolling_the_file_list_dismisses_its_menu(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    for index in 0..100 {
+        fs::write(dir.path().join(format!("{index:03}.txt")), "").unwrap();
+    }
+    let (pane, cx) = open_pane(dir.path(), cx);
+
+    pane.update_in(cx, |pane, window, cx| {
+        pane.open_menu(
+            Some(0),
+            gpui::point(gpui::px(200.), gpui::px(130.)),
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    assert!(pane.read_with(cx, |pane, _| pane.menu.is_some()));
+
+    cx.simulate_event(gpui::ScrollEvent {
+        position: gpui::point(gpui::px(20.), gpui::px(130.)),
+        delta: gpui::ScrollDelta::Lines(gpui::point(0., -3.)),
+        ..Default::default()
+    });
+
+    pane.update_in(cx, |pane, window, _| {
+        assert!(pane.menu.is_none());
+        assert!(pane.list_focus.is_focused(window));
+        assert!(pane.scroll.0.borrow().base_handle.offset().y < gpui::px(0.));
+    });
+}
+
+#[gpui::test]
 async fn enter_commits_inline_rename(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("a.txt"), "contenido").unwrap();

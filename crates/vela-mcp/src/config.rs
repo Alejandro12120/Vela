@@ -110,6 +110,13 @@ pub struct ServerMcpPolicy {
     pub sudo: Option<Decision>,
 }
 
+impl ServerMcpPolicy {
+    pub fn hides_identity(&self, config: &McpConfig) -> bool {
+        self.hide_server_identity
+            .unwrap_or(config.hide_server_identity)
+    }
+}
+
 fn default_profile_id() -> String {
     "readonly".to_owned()
 }
@@ -212,48 +219,309 @@ pub fn to_json(config: &McpConfig) -> Result<String, serde_json::Error> {
 
 /// Carga `mcp.toml` desde `dir`. Un archivo inexistente equivale a la configuración por defecto.
 pub fn load(dir: &Path) -> io::Result<McpConfig> {
-    let text = match fs::read_to_string(dir.join(CONFIG_FILE_NAME)) {
-        Ok(text) => text,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(McpConfig::default()),
-        Err(err) => return Err(err),
-    };
-    let mut config: McpConfig =
-        toml::from_str(&text).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    Ok(ConfigSnapshot::load(dir)?.config)
+}
+
+fn parse(text: &str) -> io::Result<McpConfig> {
+    let mut config: McpConfig = toml::from_str(text).map_err(invalid_data)?;
     config.validate();
     Ok(config)
 }
 
-/// Guarda `mcp.toml` de forma atómica. Se niega a reemplazar un archivo existente
-/// que no se pueda interpretar, para no destruir la configuración de la persona.
+fn invalid_data(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, error)
+}
+
+fn read(dir: &Path) -> io::Result<Option<String>> {
+    match fs::read_to_string(dir.join(CONFIG_FILE_NAME)) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Configuración y contenido original, usados para detectar ediciones externas.
+#[derive(Clone, Debug)]
+pub struct ConfigSnapshot {
+    pub config: McpConfig,
+    source: Option<String>,
+}
+
+impl ConfigSnapshot {
+    pub fn load(dir: &Path) -> io::Result<Self> {
+        let source = read(dir)?;
+        let config = source
+            .as_deref()
+            .map(parse)
+            .transpose()?
+            .unwrap_or_default();
+        Ok(Self { config, source })
+    }
+
+    pub fn save(&self, dir: &Path, config: &McpConfig) -> io::Result<Self> {
+        use toml_edit::DocumentMut;
+
+        let mut config = config.clone();
+        config.validate();
+        let encode = |config: &McpConfig| -> io::Result<DocumentMut> {
+            toml::to_string_pretty(config)
+                .map_err(invalid_data)?
+                .parse()
+                .map_err(invalid_data)
+        };
+        let mut document: DocumentMut = self
+            .source
+            .as_deref()
+            .unwrap_or("")
+            .parse()
+            .map_err(invalid_data)?;
+        let old = encode(&self.config)?;
+        let new = encode(&config)?;
+        patch_table(
+            document.as_table_mut(),
+            old.as_table(),
+            new.as_table(),
+            false,
+        );
+        let text = document.to_string();
+        if parse(&text)? != config {
+            return Err(invalid_data("No se pudo validar la edición de mcp.toml."));
+        }
+
+        fs::create_dir_all(dir)?;
+        let directory = fs::File::open(dir)?;
+        directory.lock()?;
+        let mut temp = tempfile::NamedTempFile::new_in(dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            temp.as_file()
+                .set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
+        temp.write_all(text.as_bytes())?;
+        temp.as_file().sync_all()?;
+        if read(dir)? != self.source {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "La configuración cambió fuera de esta ventana.",
+            ));
+        }
+        temp.persist(dir.join(CONFIG_FILE_NAME))?;
+        directory.sync_all()?;
+        Ok(Self {
+            config,
+            source: Some(text),
+        })
+    }
+}
+
+fn patch_table(
+    target: &mut dyn toml_edit::TableLike,
+    old: &dyn toml_edit::TableLike,
+    new: &dyn toml_edit::TableLike,
+    inlined: bool,
+) {
+    for (key, _) in old.iter().filter(|(key, _)| !new.contains_key(key)) {
+        target.remove(key);
+    }
+    for (key, value) in new.iter() {
+        let before = old.get(key);
+        if before.is_some_and(|before| formatted_value(before) == formatted_value(value)) {
+            continue;
+        }
+        match target.get_mut(key) {
+            Some(current) => patch_item(current, before, value, inlined),
+            None => {
+                let mut value = value.clone();
+                if inlined {
+                    value.make_value();
+                }
+                target.insert(key, value);
+            }
+        }
+    }
+}
+
+fn formatted_value(item: &toml_edit::Item) -> String {
+    item.clone()
+        .into_value()
+        .map_or_else(|item| item.to_string(), |value| value.to_string())
+}
+
+fn patch_item(
+    current: &mut toml_edit::Item,
+    before: Option<&toml_edit::Item>,
+    value: &toml_edit::Item,
+    inlined: bool,
+) {
+    use toml_edit::Item;
+    let inline_table = current.as_inline_table().is_some();
+
+    if let Some((current, old, new)) = current
+        .as_table_like_mut()
+        .zip(
+            before
+                .and_then(Item::as_table_like)
+                .zip(value.as_table_like()),
+        )
+        .map(|(current, (old, new))| (current, old, new))
+    {
+        patch_table(current, old, new, inline_table);
+        return;
+    }
+
+    // Each profile keeps its existing table, position and comments.
+    if let Some(current) = current.as_array_of_tables_mut()
+        && let Some(old) = before.and_then(Item::as_array_of_tables)
+    {
+        let new = value.as_array_of_tables();
+        let empty = toml_edit::ArrayOfTables::new();
+        if new.is_some() || value.as_array().is_some_and(|array| array.is_empty()) {
+            let new = new.unwrap_or(&empty);
+            let id = |table: &toml_edit::Table| {
+                table
+                    .get("id")
+                    .and_then(Item::as_str)
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            for index in (0..current.len()).rev() {
+                let profile_id = id(current.get(index).unwrap());
+                if old.iter().any(|table| id(table) == profile_id)
+                    && !new.iter().any(|table| id(table) == profile_id)
+                {
+                    current.remove(index);
+                }
+            }
+            for profile in new.iter() {
+                let profile_id = id(profile);
+                let index = current
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, table)| id(table) == profile_id)
+                    .map(|(i, _)| i)
+                    .last();
+                if let Some(index) = index {
+                    if let Some(old) = old.iter().find(|table| id(table) == profile_id) {
+                        patch_table(current.get_mut(index).unwrap(), old, profile, false);
+                    }
+                } else {
+                    current.push(profile.clone());
+                }
+            }
+            if !current.is_empty() {
+                return;
+            }
+        }
+    }
+    let array_value = |item: &Item| {
+        item.clone().into_value().ok().and_then(|value| {
+            if let toml_edit::Value::Array(array) = value {
+                Some(array)
+            } else {
+                None
+            }
+        })
+    };
+    if let Some(current) = current.as_array_mut()
+        && let Some(next) = array_value(value)
+    {
+        if before.and_then(Item::as_array_of_tables).is_some()
+            || value.as_array_of_tables().is_some()
+        {
+            patch_inline_profiles(current, before.and_then(Item::as_array_of_tables), &next);
+        } else {
+            patch_list(current, &next);
+        }
+        return;
+    }
+    let mut replacement = value.clone();
+    if inlined {
+        replacement.make_value();
+    }
+    if let (Some(old), Some(new)) = (current.as_value(), replacement.as_value_mut()) {
+        *new.decor_mut() = old.decor().clone();
+    }
+    *current = replacement;
+}
+
+fn patch_list(current: &mut toml_edit::Array, next: &toml_edit::Array) {
+    for (index, desired) in next.iter().enumerate() {
+        let existing = current
+            .iter()
+            .skip(index)
+            .position(|item| item.as_str() == desired.as_str());
+        match existing {
+            Some(0) => {}
+            Some(offset) => {
+                let value = current.remove(index + offset);
+                current.insert_formatted(index, value);
+            }
+            None => current.insert(index, desired.clone()),
+        }
+    }
+    while current.len() > next.len() {
+        current.remove(current.len() - 1);
+    }
+}
+
+fn patch_inline_profiles(
+    current: &mut toml_edit::Array,
+    before: Option<&toml_edit::ArrayOfTables>,
+    next: &toml_edit::Array,
+) {
+    use toml_edit::{Item, TableLike, Value};
+    fn id(value: &Value) -> Option<&str> {
+        value.as_inline_table()?.get("id")?.as_str()
+    }
+    for index in (0..current.len()).rev() {
+        let id = id(current.get(index).unwrap());
+        if let Some(id) = id
+            && before.is_some_and(|profiles| {
+                profiles
+                    .iter()
+                    .any(|profile| profile.get("id").and_then(Item::as_str) == Some(id))
+            })
+            && !next.iter().any(|profile| {
+                profile
+                    .as_inline_table()
+                    .and_then(|table| table.get("id"))
+                    .and_then(Value::as_str)
+                    == Some(id)
+            })
+        {
+            current.remove(index);
+        }
+    }
+    for profile in next.iter() {
+        let profile_id = id(profile);
+        let index = current
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| id(item) == profile_id)
+            .map(|(index, _)| index)
+            .last();
+        if let Some(index) = index {
+            let old = before.and_then(|profiles| {
+                profiles
+                    .iter()
+                    .find(|table| table.get("id").and_then(Item::as_str) == profile_id)
+            });
+            let existing = current.get_mut(index).and_then(Value::as_inline_table_mut);
+            if let (Some(existing), Some(old), Some(next)) =
+                (existing, old, profile.as_inline_table())
+            {
+                patch_table(existing as &mut dyn TableLike, old, next, true);
+            }
+        } else {
+            current.push(profile.clone());
+        }
+    }
+}
+
+/// Guarda la configuración conservando el documento existente.
 pub fn save(dir: &Path, config: &McpConfig) -> io::Result<()> {
-    load(dir)?;
-    let mut config = config.clone();
-    config.validate();
-    let text = toml::to_string_pretty(&config).map_err(io::Error::other)?;
-    save_private(dir, CONFIG_FILE_NAME, &text)
-}
-
-#[cfg(unix)]
-fn save_private(dir: &Path, name: &str, text: &str) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    fs::create_dir_all(dir)?;
-    let mut temp = tempfile::NamedTempFile::new_in(dir)?;
-    temp.as_file()
-        .set_permissions(fs::Permissions::from_mode(0o600))?;
-    temp.write_all(text.as_bytes())?;
-    temp.as_file().sync_all()?;
-    temp.persist(dir.join(name))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn save_private(dir: &Path, name: &str, text: &str) -> io::Result<()> {
-    fs::create_dir_all(dir)?;
-    let mut temp = tempfile::NamedTempFile::new_in(dir)?;
-    temp.write_all(text.as_bytes())?;
-    temp.as_file().sync_all()?;
-    temp.persist(dir.join(name))?;
+    ConfigSnapshot::load(dir)?.save(dir, config)?;
     Ok(())
 }
 
@@ -479,5 +747,145 @@ mod tests {
                 .name,
             "ultimo"
         );
+    }
+    #[test]
+    fn snapshot_preserves_comments_order_and_unknown_fields() {
+        let dir = temp_dir();
+        let file = dir.path().join(CONFIG_FILE_NAME);
+        fs::write(
+            &file,
+            r#"# Ajustes MCP
+hide_server_identity = true # privacidad
+enabled = false # interruptor
+
+[servers.produccion] # servidor
+profile_id = "personal"
+notes = "original" # equipo
+future = "reservation"
+
+[[profiles]] # perfil propio
+id = "personal"
+name = "Personal" # etiqueta
+
+[[profiles]] # segundo
+id = "perfiles"
+name = "Segundo"
+"#,
+        )
+        .unwrap();
+        let snapshot = ConfigSnapshot::load(dir.path()).unwrap();
+        let mut config = snapshot.config.clone();
+        config.enabled = true;
+        config.servers.get_mut("produccion").unwrap().notes = Some("cambiado".into());
+        config
+            .servers
+            .get_mut("produccion")
+            .unwrap()
+            .denied_remote_paths = vec!["/secrets/**".into()];
+        config.profiles[0].name = "Nuevo nombre".into();
+        snapshot.save(dir.path(), &config).unwrap();
+        let output = fs::read_to_string(file).unwrap();
+        for expected in [
+            "# Ajustes MCP",
+            "hide_server_identity = true # privacidad",
+            "enabled = true # interruptor",
+            "[servers.produccion] # servidor",
+            r#"notes = "cambiado" # equipo"#,
+            r#"future = "reservation""#,
+            r#"name = "Nuevo nombre" # etiqueta"#,
+            "[[profiles]] # segundo",
+        ] {
+            assert!(output.contains(expected), "{expected}: {output}");
+        }
+        assert!(output.find("hide_server_identity") < output.find("enabled"));
+        assert!(output.find("[servers.produccion]") < output.find(r#"id = "personal""#));
+        assert!(output.find(r#"id = "personal""#) < output.find(r#"id = "perfiles""#));
+        assert_eq!(load(dir.path()).unwrap(), config);
+    }
+
+    #[test]
+    fn stale_snapshot_refuses_to_overwrite_external_edit() {
+        let dir = temp_dir();
+        let snapshot = ConfigSnapshot::load(dir.path()).unwrap();
+        let file = dir.path().join(CONFIG_FILE_NAME);
+        let other = "# escrito fuera de Vela\nenabled = true\n";
+        fs::write(&file, other).unwrap();
+        let error = snapshot.save(dir.path(), &snapshot.config).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(file).unwrap(), other);
+    }
+
+    #[test]
+    fn invalid_candidate_does_not_replace_original_file() {
+        let dir = temp_dir();
+        let file = dir.path().join(CONFIG_FILE_NAME);
+        fs::write(&file, "# original\nenabled = false\n").unwrap();
+        let snapshot = ConfigSnapshot::load(dir.path()).unwrap();
+        let mut config = snapshot.config.clone();
+        config.rollback.max_file_bytes = u64::MAX;
+        assert!(snapshot.save(dir.path(), &config).is_err());
+        assert_eq!(
+            fs::read_to_string(file).unwrap(),
+            "# original\nenabled = false\n"
+        );
+    }
+
+    #[test]
+    fn old_minimal_server_keeps_conservative_defaults() {
+        let dir = temp_dir();
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[servers.old]\nnotes = 'original'\n",
+        )
+        .unwrap();
+        let snapshot = ConfigSnapshot::load(dir.path()).unwrap();
+        assert!(!snapshot.config.enabled);
+        assert!(!snapshot.config.share_ui_context);
+        assert!(snapshot.config.hide_server_identity);
+        assert_eq!(snapshot.config.headless_ask, HeadlessAskBehavior::Deny);
+        assert_eq!(
+            snapshot.config.servers["old"].availability,
+            ServerAvailability::Disabled
+        );
+        assert_eq!(snapshot.config.servers["old"].exec_mode, None);
+    }
+    #[test]
+    fn snapshot_preserves_inline_profiles_and_comments_inside_pattern_lists() {
+        let dir = temp_dir();
+        let file = dir.path().join(CONFIG_FILE_NAME);
+        fs::write(
+            &file,
+            r#"profiles = [
+  # personal
+  { id = "personal", name = "Antes", future = "dato" },
+]
+[servers.demo]
+allowed_remote_paths = [
+  # informes
+  "/srv/reportes/**",
+] # ámbitos
+"#,
+        )
+        .unwrap();
+        let snapshot = ConfigSnapshot::load(dir.path()).unwrap();
+        let mut config = snapshot.config.clone();
+        config.profiles[0].name = "Después".into();
+        config
+            .servers
+            .get_mut("demo")
+            .unwrap()
+            .allowed_remote_paths
+            .push("/logs/**".into());
+        snapshot.save(dir.path(), &config).unwrap();
+        let text = fs::read_to_string(file).unwrap();
+        for expected in [
+            "# personal",
+            "# informes",
+            "# ámbitos",
+            r#"future = "dato""#,
+        ] {
+            assert!(text.contains(expected), "{expected}: {text}");
+        }
+        assert_eq!(load(dir.path()).unwrap(), config);
     }
 }

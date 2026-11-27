@@ -521,7 +521,15 @@ mod tests {
                 )
                 .unwrap();
         }
+        let before = store.usage(at(200)).unwrap();
+        assert_eq!((before.count, before.total_bytes), (3, 9));
+        assert_eq!(
+            before.max_total_bytes,
+            RollbackConfig::default().max_total_bytes
+        );
         assert_eq!(store.clear().unwrap(), 3);
+        let after = store.usage(at(200)).unwrap();
+        assert_eq!((after.count, after.total_bytes), (0, 0));
         assert!(store.list(at(200)).unwrap().is_empty());
         assert_eq!(
             fs::read_dir(store.dir().join(BLOBS_DIR)).unwrap().count(),

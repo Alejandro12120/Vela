@@ -421,6 +421,15 @@ async fn bridge_forwards_real_ssh_patch_with_approval_rollback_and_exec() {
     assert!(content(&result)["matched_rule"].is_string());
     assert_eq!(calls.load(Ordering::Relaxed), 4);
 
+    let disabled = McpConfig {
+        enabled: false,
+        ..env.config.clone()
+    };
+    config::save(&env.config_dir, &disabled).unwrap();
+    let next = stdio.call(7, "list_servers", json!({})).await;
+    assert_eq!(content(&next)["matched_rule"], "mcp_disabled");
+    assert_eq!(calls.load(Ordering::Relaxed), 4);
+
     stdio.close().await;
     stop.send(()).unwrap();
     task.await.unwrap().unwrap();
@@ -615,4 +624,63 @@ async fn access_to_gui_only_servers_hands_off_unless_forced_headless() {
         launch.await.unwrap().await.unwrap().unwrap();
         executor.backend.session.disconnect().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn next_stdio_call_uses_updated_policy_and_disabled_switch() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = McpConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    config.servers.insert(
+        "srv".into(),
+        ServerMcpPolicy {
+            availability: ServerAvailability::Headless,
+            ..Default::default()
+        },
+    );
+    config::save(dir.path(), &config).unwrap();
+    vela_core::config::save(
+        dir.path(),
+        vec![Server {
+            id: "srv".into(),
+            name: "Fixture".into(),
+            host: "example.test".into(),
+            port: 22,
+            user: "local".into(),
+            auth: Auth::Password,
+            initial_remote_path: None,
+            pinned: false,
+        }],
+    )
+    .unwrap();
+    let mut stdio = Stdio::start(
+        RuntimeOptions {
+            force_headless: true,
+            socket_path: dir.path().join("mcp.sock"),
+            config_dir: Some(dir.path().to_owned()),
+        },
+        NeverLaunch,
+    );
+    stdio.initialize().await;
+    let list = stdio.call(2, "list_servers", json!({})).await;
+    assert!(content(&list).to_string().contains("srv"), "{list}");
+    let inspect = stdio
+        .call(3, "describe_permissions", json!({"server_id": "srv"}))
+        .await;
+    assert_eq!(inspect["isError"], false, "{inspect}");
+
+    config.servers.get_mut("srv").unwrap().availability = ServerAvailability::Disabled;
+    config::save(dir.path(), &config).unwrap();
+    let inspect = stdio
+        .call(4, "describe_permissions", json!({"server_id": "srv"}))
+        .await;
+    assert_eq!(content(&inspect)["matched_rule"], "server_disabled");
+
+    config.enabled = false;
+    config::save(dir.path(), &config).unwrap();
+    let list = stdio.call(5, "list_servers", json!({})).await;
+    assert_eq!(content(&list)["matched_rule"], "mcp_disabled");
+    stdio.close().await;
 }

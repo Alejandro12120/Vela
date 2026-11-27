@@ -560,7 +560,10 @@ impl PolicyEngine {
             }
             McpAction::ExecCommand { command, .. } => {
                 let mode = policy.exec_mode.unwrap_or(profile.exec_mode);
-                let sudo = policy.sudo.unwrap_or(profile.sudo);
+                let sudo = match policy.sudo.unwrap_or(profile.sudo) {
+                    Decision::Allow if !ctx.vela_gui_open => Decision::Ask,
+                    decision => decision,
+                };
                 let mut allowed = profile.allowed_commands.clone();
                 allowed.extend(policy.allowed_commands.iter().cloned());
                 let mut denied = profile.denied_commands.clone();
@@ -713,9 +716,7 @@ impl PolicyEngine {
             .active_profile_override(server_id, now)
             .unwrap_or(&policy.profile_id)
             .to_owned();
-        let hide = policy
-            .hide_server_identity
-            .unwrap_or(self.config.hide_server_identity);
+        let hide = policy.hides_identity(&self.config);
         Some(AgentServerInfo {
             id: server_id.to_owned(),
             alias: policy.alias.clone(),
@@ -735,27 +736,44 @@ impl PolicyEngine {
     /// El simulador fuerza un servidor conectado con interfaz abierta para que
     /// muestre la decisión del perfil y no el bloqueo global de arranque.
     pub fn simulate(&self, profile_or_server: &str, input: &str) -> PolicyDecision {
+        let context = EvalContext {
+            home_dir: std::env::var_os("HOME").map(PathBuf::from),
+            ..EvalContext::default()
+        };
+        let is_server = self.config.servers.contains_key(profile_or_server);
+        self.simulate_target(profile_or_server, is_server, input, &context)
+    }
+
+    /// Previsualiza reglas sin conexiones ni consultas al sistema de archivos.
+    pub fn simulate_target(
+        &self,
+        target: &str,
+        is_server: bool,
+        input: &str,
+        context: &EvalContext,
+    ) -> PolicyDecision {
         let input = input.trim();
-        let (operation, arguments) = match input.split_once(' ') {
+        let (operation, arguments) = match input.split_once(char::is_whitespace) {
             Some((operation, arguments)) => (operation, arguments.trim()),
             None => (input, ""),
         };
         let mut config = self.config.clone();
         config.enabled = true;
-        let server_id = if let Some(policy) = config.servers.get_mut(profile_or_server) {
+        let server_id = if is_server {
+            let policy = config.servers.entry(target.to_owned()).or_default();
             // Ajustes debe poder previsualizar las reglas de un servidor
             // desactivado antes de activarlo.
             if policy.availability == ServerAvailability::Disabled {
                 policy.availability = ServerAvailability::ConnectedOnly;
             }
-            profile_or_server.to_owned()
+            target.to_owned()
         } else {
             let id = "__sim__".to_owned();
             config.servers.insert(
                 id.clone(),
                 ServerMcpPolicy {
                     availability: ServerAvailability::ConnectedOnly,
-                    profile_id: profile_or_server.to_owned(),
+                    profile_id: target.to_owned(),
                     ..ServerMcpPolicy::default()
                 },
             );
@@ -775,11 +793,9 @@ impl PolicyEngine {
             server_connected: true,
             vela_gui_open: true,
             open_in_edits_dirty: false,
-            home_dir: std::env::var_os("HOME").map(PathBuf::from),
-            vela_config_dir: None,
-            now: SystemTime::now(),
+            ..context.clone()
         };
-        PolicyEngine::with_jit(config, self.jit.clone()).evaluate(&action, &ctx)
+        PolicyEngine::new(config).evaluate(&action, &ctx)
     }
 }
 
@@ -814,6 +830,9 @@ fn path_scopes(profile: &PermissionProfile, policy: &ServerMcpPolicy, denied: bo
 
 fn parse_simulated_action(server_id: &str, operation: &str, arguments: &str) -> Option<McpAction> {
     let id = server_id.to_owned();
+    if arguments.is_empty() && (operation.starts_with("fs_") || operation.starts_with("exec")) {
+        return None;
+    }
     let path = || arguments.to_owned();
     match operation {
         "servers" | "list_servers" => Some(McpAction::ListServers),

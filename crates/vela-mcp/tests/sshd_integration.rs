@@ -755,6 +755,25 @@ async fn transfers_keep_exact_bytes_and_block_ssh_and_config_paths() {
     .await;
     assert_eq!(fs::read(&downloaded_to).unwrap(), bytes);
 
+    let protected = harness.backend.config_dir.join("mcp.toml");
+    let link = root.join("vela-alias");
+    std::os::unix::fs::symlink(&harness.backend.config_dir, &link).unwrap();
+    for local_path in [protected.clone(), link.join("mcp.toml")] {
+        assert_denied(
+            within(executor.transfer_download(
+                vela_mcp::TransferDownloadInput {
+                    server_id: "srv".into(),
+                    remote_path: remote.to_string_lossy().into_owned(),
+                    local_path: local_path.to_string_lossy().into_owned(),
+                    reason: None,
+                },
+                ApprovalMode::ApprovedOnce,
+            ))
+            .await,
+        );
+    }
+    assert!(!protected.exists());
+
     // Una política que deniega transferencias bloquea tanto ~/.ssh como el
     // directorio de configuración y cualquier ruta fuera del allowlist.
     let mut denied = config(&root, "custom");

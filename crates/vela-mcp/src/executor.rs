@@ -311,6 +311,26 @@ impl<B: McpBackend> Executor<B> {
         Ok((parent.join(name).to_string_lossy().into_owned(), expanded))
     }
 
+    fn transfer_context(
+        &self,
+        server_id: &str,
+        dirty: bool,
+        canonical_path: &str,
+    ) -> crate::EvalContext {
+        let mut context = self.context(server_id, dirty);
+        // Protect the configured spelling and its real location when Vela's
+        // configuration directory itself was reached through a symlink.
+        if let Some(dir) = context
+            .vela_config_dir
+            .as_ref()
+            .and_then(|dir| dir.canonicalize().ok())
+            && Path::new(canonical_path).starts_with(&dir)
+        {
+            context.vela_config_dir = Some(dir);
+        }
+        context
+    }
+
     fn text(bytes: &[u8], path: &str) -> Result<String, ExecutorError> {
         if bytes.contains(&0) || std::str::from_utf8(bytes).is_err() {
             return Err(ExecutorError::BinaryFile(path.to_owned()));
@@ -945,7 +965,7 @@ impl<B: McpBackend> Executor<B> {
             remote_canonical_path: Some(remote.clone()),
             size: Some(size),
         };
-        let ctx = self.context(&input.server_id, dirty);
+        let ctx = self.transfer_context(&input.server_id, dirty, &local_canonical);
         let mut preview = Self::preview(
             "transfer_upload",
             &input.server_id,
@@ -987,7 +1007,7 @@ impl<B: McpBackend> Executor<B> {
             remote_canonical_path: Some(remote.clone()),
             size: None,
         };
-        let ctx = self.context(&input.server_id, dirty);
+        let ctx = self.transfer_context(&input.server_id, dirty, &local_canonical);
         let mut preview = Self::preview(
             "transfer_download",
             &input.server_id,

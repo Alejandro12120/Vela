@@ -17,7 +17,7 @@ use thiserror::Error;
 
 pub use env::{HarnessEnv, TargetOs};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum HarnessId {
     ClaudeCode,

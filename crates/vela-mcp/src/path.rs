@@ -116,6 +116,17 @@ fn match_segments(pattern: &[&str], path: &[&str]) -> bool {
     segment_match(pattern[0], path[0]) && match_segments(&pattern[1..], &path[1..])
 }
 
+/// Valida patrones editados en la interfaz según la sintaxis de ámbitos de Vela.
+pub fn valid_scope_pattern(pattern: &str, local: bool) -> bool {
+    let has_root = pattern.starts_with('/') || pattern == "**" || pattern.starts_with("**/");
+    let local_home = local && (pattern == "~" || pattern.starts_with("~/"));
+    (has_root || local_home)
+        && !pattern.chars().any(char::is_control)
+        && !segments(pattern)
+            .iter()
+            .any(|part| matches!(*part, "." | ".."))
+}
+
 /// Compara una ruta con un patrón glob.
 ///
 /// `**` coincide con cero o más segmentos completos; `*` con cero o más
@@ -265,9 +276,18 @@ pub fn check_local_path(
     if let Some(home) = home_dir {
         fixed_denied.push(expand_tilde("~/.ssh/**", Some(home)).unwrap());
     }
-    if let Some(config_dir) = vela_config_dir {
-        let base = config_dir.to_string_lossy();
-        fixed_denied.push(format!("{}/**", base.trim_end_matches('/')));
+    if let Some(config_dir) = vela_config_dir
+        && [Some(requested), canonical]
+            .into_iter()
+            .flatten()
+            .any(|path| {
+                normalize_input(path, home_dir)
+                    .is_ok_and(|path| Path::new(&path).starts_with(config_dir))
+            })
+    {
+        return PathAccess::Denied {
+            matched_rule: "vela_config_dir".into(),
+        };
     }
     access_for(requested, canonical, allowed, &fixed_denied, home_dir)
 }

@@ -225,6 +225,9 @@ impl HeadlessRuntime {
     }
 
     async fn call(&mut self, tool: ToolCall, app: &Path, can_launch: bool) -> HeadlessResult {
+        if let Err(error) = self.reload() {
+            return HeadlessResult::Done(error);
+        }
         match self.prepare(&tool, app, can_launch).await {
             Ok(()) => {}
             Err(result) => return result,
@@ -239,6 +242,21 @@ impl HeadlessRuntime {
             Ok(ToolOutcome::NeedsApproval { .. }) => closed_for_approval(),
             result => HeadlessResult::Done(ToolResponse::from_outcome(result)),
         }
+    }
+
+    fn reload(&mut self) -> Result<(), ToolResponse> {
+        let dir = &self.executor.backend.config_dir;
+        let config = config::load(dir).map_err(|_| {
+            ToolResponse::error("No se pudo cargar la configuración local de Vela.")
+        })?;
+        if self.executor.rollback.config() != &config.rollback {
+            self.executor.rollback = Arc::new(
+                RollbackStore::new(dir.join(ROLLBACK_DIR_NAME), config.rollback.clone())
+                    .map_err(|_| ToolResponse::error("No se pudo abrir el almacén de rollback."))?,
+            );
+        }
+        *self.executor.policy.config_mut() = config;
+        Ok(())
     }
 
     async fn prepare(
@@ -432,6 +450,22 @@ impl Runtime {
                 Mode::Bridge(client) => {
                     let client = client.clone();
                     drop(mode);
+                    let dir = self
+                        .options
+                        .config_dir
+                        .clone()
+                        .map_or_else(vela_core::config::default_directory, Ok);
+                    let config = dir.and_then(|dir| config::load(&dir));
+                    let Ok(config) = config else {
+                        return Ok(ToolResponse::error(
+                            "No se pudo cargar la configuración local de Vela.",
+                        ));
+                    };
+                    if !config.enabled {
+                        let decision = crate::PolicyEngine::new(config)
+                            .evaluate(&McpAction::ListServers, &crate::EvalContext::default());
+                        return Ok(ToolResponse::denied(&decision));
+                    }
                     return client.call(tool, context.progress).await;
                 }
                 Mode::Closed => return Ok(ToolResponse::error("El runtime MCP se ha cerrado.")),

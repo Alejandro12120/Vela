@@ -127,6 +127,7 @@ impl Workspace {
         };
         let (env, cmd) = (scan.env.clone(), scan.command.clone());
         self.mcp.diff = Some((id, None));
+        self.mcp.diff_scroll = gpui::ScrollHandle::new();
         let task = cx.background_executor().spawn(async move {
             action.run(id, &env, &cmd, true).map_or_else(
                 |error| harness_error(&error),
@@ -163,12 +164,11 @@ impl Workspace {
         {
             return;
         }
-        let Some(scan) = self.mcp.scan.take() else {
+        let Some(scan) = self.mcp.scan.clone() else {
             return;
         };
-        let pending = self.mcp.pending.take();
+        let pending = self.mcp.pending.ordered();
         self.mcp.applying = true;
-        self.mcp.diff = None;
         self.mcp.results.clear();
         let task = cx.background_executor().spawn(async move {
             let results = pending
@@ -197,6 +197,8 @@ impl Workspace {
             let (results, scan) = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.mcp.applying = false;
+                this.mcp.pending = PendingChanges::default();
+                this.mcp.diff = None;
                 this.mcp.results = results;
                 this.mcp.scan = Some(scan);
                 cx.notify();
@@ -241,12 +243,24 @@ impl Workspace {
             });
         let mut body = stack().child(header);
         if let Some(error) = &self.mcp.scan_error {
-            body = body.child(div().text_color(theme.danger).child(error.clone()))
-                .child(muted("Esta ruta es de una compilación de desarrollo; los agentes dejarán de encontrarla si la borras.", theme));
+            body = body.child(div().text_color(theme.danger).child(error.clone()));
         }
         let Some(scan) = &self.mcp.scan else {
             return body;
         };
+        body = body.when(scan.detected_count() == 0, |body| {
+            body.child(
+                muted(
+                    "No se detectó ningún agente. Usa la configuración manual de abajo.",
+                    theme,
+                )
+                .px_3()
+                .py_2()
+                .rounded(px(6.))
+                .bg(theme.warning_bg)
+                .text_color(theme.warning),
+            )
+        });
         body = body.child(super::super::settings_view::settings_group(
             theme,
             scan.statuses
@@ -255,7 +269,8 @@ impl Workspace {
                 .map(|(index, (id, status))| {
                     let id = *id;
                     let row = harness_row(status);
-                    let pending = self.mcp.pending.get(id).is_some();
+                    let pending = self.mcp.pending.get(id);
+                    let (label, tone) = pending.map_or((row.label, row.tone), Change::pending);
                     let info = stack()
                         .gap_0()
                         .flex_1()
@@ -266,8 +281,11 @@ impl Workspace {
                                 .items_center()
                                 .gap_1()
                                 .child(heading(id.display_name()))
-                                .child(badge(row.label, row.tone, theme)),
+                                .child(badge(label, tone, theme)),
                         )
+                        .when(pending.is_some(), |info| {
+                            info.child(muted(row.label, theme))
+                        })
                         .children(row.path.map(|path| {
                             ellipsis(
                                 ("harness-path", index),
@@ -290,7 +308,11 @@ impl Workspace {
                         .items_center()
                         .gap_1()
                         .children(row.action.map(|action| {
-                            let label = if pending { "Desmarcar" } else { action.label() };
+                            let label = if pending.is_some() {
+                                "Desmarcar"
+                            } else {
+                                action.label()
+                            };
                             if busy {
                                 return disabled_button(label, theme).into_any_element();
                             }
@@ -304,15 +326,19 @@ impl Workspace {
                             )
                             .into_any_element()
                         }))
-                        .when(pending, |actions| {
+                        .when(pending.is_some(), |actions| {
                             let open = self.mcp.diff.as_ref().is_some_and(|(open, _)| *open == id);
+                            let label = if open {
+                                "Ocultar cambios"
+                            } else {
+                                "Ver cambios"
+                            };
+                            if busy {
+                                return actions.child(disabled_button(label, theme));
+                            }
                             actions.child(small(
                                 ("harness-show-diff", index),
-                                if open {
-                                    "Ocultar cambios"
-                                } else {
-                                    "Ver cambios"
-                                },
+                                label,
                                 theme,
                                 cx.listener(move |this, _, window, cx| {
                                     this.preview_harness_change(id, window, cx)
@@ -329,25 +355,30 @@ impl Workspace {
                     );
                     if let Some(snippet) = row.snippet {
                         let expanded = self.mcp.manual_preview == Some(id);
+                        let label = if expanded {
+                            "Ocultar configuración"
+                        } else {
+                            "Ver configuración"
+                        };
                         element = element.child(
                             div()
                                 .flex()
                                 .justify_end()
                                 .gap_1()
-                                .child(small(
-                                    ("show-snippet", index),
-                                    if expanded {
-                                        "Ocultar configuración"
-                                    } else {
-                                        "Ver configuración"
-                                    },
-                                    theme,
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.mcp.manual_preview =
-                                            if expanded { None } else { Some(id) };
-                                        cx.notify();
-                                    }),
-                                ))
+                                .child(if busy {
+                                    disabled_button(label, theme)
+                                } else {
+                                    small(
+                                        ("show-snippet", index),
+                                        label,
+                                        theme,
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.mcp.manual_preview =
+                                                if expanded { None } else { Some(id) };
+                                            cx.notify();
+                                        }),
+                                    )
+                                })
                                 .child(self.copy_mcp_button(
                                     index as u64 + 1,
                                     "Copiar configuración",
@@ -360,18 +391,26 @@ impl Workspace {
                             element = element.child(code_box(
                                 ("harness-snippet", index),
                                 snippet.to_owned(),
+                                None,
                                 theme,
                             ));
                         }
                     }
                     if let Some((open, text)) = &self.mcp.diff
                         && *open == id
+                        && let (Some(change), Some(path)) = (pending, row.path)
                     {
-                        element = element.child(code_box(
-                            ("harness-diff", index),
-                            text.as_deref().unwrap_or("Calculando cambios…").to_owned(),
-                            theme,
-                        ));
+                        element = element.child(
+                            stack()
+                                .gap_1()
+                                .child(muted(change.summary(&scan.display_path(path)), theme))
+                                .child(code_box(
+                                    ("harness-diff", index),
+                                    text.as_deref().unwrap_or("Calculando cambios…").to_owned(),
+                                    Some(&self.mcp.diff_scroll),
+                                    theme,
+                                )),
+                        );
                     }
                     element
                 })
@@ -384,7 +423,7 @@ impl Workspace {
             .child(stack().gap_1().child(div().flex().items_center().justify_between().gap_2()
                 .child(muted("Configuración manual para otros clientes", theme))
                 .child(self.copy_mcp_button(0, "Copiar JSON", snippet.clone(), theme, cx)))
-                .child(code_box("harness-manual-json", snippet, theme)))
+                .child(code_box("harness-manual-json", snippet, None, theme)))
     }
 
     fn copy_mcp_button(
@@ -395,6 +434,9 @@ impl Workspace {
         theme: Theme,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
+        if self.mcp.applying || self.mcp.scanning {
+            return disabled_button(label, theme);
+        }
         small(
             ("copy-mcp", key as usize),
             if self.mcp.copied == Some(key) {
@@ -410,21 +452,48 @@ impl Workspace {
     }
 }
 
-fn code_box(id: impl Into<ElementId>, text: String, theme: Theme) -> Stateful<Div> {
+fn code_box(
+    id: impl Into<ElementId>,
+    text: String,
+    scroll: Option<&gpui::ScrollHandle>,
+    theme: Theme,
+) -> Div {
+    let diff = scroll.is_some();
     div()
-        .id(id)
-        .max_h(px(134.))
-        .overflow_scroll()
+        .relative()
+        .flex()
+        .flex_col()
+        .max_h(px(if diff { 152. } else { 190. }))
         .rounded(px(6.))
         .bg(theme.panel)
         .border_1()
         .border_color(theme.border)
-        .p_2()
-        .font_family(crate::theme::monospace())
-        .text_size(px(11.))
-        .line_height(px(15.))
-        .children(
-            text.lines()
-                .map(|line| div().whitespace_nowrap().child(line.to_owned())),
+        .child(
+            div()
+                .id(id)
+                .min_h_0()
+                .overflow_scroll()
+                .p_2()
+                .when_some(scroll, |code, scroll| code.track_scroll(scroll).pr_4())
+                .font_family(crate::theme::monospace())
+                .text_size(px(11.))
+                .line_height(px(15.))
+                .children(text.lines().map(|line| {
+                    let color = match line {
+                        _ if !diff => theme.text,
+                        "--- original" | "+++ propuesta" => theme.secondary_text,
+                        _ if line.starts_with('+') => theme.success,
+                        _ if line.starts_with('-') => theme.danger,
+                        _ if line.starts_with("@@") => theme.secondary_text,
+                        _ => theme.text,
+                    };
+                    div()
+                        .whitespace_nowrap()
+                        .text_color(color)
+                        .child(line.to_owned())
+                })),
         )
+        .when_some(scroll, |code, scroll| {
+            code.child(modal::scroll_indicator(scroll, theme))
+        })
 }

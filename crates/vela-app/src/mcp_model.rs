@@ -4,12 +4,13 @@ use std::{collections::HashMap, io, path::Path};
 
 use vela_core::Auth;
 use vela_mcp::{
-    Decision, McpConfig, PermissionProfile, ServerAvailability,
+    Decision, McpConfig, PermissionProfile, ServerAvailability, ServerMcpPolicy,
     config::{ExecMode, RollbackConfig},
     harness::{
         self, ChangeReport, EntryState, HarnessEnv, HarnessError, HarnessId, HarnessStatus,
         InstallOptions, VelaCommand,
     },
+    presets,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,6 +36,24 @@ impl Change {
             Self::Remove => "Quitar",
             Self::Update => "Actualizar ruta",
             Self::Replace => "Reemplazar",
+        }
+    }
+
+    pub fn pending(self) -> (&'static str, Tone) {
+        match self {
+            Self::Add => ("Se añadirá", Tone::Success),
+            Self::Remove => ("Se quitará", Tone::Warning),
+            Self::Update => ("Se actualizará", Tone::Warning),
+            Self::Replace => ("Se reemplazará", Tone::Danger),
+        }
+    }
+
+    pub fn summary(self, path: &str) -> String {
+        match self {
+            Self::Add => format!("Añade la entrada vela en {path}"),
+            Self::Remove => format!("Quita la entrada vela de {path}"),
+            Self::Update => format!("Actualiza la ruta del ejecutable en {path}"),
+            Self::Replace => format!("Reemplaza la entrada vela en {path}"),
         }
     }
 
@@ -69,7 +88,14 @@ pub fn harness_row(status: &HarnessStatus) -> HarnessRow<'_> {
     use Change::*;
     use Tone::*;
     let (label, tone, action, path, detail, snippet) = match status {
-        HarnessStatus::NotDetected => ("No encontrado", Neutral, None, None, None, None),
+        HarnessStatus::NotDetected => (
+            "No encontrado",
+            Neutral,
+            None,
+            None,
+            Some("No se detectó este agente en el equipo.".into()),
+            None,
+        ),
         HarnessStatus::Detected {
             config_path, entry, ..
         } => {
@@ -86,7 +112,7 @@ pub fn harness_row(status: &HarnessStatus) -> HarnessRow<'_> {
                     "Ocupado",
                     Warning,
                     Replace,
-                    Some(format!("Ocupada por: {found}")),
+                    Some(format!("En uso por: {found}")),
                 ),
             };
             (
@@ -145,6 +171,7 @@ fn sanitize(error: &str) -> String {
         .collect()
 }
 
+#[derive(Clone)]
 pub struct HarnessScan {
     pub env: HarnessEnv,
     pub command: VelaCommand,
@@ -166,11 +193,7 @@ impl HarnessScan {
     }
 
     pub fn summary(&self) -> String {
-        let detected = self
-            .statuses
-            .iter()
-            .filter(|(_, status)| *status != HarnessStatus::NotDetected)
-            .count();
+        let detected = self.detected_count();
         let installed: Vec<_> = self
             .statuses
             .iter()
@@ -190,11 +213,28 @@ impl HarnessScan {
         } else {
             format!(" ({})", installed.join(", "))
         };
+        let detected_label = if detected == 1 {
+            "detectado"
+        } else {
+            "detectados"
+        };
+        let installed_label = if installed.len() == 1 {
+            "configurado"
+        } else {
+            "configurados"
+        };
         format!(
-            "{detected} de {} detectados · {} configurados{names}",
+            "{detected} {detected_label} de {} · {} {installed_label}{names}",
             HarnessId::ALL.len(),
-            installed.len()
+            installed.len(),
         )
+    }
+
+    pub fn detected_count(&self) -> usize {
+        self.statuses
+            .iter()
+            .filter(|(_, status)| *status != HarnessStatus::NotDetected)
+            .count()
     }
 
     pub fn display_path(&self, path: &Path) -> String {
@@ -239,10 +279,10 @@ impl PendingChanges {
         !busy && !self.0.is_empty()
     }
 
-    pub fn take(&mut self) -> Vec<(HarnessId, Change)> {
+    pub fn ordered(&self) -> Vec<(HarnessId, Change)> {
         HarnessId::ALL
             .into_iter()
-            .filter_map(|id| self.0.remove(&id).map(|action| (id, action)))
+            .filter_map(|id| self.get(id).map(|action| (id, action)))
             .collect()
     }
 }
@@ -279,6 +319,22 @@ pub fn harness_error(error: &HarnessError) -> String {
     }
 }
 
+pub fn permission_save_hint(
+    blocked: Option<&'static str>,
+    pending_pattern: bool,
+    changed: bool,
+) -> Option<&'static str> {
+    if pending_pattern {
+        Some("Pulsa Añadir o Enter para incluir el patrón pendiente.")
+    } else if let Some(reason) = blocked {
+        Some(reason)
+    } else if !changed {
+        Some("Sin cambios para guardar.")
+    } else {
+        None
+    }
+}
+
 pub fn valid_notes(notes: &str) -> bool {
     !notes.chars().any(char::is_control)
 }
@@ -287,11 +343,40 @@ pub fn availability_allowed(availability: ServerAvailability, auth: &Auth) -> bo
     availability != ServerAvailability::Headless || matches!(auth, Auth::Agent { .. })
 }
 
+pub fn server_permission_issue(
+    config: &McpConfig,
+    policy: &ServerMcpPolicy,
+    auth: Option<&Auth>,
+    notes: &str,
+    initial_notes: Option<&str>,
+) -> Option<&'static str> {
+    let Some(auth) = auth else {
+        return Some("El servidor ya no existe.");
+    };
+    if !availability_allowed(policy.availability, auth) {
+        Some("El acceso desatendido requiere autenticación con clave SSH.")
+    } else if presets::resolve_profile(config, &policy.profile_id).is_none() {
+        Some("Elige un perfil existente para guardar.")
+    } else if !valid_notes(notes) && (!notes.trim().is_empty()).then_some(notes) != initial_notes {
+        Some("Las notas no pueden contener caracteres de control.")
+    } else {
+        None
+    }
+}
+
 pub fn decision_label(decision: Decision) -> &'static str {
     match decision {
-        Decision::Allow => "Allow",
-        Decision::Ask => "Ask",
-        Decision::Deny => "Deny",
+        Decision::Allow => "Permitir",
+        Decision::Ask => "Preguntar",
+        Decision::Deny => "Denegar",
+    }
+}
+
+pub fn decision_tone(decision: Decision) -> Tone {
+    match decision {
+        Decision::Allow => Tone::Success,
+        Decision::Ask => Tone::Warning,
+        Decision::Deny => Tone::Danger,
     }
 }
 
@@ -305,12 +390,22 @@ pub fn exec_label(mode: ExecMode) -> &'static str {
 }
 
 pub fn profile_summary(profile: &PermissionProfile) -> String {
+    let summary = |decision, allowed, denied| match decision {
+        Decision::Allow => allowed,
+        Decision::Ask => "pregunta",
+        Decision::Deny => denied,
+    };
+    let exec = match profile.exec_mode {
+        ExecMode::Disabled => "denegado",
+        ExecMode::Allowlist => "lista de permitidos",
+        ExecMode::AskAll => "pregunta",
+        ExecMode::AllowExceptDenylist => "permitido salvo prohibidos",
+    };
     format!(
-        "Lectura {} · Escritura {} · Borrado {} · SSH {}",
-        decision_label(profile.fs_read),
-        decision_label(profile.fs_write),
-        decision_label(profile.fs_delete),
-        exec_label(profile.exec_mode)
+        "Lectura: {} · Escritura: {} · Borrado: {} · SSH: {exec}",
+        summary(profile.fs_read, "permitida", "denegada"),
+        summary(profile.fs_write, "permitida", "denegada"),
+        summary(profile.fs_delete, "permitido", "denegado"),
     )
 }
 
@@ -352,9 +447,79 @@ pub fn rollback_limits(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vela_mcp::{
-        EvalContext, PolicyEngine, ServerMcpPolicy, path::valid_scope_pattern, presets,
-    };
+    use vela_mcp::{EvalContext, PolicyEngine, path::valid_scope_pattern};
+
+    #[test]
+    fn readonly_summary_reflects_the_preset_without_changing_permissions() {
+        assert_eq!(
+            profile_summary(&presets::readonly_profile()),
+            "Lectura: permitida · Escritura: pregunta · Borrado: denegado · SSH: denegado"
+        );
+    }
+
+    #[test]
+    fn server_save_reports_disallowed_availability_and_missing_profile() {
+        let config = McpConfig::default();
+        let mut policy = ServerMcpPolicy {
+            availability: ServerAvailability::Headless,
+            profile_id: "missing".into(),
+            ..ServerMcpPolicy::default()
+        };
+        let auth = Some(&Auth::Password);
+        assert_eq!(
+            server_permission_issue(&config, &policy, auth, "", None),
+            Some("El acceso desatendido requiere autenticación con clave SSH.")
+        );
+        policy.availability = ServerAvailability::ConnectedOnly;
+        assert_eq!(
+            server_permission_issue(&config, &policy, auth, "", None),
+            Some("Elige un perfil existente para guardar.")
+        );
+        policy.profile_id = "readonly".into();
+        assert_eq!(
+            server_permission_issue(&config, &policy, auth, "", None),
+            None
+        );
+    }
+
+    #[test]
+    fn harness_summary_agrees_with_detected_and_configured_counts() {
+        let installed = HarnessStatus::Detected {
+            config_path: "/fixture/config".into(),
+            config_exists: true,
+            entry: EntryState::Installed,
+        };
+        let mut scan = HarnessScan {
+            env: HarnessEnv::isolated("/fixture".into(), harness::TargetOs::Linux),
+            command: VelaCommand::current().unwrap(),
+            statuses: vec![(HarnessId::Codex, installed.clone())],
+            development_program: true,
+        };
+        assert_eq!(scan.summary(), "1 detectado de 5 · 1 configurado (Codex)");
+        scan.statuses.push((HarnessId::Cursor, installed));
+        assert_eq!(
+            scan.summary(),
+            "2 detectados de 5 · 2 configurados (Codex, Cursor)"
+        );
+    }
+
+    #[test]
+    fn permission_save_explains_pending_patterns_and_other_blockers() {
+        assert_eq!(
+            permission_save_hint(None, true, true),
+            Some("Pulsa Añadir o Enter para incluir el patrón pendiente.")
+        );
+        let missing = "El perfil seleccionado ya no existe.";
+        assert_eq!(
+            permission_save_hint(Some(missing), false, true),
+            Some(missing)
+        );
+        assert_eq!(
+            permission_save_hint(None, false, false),
+            Some("Sin cambios para guardar.")
+        );
+        assert_eq!(permission_save_hint(None, false, true), None);
+    }
 
     #[test]
     fn each_harness_status_exposes_only_its_applicable_action() {
@@ -390,7 +555,7 @@ mod tests {
                 "Ocupado",
                 Change::Replace,
                 Tone::Warning,
-                Some("Ocupada por: url: example.test"),
+                Some("En uso por: url: example.test"),
             ),
         ] {
             let status = HarnessStatus::Detected {
@@ -415,7 +580,7 @@ mod tests {
                 HarnessStatus::NotDetected,
                 "No encontrado",
                 Tone::Neutral,
-                None,
+                Some("No se detectó este agente en el equipo."),
                 None,
             ),
             (
@@ -476,13 +641,13 @@ mod tests {
         assert!(pending.can_apply(false));
         assert!(!pending.can_apply(true));
         assert_eq!(
-            pending.take(),
+            pending.ordered(),
             [
                 (HarnessId::ClaudeCode, Change::Add),
                 (HarnessId::Cursor, Change::Remove)
             ]
         );
-        assert!(!pending.can_apply(false));
+        assert!(pending.can_apply(false));
     }
 
     #[test]
@@ -538,7 +703,7 @@ mod tests {
         let original = profile_summary(&profile);
         profile.fs_read = Decision::Deny;
         assert_ne!(original, profile_summary(&profile));
-        assert!(profile_summary(&profile).contains("Lectura Deny"));
+        assert!(profile_summary(&profile).contains("Lectura: denegada"));
         let mut config = McpConfig::default();
         assert_eq!(profile_usage(&config, &profile.id), 0);
         config

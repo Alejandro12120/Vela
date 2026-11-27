@@ -18,11 +18,11 @@ pub fn segmented(
     let on_select = Rc::new(on_select);
     let key_select = on_select.clone();
     let enabled: Vec<_> = options.iter().map(|(_, reason)| reason.is_none()).collect();
+    let available = enabled.contains(&true);
     div()
         .id(id)
         .role(Role::RadioGroup)
         .aria_label(label)
-        .tab_index(0)
         .flex()
         .flex_none()
         .items_center()
@@ -33,12 +33,18 @@ pub fn segmented(
         .border_color(theme.control_border)
         .bg(theme.panel)
         .focus(move |style| style.border_color(theme.accent))
-        .on_key_down(move |event: &KeyDownEvent, window, cx| {
-            let Some(next) = step_segment(event.keystroke.key.as_str(), selected, &enabled) else {
-                return;
-            };
-            cx.stop_propagation();
-            key_select(next, window, cx);
+        .when(!available, |group| group.aria_description("No disponible"))
+        .when(available, |group| {
+            group
+                .tab_index(0)
+                .on_key_down(move |event: &KeyDownEvent, window, cx| {
+                    let Some(next) = step_segment(event.keystroke.key.as_str(), selected, &enabled)
+                    else {
+                        return;
+                    };
+                    cx.stop_propagation();
+                    key_select(next, window, cx);
+                })
         })
         .children(
             options
@@ -76,12 +82,14 @@ fn segment(
         .py(px(4.))
         .rounded(px(5.))
         .text_size(px(13.))
+        .border_1()
+        .border_color(if selected {
+            theme.control_border
+        } else {
+            gpui::rgba(0)
+        })
         .when(selected, |segment| {
-            segment
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.hover)
-                .text_color(theme.text)
+            segment.bg(theme.selection).text_color(theme.text)
         })
         .when(!selected && disabled_reason.is_none(), |segment| {
             segment

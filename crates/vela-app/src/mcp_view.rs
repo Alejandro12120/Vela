@@ -46,6 +46,7 @@ pub(super) struct McpView {
     scan_error: Option<String>,
     pending: PendingChanges,
     diff: Option<(HarnessId, Option<String>)>,
+    diff_scroll: gpui::ScrollHandle,
     manual_preview: Option<HarnessId>,
     results: HashMap<HarnessId, (String, Tone)>,
     applying: bool,
@@ -95,6 +96,7 @@ struct ServerDraft {
 }
 
 struct ProfileDraft {
+    readonly: bool,
     initial: Option<PermissionProfile>,
     profile: PermissionProfile,
     name: Entity<TextInput>,
@@ -120,6 +122,7 @@ impl McpView {
             scan_error: None,
             pending: PendingChanges::default(),
             diff: None,
+            diff_scroll: gpui::ScrollHandle::new(),
             manual_preview: None,
             results: HashMap::new(),
             applying: false,
@@ -738,6 +741,33 @@ fn muted(text: impl Into<SharedString>, theme: Theme) -> Div {
         .child(text.into())
 }
 
+fn technical(text: impl Into<SharedString>, theme: Theme) -> Div {
+    muted(text, theme).font_family(crate::theme::monospace())
+}
+
+fn technical_sentence(
+    before: &'static str,
+    code: &'static str,
+    after: &'static str,
+    theme: Theme,
+) -> Div {
+    div()
+        .flex()
+        .flex_wrap()
+        .items_baseline()
+        .gap_x_1()
+        .child(muted(before, theme).flex_none().whitespace_nowrap())
+        .child(
+            div()
+                .flex()
+                .flex_none()
+                .items_baseline()
+                .whitespace_nowrap()
+                .child(technical(code, theme).flex_none())
+                .child(muted(after, theme).flex_none()),
+        )
+}
+
 fn heading(text: impl Into<SharedString>) -> Div {
     div().font_weight(FontWeight::MEDIUM).child(text.into())
 }
@@ -758,9 +788,14 @@ fn badge(text: impl Into<SharedString>, tone: Tone, theme: Theme) -> Div {
         .px_1()
         .text_size(px(11.))
         .font_weight(FontWeight::MEDIUM)
-        .text_color(tone_color(tone, theme))
+        .text_color(if tone == Tone::Neutral {
+            theme.text
+        } else {
+            tone_color(tone, theme)
+        })
         .bg(match tone {
-            Tone::Neutral | Tone::Success => theme.hover,
+            Tone::Neutral => theme.selection,
+            Tone::Success => theme.hover,
             Tone::Warning => theme.warning_bg,
             Tone::Danger => theme.danger_bg,
         })

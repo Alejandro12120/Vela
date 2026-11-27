@@ -1,6 +1,7 @@
 use gpui::{
-    Animation, AnimationExt, AnyElement, Context, Div, FocusHandle, FontWeight, MouseButton, Rgba,
-    SharedString, actions, div, ease_out_quint, point, prelude::*, px,
+    Animation, AnimationExt, AnyElement, Bounds, Context, Div, FocusHandle, FontWeight,
+    MouseButton, Rgba, ScrollHandle, SharedString, actions, canvas, div, ease_out_quint, fill,
+    point, prelude::*, px, size,
 };
 
 use super::motion;
@@ -82,6 +83,24 @@ pub fn overlay_with_width<T: 'static>(
             )
             .into_any_element()
     };
+    let scroller = div().id("dialog-body").min_h_0().overflow_y_scroll();
+    let body = if let Some(scroll) = scroll {
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .min_h_0()
+            .child(
+                scroller
+                    .track_scroll(scroll)
+                    .pr_3()
+                    .child(div().pb_3().child(body)),
+            )
+            .child(scroll_indicator(scroll, theme))
+            .into_any_element()
+    } else {
+        scroller.child(body).into_any_element()
+    };
     let panel = div()
         .id("modal")
         .when(dismiss_on_backdrop, |panel| panel.occlude())
@@ -144,14 +163,7 @@ pub fn overlay_with_width<T: 'static>(
                 })
                 .child(div().min_w_0().child(title)),
         )
-        .child(
-            div()
-                .id("dialog-body")
-                .min_h_0()
-                .overflow_y_scroll()
-                .when_some(scroll, |body, scroll| body.track_scroll(scroll))
-                .child(body),
-        )
+        .child(body)
         .child(footer);
     let panel = if reduce_motion {
         panel.into_any_element()
@@ -168,4 +180,32 @@ pub fn overlay_with_width<T: 'static>(
         .occlude()
         .child(backdrop)
         .child(panel)
+}
+
+pub fn scroll_indicator(scroll: &ScrollHandle, theme: Theme) -> impl IntoElement {
+    let scroll = scroll.clone();
+    canvas(
+        |_, _, _| (),
+        move |bounds, (), window, _| {
+            let overflow = scroll.max_offset().y;
+            let height = bounds.size.height;
+            if overflow <= px(0.) || height <= px(0.) {
+                return;
+            }
+            let thumb =
+                (height * (height / (height + overflow))).clamp(px(20.).min(height), height);
+            let progress = (-scroll.offset().y / overflow).clamp(0., 1.);
+            let top = bounds.top() + (height - thumb) * progress;
+            window.paint_quad(fill(bounds, theme.selection));
+            window.paint_quad(fill(
+                Bounds::new(point(bounds.left(), top), size(bounds.size.width, thumb)),
+                theme.control_border,
+            ));
+        },
+    )
+    .absolute()
+    .top_0()
+    .bottom_0()
+    .right_0()
+    .w(px(4.))
 }

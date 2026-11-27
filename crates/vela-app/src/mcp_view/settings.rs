@@ -1,9 +1,9 @@
-use vela_mcp::{Decision, EvalContext, PolicyEngine, config::HeadlessAskBehavior};
+use vela_mcp::{EvalContext, PolicyEngine, config::HeadlessAskBehavior};
 
 use super::*;
 use crate::{
-    components::{segmented::segmented, switch::switch},
-    mcp_model::{decision_label, profile_summary, profile_usage, rollback_limits},
+    components::{segmented::segmented, switch::switch_with_state},
+    mcp_model::{decision_label, decision_tone, profile_summary, profile_usage, rollback_limits},
     workspace::settings_view::{section, settings_group, settings_row, subtitle},
 };
 
@@ -21,12 +21,15 @@ impl Workspace {
         let connect = settings_row(
             "Harnesses instalados",
             Some(summary.into()),
-            small(
+            small_button(
                 "connect-agents",
                 "Conectar agentes…",
+                Variant::Primary,
                 theme,
                 cx.listener(|this, _, window, cx| this.open_mcp_harnesses(window, cx)),
-            ),
+            )
+            .focus(|style| style)
+            .focus_visible(move |style| style.border_color(theme.accent)),
             theme,
         );
         let mut panel = section("Agentes (MCP)").children(self.mcp_error(theme, cx));
@@ -39,14 +42,15 @@ impl Workspace {
         };
         let enabled = config.enabled;
         let busy = self.mcp.busy() || self.mcp.conflict;
+        let unavailable = busy.then_some("No disponible");
         let top = settings_row(
             "Servidor MCP local",
             Some("Permite a agentes acceder a servidores autorizados sin entregar nunca claves ni contraseñas.".into()),
-            switch("mcp-enabled", "Servidor MCP local", enabled, theme,
-                cx.listener(move |this, _, window, cx| this.save_mcp(window, cx, false, |config| config.enabled = !enabled)))
+            switch_with_state("mcp-enabled", "Servidor MCP local", enabled, theme,
+                (!busy).then_some(cx.listener(move |this, _, window, cx| this.save_mcp(window, cx, false, |config| config.enabled = !enabled))))
                 .focus(|style| style).focus_visible(move |style| style.border_color(theme.text)),
             theme,
-        ).pb_0();
+        );
         let hidden = config.hide_server_identity;
         let share = config.share_ui_context;
         let timeout = config.approval_timeout_secs;
@@ -60,7 +64,7 @@ impl Workspace {
             settings_row(
                 "Con Vela cerrada (headless)",
                 Some("Qué hacer con las acciones que requieren aprobación.".into()),
-                segmented("mcp-headless", "Con Vela cerrada", &[("Denegar", None), ("Abrir Vela", None)],
+                segmented("mcp-headless", "Con Vela cerrada", &[("Denegar", unavailable), ("Abrir Vela", unavailable)],
                     usize::from(config.headless_ask == HeadlessAskBehavior::OpenVela), theme,
                     on_segment(cx, |this, index, window, cx| this.save_mcp(window, cx, false, |config| {
                         config.headless_ask = if index == 0 { HeadlessAskBehavior::Deny } else { HeadlessAskBehavior::OpenVela };
@@ -70,16 +74,16 @@ impl Workspace {
             settings_row(
                 "Ocultar dirección y usuario a los agentes",
                 Some("El agente ve el ID, el alias y las notas de los servidores autorizados.".into()),
-                switch("mcp-hide", "Ocultar dirección y usuario", hidden, theme,
-                    cx.listener(move |this, _, window, cx| this.save_mcp(window, cx, false, |config| config.hide_server_identity = !hidden)))
+                switch_with_state("mcp-hide", "Ocultar dirección y usuario", hidden, theme,
+                    (!busy).then_some(cx.listener(move |this, _, window, cx| this.save_mcp(window, cx, false, |config| config.hide_server_identity = !hidden))))
                     .focus(|style| style).focus_visible(move |style| style.border_color(theme.text)),
                 theme,
             ),
             settings_row(
-                "Compartir carpeta abierta (get_ui_context)",
-                Some("La carpeta de la ventana estará disponible cuando se active el puente gráfico.".into()),
-                switch("mcp-context", "Compartir carpeta abierta", share, theme,
-                    cx.listener(move |this, _, window, cx| this.save_mcp(window, cx, false, |config| config.share_ui_context = !share)))
+                "Compartir carpeta abierta",
+                Some("Comparte con el agente el servidor y la carpeta que tienes abiertos en Vela. Estará disponible con el puente de la ventana (M6).".into()),
+                switch_with_state("mcp-context", "Compartir carpeta abierta", share, theme,
+                    (!busy).then_some(cx.listener(move |this, _, window, cx| this.save_mcp(window, cx, false, |config| config.share_ui_context = !share))))
                     .focus(|style| style).focus_visible(move |style| style.border_color(theme.text)),
                 theme,
             ),
@@ -87,41 +91,42 @@ impl Workspace {
                 "Espera máxima de aprobación",
                 Some(if timeout_index < timing.len() { "Al agotarse la espera, se deniega la acción.".into() }
                     else { format!("Ajuste actual: {timeout} s. Al agotarse la espera, se deniega la acción.").into() }),
-                segmented("mcp-timeout", "Espera máxima de aprobación", &[("1 min", None), ("3 min", None), ("5 min", None)],
+                segmented("mcp-timeout", "Espera máxima de aprobación", &[("1 min", unavailable), ("3 min", unavailable), ("5 min", unavailable)],
                     timeout_index, theme, on_segment(cx, move |this, index, window, cx|
                         this.save_mcp(window, cx, false, |config| config.approval_timeout_secs = timing[index])))
                     .focus(|style| style).focus_visible(move |style| style.border_color(theme.accent)),
                 theme,
             ),
         ];
-        let rows = std::iter::once(
-            div().child(top).child(
-                div().px(px(14.)).pb_2().child(
-                    ellipsis(
-                        "mcp-socket",
-                        format!("{} · stdio", vela_mcp::ipc::socket_path(None).display()),
-                        theme,
-                    )
-                    .font_family(crate::theme::monospace()),
-                ),
-            ),
+        let socket = ellipsis(
+            "mcp-socket",
+            format!("{} · stdio", vela_mcp::ipc::socket_path(None).display()),
+            theme,
         )
-        .chain(details.map(|row| row.when(!enabled, |row| row.opacity(0.72))))
-        .collect();
+        .font_family(crate::theme::monospace());
+        let rows = [top, div().px(px(14.)).py_2().child(socket)]
+            .into_iter()
+            .chain(details)
+            .collect();
         panel = panel
             .child(settings_group(theme, rows))
             .when(busy, |panel| {
                 panel.child(muted(
-                    "Configuración ocupada o pendiente de recarga.",
+                    if self.mcp.conflict {
+                        "Recarga la configuración para poder editarla."
+                    } else if self.mcp.loading {
+                        "Cargando mcp.toml…"
+                    } else if self.mcp.saving {
+                        "Guardando cambios…"
+                    } else {
+                        "Hay una operación MCP en curso."
+                    },
                     theme,
                 ))
             });
-        panel.child(
-            div()
-                .when(!enabled, |pane| pane.opacity(0.72))
-                .child(self.profiles_section(config, theme, cx))
-                .child(self.rollback_section(config, theme, cx)),
-        )
+        panel
+            .child(self.profiles_section(config, theme, cx))
+            .child(self.rollback_section(config, theme, cx))
     }
 
     fn profiles_section(&self, config: &McpConfig, theme: Theme, cx: &Context<Self>) -> Div {
@@ -154,7 +159,7 @@ impl Workspace {
                                     .child(heading(profile.name.clone()))
                                     .child(badge(
                                         if readonly {
-                                            "Preset".into()
+                                            "Predefinido".into()
                                         } else if count == 1 {
                                             "1 servidor".into()
                                         } else {
@@ -273,23 +278,23 @@ impl Workspace {
                     .gap_2()
                     .items_center()
                     .child(
-                        ellipsis(
-                            "mcp-sim-result",
-                            format!(
-                                "Perfil: {profile} · Regla aplicada: {}",
-                                decision.matched_rule
+                        stack()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0()
+                            .child(muted(format!("Perfil: {profile}"), theme))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .gap_x_1()
+                                    .child(muted("Regla aplicada:", theme))
+                                    .child(technical(decision.matched_rule.clone(), theme)),
                             ),
-                            theme,
-                        )
-                        .flex_1(),
                     )
                     .child(badge(
                         decision_label(decision.outcome),
-                        match decision.outcome {
-                            Decision::Allow => Tone::Success,
-                            Decision::Ask => Tone::Warning,
-                            Decision::Deny => Tone::Danger,
-                        },
+                        decision_tone(decision.outcome),
                         theme,
                     )),
             ),
@@ -341,6 +346,7 @@ impl Workspace {
         let bytes = |count| format!("{:.1}", count as f64 / MIB as f64).replace('.', ",");
         let limits = &config.rollback;
         let enabled = limits.enabled;
+        let busy = self.mcp.busy() || self.mcp.conflict;
         let usage = self
             .mcp
             .usage
@@ -359,7 +365,7 @@ impl Workspace {
                     .flex_1()
                     .h(px(4.))
                     .rounded_full()
-                    .bg(theme.hover)
+                    .bg(theme.control_border)
                     .child(
                         div()
                             .h_full()
@@ -371,9 +377,14 @@ impl Workspace {
             .child(muted(
                 usage.map_or_else(
                     || "Calculando…".into(),
-                    |_| {
+                    |usage| {
+                        let copies = if usage.count == 1 {
+                            "1 copia guardada".into()
+                        } else {
+                            format!("{} copias guardadas", usage.count)
+                        };
                         format!(
-                            "{} MB de {} MB",
+                            "{copies} · {} MB de {} MB",
                             bytes(total),
                             bytes(limits.max_total_bytes)
                         )
@@ -398,15 +409,18 @@ impl Workspace {
                 theme,
                 cx.listener(|this, _, window, cx| this.rollback_action(false, window, cx)),
             ))
-            .child(small(
-                "mcp-backup-clear",
-                "Vaciar…",
-                theme,
-                cx.listener(|this, _, window, cx| {
-                    this.mcp.confirmation = Some(Confirmation::Clear);
-                    this.start_mcp(window, cx);
-                }),
-            ));
+            .child(
+                small(
+                    "mcp-backup-clear",
+                    "Vaciar…",
+                    theme,
+                    cx.listener(|this, _, window, cx| {
+                        this.mcp.confirmation = Some(Confirmation::Clear);
+                        this.start_mcp(window, cx);
+                    }),
+                )
+                .text_color(theme.danger),
+            );
         let rows = vec![
             settings_row(
                 "Respaldo automático antes de editar o borrar",
@@ -419,16 +433,16 @@ impl Workspace {
                     )
                     .into(),
                 ),
-                switch(
+                switch_with_state(
                     "mcp-backup",
                     "Respaldo automático",
                     enabled,
                     theme,
-                    cx.listener(move |this, _, window, cx| {
+                    (!busy).then_some(cx.listener(move |this, _, window, cx| {
                         this.save_mcp(window, cx, false, |config| {
                             config.rollback.enabled = !enabled
                         });
-                    }),
+                    })),
                 )
                 .focus(|style| style)
                 .focus_visible(move |style| style.border_color(theme.text)),

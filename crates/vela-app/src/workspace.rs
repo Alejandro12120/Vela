@@ -3587,6 +3587,52 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn updater_button_paints_a_focus_ring_on_tab(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (workspace, cx) = open(dir.path(), cx);
+        cx.update(|_, cx| bind_keys(cx));
+
+        for state in [
+            UpdateState::Idle,
+            UpdateState::Available {
+                release: test_release(),
+                error: None,
+            },
+        ] {
+            workspace.update(cx, |this, cx| {
+                this.set_update_state(state);
+                cx.notify();
+            });
+            let row = cx.debug_bounds("server-row-id-bravo").unwrap();
+            cx.simulate_click(row.center(), Modifiers::none());
+            cx.run_until_parked();
+
+            let bounds = cx.debug_bounds("update-button").unwrap();
+            assert_eq!(bounds.size, gpui::size(px(26.), px(26.)));
+            let has_ring = |window: &mut Window, cx: &mut gpui::App| {
+                let accent: gpui::Hsla = Theme::current(window, cx).accent.into();
+                let bounds = bounds.scale(window.scale_factor());
+                window
+                    .painted_quads()
+                    .iter()
+                    .any(|quad| quad.bounds == bounds && quad.border_color == accent)
+            };
+            assert!(!cx.update(has_ring));
+
+            let mut focused = false;
+            for _ in 0..20 {
+                cx.simulate_keystrokes("tab");
+                cx.run_until_parked();
+                if cx.update(has_ring) {
+                    focused = true;
+                    break;
+                }
+            }
+            assert!(focused, "Tab should reveal the updater focus ring");
+        }
+    }
+
+    #[gpui::test]
     async fn updater_button_and_progress_bar_reflect_update_states(cx: &mut TestAppContext) {
         let executor = cx.executor();
         let dir = tempfile::tempdir().unwrap();

@@ -1,4 +1,4 @@
-use gpui::{App, ClickEvent, Div, ElementId, Stateful, Window, div, prelude::*, px};
+use gpui::{App, ClickEvent, Div, ElementId, Rgba, Stateful, Window, div, prelude::*, px};
 
 use crate::theme::Theme;
 
@@ -36,6 +36,42 @@ pub fn switch(
         .bg(if checked { theme.accent } else { theme.hover })
         .focus(move |style| style.border_color(theme.text))
         .when(checked, |track| track.justify_end())
-        .child(div().size(px(12.)).rounded_full().bg(theme.raised))
+        .child(
+            div()
+                .size(px(12.))
+                .rounded_full()
+                .bg(thumb_color(checked, theme)),
+        )
         .on_click(on_click)
+}
+
+fn thumb_color(checked: bool, theme: Theme) -> Rgba {
+    if checked {
+        theme.raised
+    } else {
+        theme.secondary_text
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vela_core::appearance::{builtin_themes, contrast};
+
+    #[test]
+    fn off_thumb_contrasts_with_settings_background_and_track() {
+        for definition in builtin_themes() {
+            for (variant, colors) in [("light", definition.light), ("dark", definition.dark)] {
+                let thumb = thumb_color(false, Theme::from_colors(&colors)).into();
+                for (surface, background) in [("row", colors.sidebar), ("track", colors.hover)] {
+                    let ratio = contrast(thumb, background);
+                    assert!(
+                        ratio >= 3.,
+                        "{} {variant} {surface}: {ratio:.2}:1",
+                        definition.name
+                    );
+                }
+            }
+        }
+    }
 }

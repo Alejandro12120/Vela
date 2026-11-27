@@ -483,6 +483,7 @@ fn body(
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
+                .on_scroll(cx.listener(|this, _, window, cx| this.dismiss_row_menu(window, cx)))
                 .on_drop(cx.listener(|this, _: &ServerDrag, _, cx| this.drop_reorder(cx)))
                 .child(content),
         )

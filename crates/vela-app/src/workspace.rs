@@ -3090,6 +3090,31 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn scrolling_the_server_list_dismisses_its_row_menu(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (workspace, cx) = open_many(dir.path(), cx);
+        let row = cx.debug_bounds("server-row-b1").unwrap().center();
+        let position = cx.debug_bounds("server-row-a1").unwrap().center();
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_row_menu("b1", row, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(workspace.read_with(cx, |workspace, _| workspace.row_menu.is_some()));
+
+        cx.simulate_event(gpui::ScrollEvent {
+            position,
+            delta: gpui::ScrollDelta::Lines(point(0., -3.)),
+            ..Default::default()
+        });
+
+        workspace.update_in(cx, |workspace, window, _| {
+            assert!(workspace.row_menu.is_none());
+            assert!(workspace.focus.is_focused(window));
+        });
+    }
+
+    #[gpui::test]
     async fn a_click_selects_without_starting_a_drag(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let (workspace, cx) = open(dir.path(), cx);

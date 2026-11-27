@@ -9,6 +9,7 @@ mod file_workspace;
 mod form;
 mod icons;
 mod keybindings;
+mod mcp_model;
 mod move_paths;
 mod pane;
 #[cfg(target_os = "macos")]

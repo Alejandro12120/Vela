@@ -35,6 +35,7 @@ pub struct TextInput {
     content: String,
     secure: bool,
     compact: bool,
+    focus_visible_only: bool,
     monospace: bool,
     invalid: bool,
     label: &'static str,
@@ -61,6 +62,7 @@ impl TextInput {
             placeholder: placeholder.into(),
             secure,
             compact: false,
+            focus_visible_only: false,
             monospace: false,
             invalid: false,
             label,
@@ -77,6 +79,11 @@ impl TextInput {
 
     pub fn compact(mut self) -> Self {
         self.compact = true;
+        self
+    }
+
+    pub fn keyboard_focus_only(mut self) -> Self {
+        self.focus_visible_only = true;
         self
     }
 
@@ -788,13 +795,17 @@ impl Render for TextInput {
             } else {
                 theme.control_border
             })
-            .focus({
+            .when(true, |input| {
                 let focus_color = if self.invalid {
                     theme.danger
                 } else {
                     theme.accent
                 };
-                move |style| style.border_color(focus_color)
+                if self.focus_visible_only {
+                    input.focus_visible(move |style| style.border_color(focus_color))
+                } else {
+                    input.focus(move |style| style.border_color(focus_color))
+                }
             })
             .when(self.monospace, |input| {
                 input.font_family(crate::theme::monospace())

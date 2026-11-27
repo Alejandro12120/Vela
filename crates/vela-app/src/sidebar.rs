@@ -238,6 +238,7 @@ pub enum RowAction {
     Pin,
     Edit,
     Duplicate,
+    Mcp,
     Delete,
 }
 
@@ -929,7 +930,7 @@ pub fn row_menu(
         connection,
         Some(Connection::Connecting { .. } | Connection::Disconnecting)
     );
-    let items: [(RowAction, IconName, &'static str, bool, bool); 5] = [
+    let items: [(RowAction, IconName, &'static str, bool, bool); 6] = [
         (
             RowAction::Session,
             if connected {
@@ -953,6 +954,7 @@ pub fn row_menu(
             false,
         ),
         (RowAction::Edit, IconName::Pencil, "Edit…", !working, false),
+        (RowAction::Mcp, IconName::Plug, "Acceso MCP…", true, false),
         (
             RowAction::Duplicate,
             IconName::Copy,
@@ -1027,12 +1029,9 @@ pub fn row_menu(
             spread_radius: px(0.),
         }])
         .on_mouse_down_out(cx.listener(|this, _, window, cx| this.dismiss_row_menu(window, cx)))
-        .child(item(0))
-        .child(item(1))
-        .child(item(2))
-        .child(item(3))
+        .children((0..items.len() - 1).map(item))
         .child(div().h(px(1.)).mx_2().my_1().bg(theme.border))
-        .child(item(4));
+        .child(item(items.len() - 1));
     deferred(
         anchored()
             .position(menu.position)

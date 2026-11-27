@@ -67,7 +67,7 @@ allowed_remote_paths = ["/srv/proyecto/**"]
 
 El runtime solo abre sesiones propias para servidores `headless` que usan autenticación por agente. El socket del agente se toma del servidor, del ajuste global en `settings.toml` o del primer socket de Bitwarden detectado, en ese orden. OpenSSH conserva su resolución habitual si ninguno está configurado. El modo headless rechaza los prompts de SSH, incluida la confirmación de una clave de host desconocida. Los sockets de control viven en directorios privados por conexión, bajo un directorio temporal del proceso que se elimina al cerrar stdin. Las copias de rollback se guardan en `mcp-rollback/` dentro de la configuración.
 
-Si un servidor IPC responde al inicio, las llamadas se envían por el puente. Con `headless_ask = "open_vela"`, una aprobación pendiente o el acceso a un servidor `on_demand_ask` o `connected_only` pueden iniciar Vela. El runtime espera hasta cinco segundos a que aparezca el IPC. Una vez conectado, cierra sus sesiones SSH propias, reenvía la llamada para una nueva evaluación y mantiene el puente para las siguientes. La fase M3 proporciona el servidor IPC. Las fases M5/M6 lo conectarán con la interfaz y su cola de aprobaciones.
+Si un servidor IPC responde al inicio, las llamadas se envían por el puente. Con `headless_ask = "open_vela"`, una aprobación pendiente o el acceso a un servidor `on_demand_ask` o `connected_only` pueden iniciar Vela. El runtime espera hasta cinco segundos a que aparezca el IPC. Una vez conectado, cierra sus sesiones SSH propias, reenvía la llamada para una nueva evaluación y mantiene el puente para las siguientes. La fase M3 proporciona el servidor IPC. M6 conectará el servidor IPC a la ventana y a la cola de aprobaciones.
 
 ## Integración del anfitrión
 
@@ -76,3 +76,43 @@ Si un servidor IPC responde al inicio, las llamadas se envían por el puente. Co
 - `ipc::IpcServer::bind` valida el directorio, verifica el UID de cada cliente, crea el socket con permisos `0600` y aplica un límite de 16 MiB por trama. `IpcServer::run` recibe el handler y un futuro de apagado. `IpcClient` mantiene una conexión multiplexada y envía `Cancel` al descartar una llamada.
 - El anfitrión puede evaluar una `ToolCall` contra su `Executor` con `ApprovalMode::Normal` y usar `ApprovedOnce` tras la aprobación. El futuro de la llamada debe mantener la inscripción en la cola de aprobación. Cuando se recibe una cancelación o se cierra la conexión, ese futuro se descarta y la inscripción puede retirarse. Una operación ya enviada a SSH puede completarse.
 - `headless::McpRuntime` selecciona y mantiene el modo. Recibe un `VelaLauncher` inyectable y expone `shutdown` para esperar la salida del worker SSH antes de limpiar el directorio de control.
+
+## Interfaz
+
+| Control | Modelo | Estado |
+| --- | --- | --- |
+| Servidor MCP local y dirección IPC/stdio | `enabled` y `ipc::socket_path` | Existe |
+| Harnesses, detección y acciones | `harness::detect_all`, `install`, `uninstall`, `dry_run`, `force` | Existe |
+| Estado, ruta, ejecutable y copia de cada harness | `HarnessStatus`, `EntryState`, `ChangeReport`, `VelaCommand` | Existe |
+| JSON manual y snippets por cliente | `harness::snippet` y comando canónico | Existe |
+| Ruta personalizada del harness | Sin soporte en M4 | Pendiente |
+| Con Vela cerrada | `headless_ask` | Existe |
+| Ocultar dirección y usuario globalmente | `hide_server_identity` | Existe |
+| Compartir carpeta abierta | `share_ui_context`, herramienta `get_ui_context` | Existe; la carpeta de la ventana requiere el puente gráfico de M6 |
+| Espera máxima | `approval_timeout_secs` | Existe; la espera de aprobación en la ventana corresponde a M6 |
+| Perfiles de fábrica y propios | `presets` y `profiles` | Existe |
+| Duplicación, resumen y protección de perfiles en uso | Operaciones del editor sobre `profiles` y `servers` | Añadido |
+| Selector y simulador | `PolicyEngine` | Existe |
+| Respaldo automático, tamaño, cuota y caducidad | `rollback` | Existe |
+| Ocupación, carpeta y vaciado | `RollbackStore::usage`, `dir`, `clear` | Existe |
+| Disponibilidad | `ServerAvailability`; autenticación de `servers.toml` | Existe |
+| Perfil, alias de cabecera y notas | `profile_id`, `alias`, `notes` | Existe |
+| Heredar/mostrar/ocultar identidad | `hide_server_identity: Option<bool>` | Existe |
+| Patrones remotos y locales | `allowed_remote_paths`, `denied_remote_paths`, `allowed_local_paths` y glob de M1 | Existe |
+| SSH exec, elevación y patrones de comandos | `exec_mode`, `sudo`, `allowed_commands`, `denied_commands` | Existe |
+| Validación de entradas, guardado con comentarios y recarga | Editor de `mcp.toml` | Añadido |
+
+
+En **Ajustes → Agentes (MCP)**, el interruptor local aplica a las llamadas de herramientas. Con MCP apagado, `vela mcp` devuelve una denegación con la regla `mcp_disabled`, incluida `list_servers`. La negociación de stdio sigue disponible. Los demás ajustes se pueden editar con el interruptor apagado. **Con Vela cerrada** elige entre denegar una acción pendiente de aprobación e intentar abrir Vela. El runtime headless falla de forma segura si el puente no aparece. La espera que configura la sección (1, 3 o 5 minutos) corresponde a la aprobación en la ventana, que se incorpora en M6.
+
+**Conectar agentes…** enumera los cinco clientes. Configurado permite quitar la entrada, Detectado añadirla y Desactualizado actualizar el ejecutable. Ocupado exige confirmar el reemplazo. No encontrado, Archivo inválido y Sin acceso informan del estado. Manual muestra el motivo y el fragmento que se puede copiar. Cada cambio marcado permite consultar el diff de la operación en seco. **Aplicar** ejecuta las operaciones marcadas en segundo plano, muestra el resultado y la ruta de la copia `.vela.bak` cuando existe, y vuelve a detectar. Cancelar, Escape y el fondo cierran el instalador sin aplicar los cambios marcados.
+
+**Perfiles de permisos** muestra las reglas de los presets y permite duplicarlos para editar un perfil propio. Un perfil asignado a un servidor no se puede borrar. El simulador evalúa la misma política sin SSH con el servidor conectado y la interfaz disponible. Incluye las reglas del servidor si se elige uno. La simulación usa las rutas de entrada, sin resolver enlaces remotos ni conceder permisos temporales.
+
+**Acceso MCP…** abre la hoja de un servidor desde el menú de su fila o la cabecera. La disponibilidad inicial es Desactivado. Desatendido requiere autenticación con clave mediante agente SSH y excluye la elevación desatendida. La hoja usa el perfil elegido y los patrones propios, distingue los patrones heredados y permite ocultar la identidad o heredar el ajuste general. Las notas se exponen en `list_servers` y el esquema no fija una longitud máxima. Las prohibiciones siempre prevalecen sobre los ámbitos permitidos. Los patrones de rutas remotas son absolutos o empiezan por `**/`. Las rutas locales también admiten `~/`. El directorio de configuración de Vela, incluido `mcp.toml`, está protegido incluso con un ámbito local amplio.
+
+**Copias de rollback** muestra el uso de las copias vigentes y permite editar el tamaño por archivo, la cuota y la caducidad. **Mostrar** abre la carpeta `mcp-rollback`. **Vaciar…** elimina las copias tras confirmación. Se conservan el registro de copias y el comportamiento de caducidad de M2.
+
+La configuración sigue en el formato v1. Los archivos antiguos conservan sus valores por defecto. Los ajustes globales guardan cada opción al cambiarla. Las hojas y editores guardan al pulsar **Guardar**. Vela edita el TOML con `toml_edit`, conserva el orden y los comentarios de las entradas editadas y valida el documento antes de publicarlo por renombrado atómico desde un temporal con permisos `0600`. Si el archivo cambió desde la lectura, la ventana informa del conflicto y ofrece **Recargar**.
+
+El proceso `vela mcp` en marcha relee `mcp.toml` al comienzo de cada llamada de herramienta en modo headless. Un cambio publicado rige desde la siguiente llamada, sin reiniciar ni esperar un intervalo de sondeo. La relectura falla de forma cerrada ante un archivo inválido. En modo puente el cliente también comprueba el interruptor global antes de reenviar. La evaluación de permisos sobre las sesiones de la ventana, las aprobaciones, su actividad, el acceso temporal, el corte de agentes y la reversión desde el registro quedan para M6.

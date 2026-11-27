@@ -88,7 +88,9 @@ Vela does not support Windows. On Linux, outbound file drag and file clipboard s
 
 ## MCP
 
-Run `vela mcp` as a stdio MCP server for Vela's SSH and SFTP tools. Use `vela mcp status` to find supported agents, `vela mcp install --all` to register Vela with detected agents, and `vela mcp uninstall --harness <id>` to remove an entry. In builds with the `dev` feature, set `VELA_MCP_HARNESS_HOME` to an absolute temporary directory to test registration in isolation. See the [MCP setup and integration guide](docs/MCP.md).
+Open **Settings → Agentes (MCP)** to register Vela with supported clients and manage permission profiles. Use **Acceso MCP…** in a server’s context menu or details header to choose its availability and rules. The global switch and new servers start disabled.
+
+Run `vela mcp` as a stdio MCP server for Vela's SSH and SFTP tools. The CLI also supports `vela mcp status`, `vela mcp install --all` and `vela mcp uninstall --harness <id>`. In builds with the `dev` feature, use temporary directories for `VELA_CONFIG_DIR` and `VELA_MCP_HARNESS_HOME`, then set `VELA_DEV_SETTINGS=mcp` to scroll to the section or `VELA_DEV_MCP_VIEW=harnesses|server:<display name>` to open a dialog at startup. `VELA_DEV_MCP_DIFF=<harness-id>` previews a pending dry-run diff in the installer. See the [MCP setup and integration guide](docs/MCP.md).
 
 ## Keyboard shortcuts
 

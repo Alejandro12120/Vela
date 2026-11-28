@@ -251,6 +251,7 @@ impl McpAction {
                 | Self::FsPatch { .. }
                 | Self::FsDelete { .. }
                 | Self::FsMove { .. }
+                | Self::TransferUpload { .. }
         )
     }
 }
@@ -451,30 +452,22 @@ impl PolicyEngine {
         (allowed.remote, denied.remote)
     }
 
-    pub(crate) fn allows_approved_scope(
-        &self,
-        preview: &crate::executor::ApprovalPreview,
-        now: SystemTime,
-    ) -> bool {
-        let Some(rule) = preview.scoped_rule() else {
-            return false;
-        };
-        self.config
-            .servers
-            .get(&preview.server_id)
-            .is_some_and(|policy| {
-                policy.scoped_rules.contains(&rule)
-                    || self.jit.has_scoped_allow(
-                        &preview.server_id,
-                        &rule.operation,
-                        &rule.scope,
-                        now,
-                    )
-            })
+    /// Evalúa la acción sin los datos canónicos de una aprobación previa.
+    pub fn evaluate(&self, action: &McpAction, ctx: &EvalContext) -> PolicyDecision {
+        self.finish_evaluation(self.evaluate_base(action, ctx), ctx, None)
     }
 
-    /// Evalúa una acción completa del agente.
-    pub fn evaluate(&self, action: &McpAction, ctx: &EvalContext) -> PolicyDecision {
+    pub(crate) fn evaluate_with_preview(
+        &self,
+        action: &McpAction,
+        ctx: &EvalContext,
+        preview: &crate::executor::ApprovalPreview,
+    ) -> PolicyDecision {
+        debug_assert!(action.server_id().unwrap_or("") == preview.server_id);
+        self.finish_evaluation(self.evaluate_base(action, ctx), ctx, Some(preview))
+    }
+
+    pub(crate) fn evaluate_base(&self, action: &McpAction, ctx: &EvalContext) -> PolicyDecision {
         if !self.config.enabled {
             return PolicyDecision::new(
                 Decision::Deny,
@@ -698,13 +691,48 @@ impl PolicyEngine {
             }
         }
 
-        let mut result = PolicyDecision {
+        PolicyDecision {
             outcome: decision,
             matched_rule,
             reason,
             warnings,
             requires_launch_vela: false,
-        };
+        }
+    }
+
+    // La vista previa canónica conserva los parámetros de la aprobación, como
+    // el cwd de un comando o la eliminación recursiva.
+    pub(crate) fn finish_evaluation(
+        &self,
+        mut result: PolicyDecision,
+        ctx: &EvalContext,
+        preview: Option<&crate::executor::ApprovalPreview>,
+    ) -> PolicyDecision {
+        if result.outcome == Decision::Ask
+            && (ctx.vela_gui_open
+                || !result
+                    .warnings
+                    .contains(&PolicyWarning::Command(CommandWarning::ContainsSudo)))
+            && let Some(preview) = preview
+            && let Some(policy) = self.config.servers.get(&preview.server_id)
+            && (ctx.server_connected || policy.availability != ServerAvailability::OnDemandAsk)
+            && let Some(rule) = preview.scoped_rule()
+        {
+            if policy.scoped_rules.contains(&rule) {
+                result.outcome = Decision::Allow;
+                result.matched_rule = "saved_scoped_allow".to_owned();
+                result.reason = "Una regla guardada permite esta operación.".to_owned();
+            } else if self.jit.has_scoped_allow(
+                &preview.server_id,
+                &rule.operation,
+                &rule.scope,
+                ctx.now,
+            ) {
+                result.outcome = Decision::Allow;
+                result.matched_rule = "jit_scoped_allow".to_owned();
+                result.reason = "Una concesión efímera permite esta operación.".to_owned();
+            }
+        }
         if result.outcome == Decision::Ask && !ctx.vela_gui_open {
             match self.config.headless_ask {
                 HeadlessAskBehavior::Deny => {
@@ -1496,6 +1524,88 @@ mod tests {
             policy_engine.evaluate(&action, &ctx()).outcome,
             Decision::Ask
         );
+    }
+
+    #[test]
+    fn transfer_upload_denies_overwriting_a_dirty_edit() {
+        let engine = engine(ServerAvailability::ConnectedOnly, "production_protected");
+        let action = McpAction::TransferUpload {
+            server_id: "srv".into(),
+            local_path: "/home/alice/proyectos/app.js".into(),
+            local_canonical_path: None,
+            remote_path: "/srv/api/app.js".into(),
+            remote_canonical_path: None,
+            size: Some(10),
+        };
+        let mut ctx = ctx();
+        assert_eq!(engine.evaluate(&action, &ctx).outcome, Decision::Ask);
+        ctx.open_in_edits_dirty = true;
+        let decision = engine.evaluate(&action, &ctx);
+        assert_eq!(decision.outcome, Decision::Deny);
+        assert_eq!(decision.matched_rule, "edits_conflict");
+        assert!(decision.warnings.contains(&PolicyWarning::EditsConflict));
+    }
+
+    #[test]
+    fn saved_rule_resolves_headless_ask_but_never_overrides_denials() {
+        use crate::executor::ApprovalPreview;
+
+        let mut engine = engine(ServerAvailability::Headless, "production_protected");
+        engine.config_mut().headless_ask = HeadlessAskBehavior::Deny;
+        let mut ctx = ctx();
+        ctx.vela_gui_open = false;
+        let write = |path: &str| McpAction::FsWrite {
+            server_id: "srv".into(),
+            path: path.into(),
+            canonical_path: Some(path.into()),
+            size: Some(10),
+        };
+        let preview = |path: &str| ApprovalPreview {
+            operation: "fs_write".into(),
+            server_id: "srv".into(),
+            paths: vec![path.into()],
+            ..Default::default()
+        };
+        let path = "/srv/api/app.js";
+        let evaluate = |engine: &PolicyEngine, context: &EvalContext, path| {
+            engine.evaluate_with_preview(&write(path), context, &preview(path))
+        };
+        assert_eq!(
+            evaluate(&engine, &ctx, path).matched_rule,
+            "headless_fail_closed"
+        );
+        engine
+            .config_mut()
+            .servers
+            .get_mut("srv")
+            .unwrap()
+            .scoped_rules = [path, "/etc/shadow"]
+            .map(|path| preview(path).scoped_rule().unwrap())
+            .into();
+
+        let decision = evaluate(&engine, &ctx, path);
+        assert_eq!(decision.outcome, Decision::Allow);
+        assert_eq!(decision.matched_rule, "saved_scoped_allow");
+        assert!(!decision.requires_launch_vela);
+        assert_eq!(
+            evaluate(&engine, &ctx, "/srv/api/other.js").matched_rule,
+            "headless_fail_closed"
+        );
+        let critical = evaluate(&engine, &ctx, "/etc/shadow");
+        assert_eq!(critical.outcome, Decision::Deny);
+        assert!(critical.matched_rule.contains("/etc/shadow"));
+
+        ctx.open_in_edits_dirty = true;
+        let decision = evaluate(&engine, &ctx, path);
+        assert_eq!(decision.outcome, Decision::Deny);
+        assert_eq!(decision.matched_rule, "edits_conflict");
+        ctx.open_in_edits_dirty = false;
+        let mut profile = presets::production_protected_profile();
+        profile.fs_write = Decision::Deny;
+        engine.config_mut().profiles.push(profile);
+        let decision = evaluate(&engine, &ctx, path);
+        assert_eq!(decision.outcome, Decision::Deny);
+        assert_eq!(decision.matched_rule, "fs_write");
     }
 
     #[test]

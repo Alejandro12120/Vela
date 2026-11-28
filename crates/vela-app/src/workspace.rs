@@ -2702,6 +2702,9 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|this, _: &DismissMenu, window, cx| {
+                if this.close_mcp_denial(window, cx) {
+                    return;
+                }
                 if this.reorder.is_some() {
                     cx.stop_active_drag(window);
                     this.finish_reorder(false, cx);

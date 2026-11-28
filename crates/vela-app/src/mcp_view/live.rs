@@ -1,6 +1,7 @@
 use std::{
     future::{Future, pending},
     path::PathBuf,
+    sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -13,7 +14,7 @@ use vela_mcp::{ServerIdentity, config::ServerAvailability, ipc::socket_path};
 
 use super::*;
 use crate::{
-    components::button::icon_text_button,
+    components::button::{icon_text_button, small_icon_text_button},
     mcp_broker::{Activity, Answer, Approval, Backend, Broker, Reply, Status, UiRequest, Worker},
     mcp_model::{DiffLine, classify_diff_line},
     workspace::Connection,
@@ -26,7 +27,7 @@ pub(in crate::workspace) struct Live {
     bridge: Option<Task<()>>,
     popover: bool,
     filter: Filter,
-    selected: usize,
+    selected: Option<u64>,
     denial: Option<(u64, Entity<TextInput>, Option<FocusHandle>)>,
     #[cfg(feature = "dev")]
     preview: Option<Vec<oneshot::Receiver<Answer>>>,
@@ -145,15 +146,6 @@ impl Workspace {
                     .update_in(cx, |this, window, cx| {
                         if let Some(request) = request {
                             this.mcp_request(request, window, cx);
-                        }
-                        let queue = this.mcp_live.broker.state().pending();
-                        if this
-                            .mcp_live
-                            .denial
-                            .as_ref()
-                            .is_some_and(|(id, _, _)| !queue.iter().any(|item| item.id == *id))
-                        {
-                            this.close_mcp_denial(window, cx);
                         }
                         cx.notify();
                     })
@@ -406,16 +398,11 @@ impl Workspace {
                 }),
             )
             .h(px(26.))
-            .when(count > 0 || jit, |button| {
-                button.child(pill(
-                    if count > 0 {
-                        count.to_string()
-                    } else {
-                        "JIT".into()
-                    },
-                    theme.warning,
-                    theme.warning_bg,
-                ))
+            .when(count > 0, |button| {
+                button.child(pill(count.to_string(), theme.warning, theme.warning_bg))
+            })
+            .when(jit, |button| {
+                button.child(pill("JIT".into(), theme.warning, theme.warning_bg))
             })
             .into_any_element(),
         )
@@ -428,24 +415,35 @@ impl Workspace {
     }
 
     pub(in crate::workspace) fn mcp_live_overlay(
-        &self,
+        &mut self,
         theme: Theme,
-        window: &Window,
-        cx: &Context<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let queue = self.mcp_live.broker.state().pending();
+        let index = queue
+            .iter()
+            .position(|item| Some(item.id) == self.mcp_live.selected)
+            .unwrap_or(0);
+        self.mcp_live.selected = queue.get(index).map(|item| item.id);
+        if self
+            .mcp_live
+            .denial
+            .as_ref()
+            .is_some_and(|(id, _, _)| Some(*id) != self.mcp_live.selected)
+        {
+            self.close_mcp_denial(window, cx);
+        }
         let state = self.mcp_live.broker.state();
         if !state.config.enabled || self.dialog.is_some() || self.mcp.is_open() {
             return None;
         }
-        let queue = state.pending();
-        let index = self.mcp_live.selected.min(queue.len().saturating_sub(1));
         let activity = self
             .mcp_live
             .popover
             .then(|| self.agent_activity(&state, theme, window, cx));
-        let approval = queue
-            .get(index)
-            .map(|item| self.approval_popup(item, index, queue.len(), theme, window, cx));
+        let approval =
+            (!queue.is_empty()).then(|| self.approval_popup(&queue, index, theme, window, cx));
         let conflict = state
             .conflict
             .as_ref()
@@ -486,13 +484,14 @@ impl Workspace {
 
     fn approval_popup(
         &self,
-        item: &Approval,
+        queue: &[Arc<Approval>],
         index: usize,
-        count: usize,
         theme: Theme,
         window: &Window,
         cx: &Context<Self>,
     ) -> AnyElement {
+        let item = &queue[index];
+        let count = queue.len();
         let id = item.id;
         let preview = &item.preview;
         let target = preview
@@ -516,6 +515,7 @@ impl Workspace {
                     },
                 );
                 this.close_mcp_denial(window, cx);
+                cx.notify();
             });
             small_button(action, label, variant, theme, confirm)
                 .debug_selector(move || action.into())
@@ -584,10 +584,11 @@ impl Workspace {
                 header.child(
                     div().flex().items_center().gap_1().children(
                         [
-                            (-1, "Anterior", IconName::ArrowLeft),
-                            (1, "Siguiente", IconName::ArrowRight),
+                            ((index + count - 1) % count, "Anterior", IconName::ArrowLeft),
+                            ((index + 1) % count, "Siguiente", IconName::ArrowRight),
                         ]
-                        .map(|(step, label, icon)| {
+                        .map(|(position, label, icon)| {
+                            let target = queue[position].id;
                             small_icon_button(
                                 label,
                                 label,
@@ -596,8 +597,7 @@ impl Workspace {
                                 theme,
                                 cx.listener(move |this, _, window, cx| {
                                     this.close_mcp_denial(window, cx);
-                                    this.mcp_live.selected =
-                                        (index as isize + step).rem_euclid(count as isize) as usize;
+                                    this.mcp_live.selected = Some(target);
                                     cx.notify();
                                 }),
                             )
@@ -704,10 +704,7 @@ impl Workspace {
                                 "mcp-session",
                                 Variant::Secondary,
                             ))
-                            .child(
-                                decision("Guardar regla", "mcp-save", Variant::Secondary)
-                                    .border_color(theme.border),
-                            )
+                            .child(decision("Guardar regla", "mcp-save", Variant::Secondary))
                     })
                     .child(danger_button("mcp-deny", "Denegar", theme, deny_open).ml_auto()),
             )
@@ -748,14 +745,21 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn close_mcp_denial(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some((_, input, previous)) = self.mcp_live.denial.take()
-            && input.read(cx).focus_handle(cx).is_focused(window)
+    pub(in crate::workspace) fn close_mcp_denial(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((_, input, previous)) = self.mcp_live.denial.take() else {
+            return false;
+        };
+        if input.read(cx).focus_handle(cx).is_focused(window)
             && let Some(previous) = previous
         {
             previous.focus(window, cx);
         }
         cx.notify();
+        true
     }
 
     fn agent_activity(
@@ -807,6 +811,7 @@ impl Workspace {
                 cx.listener(|this, _, window, cx| {
                     this.mcp_live.broker.kill();
                     this.close_mcp_denial(window, cx);
+                    cx.notify();
                 }),
             ));
         let filters = div().flex().gap_1().px_3().py_2().children(
@@ -923,7 +928,7 @@ impl Workspace {
                 .items_center()
                 .gap_2()
                 .when(expiry.is_some(), |bar| bar.bg(theme.warning_bg))
-                .child(icon(IconName::Warning).text_color(theme.warning))
+                .child(icon(IconName::Clock).text_color(theme.warning))
                 .child(
                     div()
                         .flex_1()
@@ -1064,7 +1069,7 @@ impl Workspace {
                     row_element.child(
                         div()
                             .flex_none()
-                            .w(px(76.))
+                            .w(px(88.))
                             .text_center()
                             .text_size(px(12.))
                             .text_color(theme.secondary_text)
@@ -1076,8 +1081,9 @@ impl Workspace {
                     )
                 } else {
                     row_element.child(
-                        small_button(
+                        small_icon_text_button(
                             ("mcp-revert", id),
+                            IconName::RotateCcw,
                             "Revertir",
                             Variant::Secondary,
                             theme,
@@ -1085,7 +1091,7 @@ impl Workspace {
                                 this.rollback_agent_change(id, window, cx)
                             }),
                         )
-                        .w(px(76.)),
+                        .w(px(88.)),
                     )
                 }
             })
@@ -1142,7 +1148,6 @@ fn danger_button(
 ) -> Stateful<Div> {
     small_button(id, label, Variant::Secondary, theme, action)
         .debug_selector(move || id.into())
-        .border_color(theme.border)
         .text_color(theme.danger)
 }
 
@@ -1332,15 +1337,17 @@ impl Workspace {
                     id: 0, agent: agent.into(), server: name.clone(), preview, deadline, rollback: true,
                 });
                 pending.push(receive);
-                if mode == "exec" {
-                    live.selected = 1;
+                if mode == "exec" && agent == "Codex" {
+                    live.selected = Some(request);
                     let input = cx.new(|cx| TextInput::new("Valida primero la sintaxis", "Motivo opcional para el agente", "", false, cx).compact());
                     live.denial = Some((request, input, window.focused(cx)));
                 }
             }
         }
-        if mode == "activity" {
+        if matches!(mode.as_str(), "exec" | "activity") {
             live.broker.grant_profile(&id, Duration::from_secs(15 * 60));
+        }
+        if mode == "activity" {
             live.popover = true;
         }
         if matches!(mode.as_str(), "conflict" | "activity") {
@@ -1540,7 +1547,10 @@ mod tests {
         assert!(cx.debug_bounds("mcp-approval").is_some());
         cx.update(|window, _| assert!(focus.is_focused(window)));
         click("Siguiente", cx);
-        workspace.read_with(cx, |this, _| assert_eq!(this.mcp_live.selected, 1));
+        let second_id = broker.state().pending()[1].id;
+        workspace.read_with(cx, |this, _| {
+            assert_eq!(this.mcp_live.selected, Some(second_id))
+        });
         click("mcp-session", cx);
         assert!(matches!(second.try_recv(), Ok(Answer::Session)));
         click("mcp-once", cx);
@@ -1550,6 +1560,7 @@ mod tests {
         let mut saved = preview(&broker, "/tmp/save");
         workspace.update(cx, |_, cx| cx.notify());
         cx.run_until_parked();
+        click("Siguiente", cx);
         click("mcp-save", cx);
         assert!(matches!(saved.try_recv(), Ok(Answer::Save)));
         click("mcp-deny", cx);
@@ -1568,6 +1579,93 @@ mod tests {
             matches!(denied.try_recv(), Ok(Answer::Deny(reason)) if reason == "Espera a mantenimiento")
         );
         assert!(broker.state().pending().is_empty());
+    }
+
+    #[gpui::test]
+    fn escape_closes_denial_reason_and_restores_focus(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        server(dir.path());
+        cx.update(crate::workspace::bind_keys);
+        cx.update(crate::components::text_input::bind_keys);
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::new(None, None, None, window, cx));
+        cx.run_until_parked();
+        let broker = workspace.read_with(cx, |this, _| this.mcp_live.broker.clone());
+        broker.configure(fixture_config());
+        let mut request = preview(&broker, "/tmp/deny");
+        workspace.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        let button = cx.debug_bounds("mcp-deny").unwrap().center();
+        cx.simulate_mouse_down(button, gpui::MouseButton::Left, Modifiers::none());
+        let previous = cx.update(|window, cx| window.focused(cx).unwrap());
+        cx.simulate_mouse_up(button, gpui::MouseButton::Left, Modifiers::none());
+        let input_focus = workspace.read_with(cx, |this, cx| {
+            this.mcp_live
+                .denial
+                .as_ref()
+                .unwrap()
+                .1
+                .read(cx)
+                .focus_handle(cx)
+        });
+        cx.update(|window, _| assert!(input_focus.is_focused(window)));
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        workspace.read_with(cx, |this, _| assert!(this.mcp_live.denial.is_none()));
+        cx.update(|window, _| assert!(previous.is_focused(window)));
+        assert!(cx.debug_bounds("mcp-deny-send").is_none());
+        assert!(cx.debug_bounds("mcp-approval").is_some());
+        assert!(matches!(
+            request.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[gpui::test]
+    fn approval_keeps_selected_request_and_draft_when_an_earlier_request_leaves(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        server(dir.path());
+        vela_mcp::config::save(dir.path(), &fixture_config()).unwrap();
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::new(None, None, None, window, cx));
+        cx.run_until_parked();
+        let broker = workspace.read_with(cx, |this, _| {
+            assert!(this.mcp_live.worker.is_some());
+            this.mcp_live.broker.clone()
+        });
+        let _first = preview(&broker, "/tmp/a");
+        let mut second = preview(&broker, "/tmp/b");
+        let mut third = preview(&broker, "/tmp/c");
+        let queue = broker.state().pending();
+        cx.run_until_parked();
+        click("Siguiente", cx);
+        click("mcp-deny", cx);
+        let input = workspace.update_in(cx, |this, window, cx| {
+            let (id, input, _) = this.mcp_live.denial.as_ref().unwrap();
+            assert_eq!(*id, queue[1].id);
+            input.update(cx, |input, cx| input.set_value("Esperar", window, cx));
+            input.clone()
+        });
+
+        broker.answer(queue[0].id, Answer::Deny(String::new()));
+        cx.run_until_parked();
+        workspace.read_with(cx, |this, cx| {
+            assert_eq!(this.mcp_live.selected, Some(queue[1].id));
+            assert_eq!(input.read(cx).value(), "Esperar");
+        });
+        click("mcp-deny-send", cx);
+        assert!(matches!(second.try_recv(), Ok(Answer::Deny(reason)) if reason == "Esperar"));
+        assert!(matches!(
+            third.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        workspace.read_with(cx, |this, _| {
+            assert_eq!(this.mcp_live.selected, Some(queue[2].id));
+            assert!(this.mcp_live.denial.is_none());
+        });
     }
 
     #[gpui::test]

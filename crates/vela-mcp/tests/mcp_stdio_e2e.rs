@@ -28,6 +28,7 @@ use vela_mcp::{
     ApprovalMode, Executor, HeadlessAskBehavior, McpBackend, McpConfig, ROLLBACK_DIR_NAME,
     RollbackStore, ServerAvailability, ServerIdentity, ServerMcpPolicy, ToolOutcome, cli,
     config::{self, ExecMode},
+    executor::ApprovalPreview,
     headless::{RuntimeOptions, VelaLauncher},
     ipc::IpcServer,
     protocol::{CallContext, Progress, ToolHandler, ToolResponse},
@@ -467,8 +468,57 @@ async fn headless_uses_isolated_ssh_fails_closed_and_cleans_up_at_eof() {
     assert_eq!(result["isError"], true);
     assert_eq!(content(&result)["matched_rule"], "headless_fail_closed");
     assert_eq!(fs::read_to_string(&notes).unwrap(), "original\n");
+
+    let mut config = env.config.clone();
+    let policy = config.servers.get_mut("srv").unwrap();
+    policy.exec_mode = Some(ExecMode::AskAll);
+    let cwd = notes.parent().unwrap().to_str().unwrap();
+    for preview in [
+        ApprovalPreview {
+            operation: "fs_write".into(),
+            paths: vec![notes.to_str().unwrap().into()],
+            ..Default::default()
+        },
+        ApprovalPreview {
+            operation: "exec_command".into(),
+            paths: vec![cwd.into()],
+            command: Some(vela_core::exec_remote_command("pwd", Some(cwd))),
+            ..Default::default()
+        },
+    ] {
+        policy.scoped_rules.push(preview.scoped_rule().unwrap());
+    }
+    config::save(&env.config_dir, &config).unwrap();
     let result = stdio
-        .call(4, "fs_read", json!({"server_id": "pw", "path": notes}))
+        .call(
+            4,
+            "fs_write",
+            json!({"server_id": "srv", "path": notes, "content": "new"}),
+        )
+        .await;
+    assert_eq!(result["isError"], false, "{result}");
+    assert_eq!(fs::read_to_string(&notes).unwrap(), "new");
+    let result = stdio
+        .call(
+            5,
+            "exec_command",
+            json!({"server_id": "srv", "command": "pwd", "cwd": cwd}),
+        )
+        .await;
+    assert_eq!(result["isError"], false, "{result}");
+    assert_eq!(content(&result)["stdout"].as_str().unwrap().trim(), cwd);
+    let result = stdio
+        .call(
+            6,
+            "exec_command",
+            json!({"server_id": "srv", "command": "pwd"}),
+        )
+        .await;
+    assert_eq!(result["isError"], true);
+    assert_eq!(content(&result)["matched_rule"], "headless_fail_closed");
+
+    let result = stdio
+        .call(7, "fs_read", json!({"server_id": "pw", "path": notes}))
         .await;
     assert_eq!(result["isError"], true);
     assert!(

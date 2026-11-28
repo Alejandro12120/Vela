@@ -228,7 +228,7 @@ impl<B: McpBackend> Executor<B> {
         mode: ApprovalMode,
         preview: ApprovalPreview,
     ) -> Result<Option<ToolOutcome<T>>, ExecutorError> {
-        let decision = self.policy().evaluate(action, ctx);
+        let decision = self.policy().evaluate_with_preview(action, ctx, &preview);
         self.gate_decision(decision, mode, preview)
     }
 
@@ -263,13 +263,7 @@ impl<B: McpBackend> Executor<B> {
                 || approved.unified_diff != preview.unified_diff
                 || approved.warnings != preview.warnings
         });
-        if changed
-            || (decision.outcome == Decision::Ask
-                && mode == ApprovalMode::Normal
-                && !self
-                    .policy()
-                    .allows_approved_scope(&preview, self.backend.now()))
-        {
+        if changed || (decision.outcome == Decision::Ask && mode == ApprovalMode::Normal) {
             return Ok(Some(ToolOutcome::NeedsApproval {
                 decision,
                 preview: Box::new(preview),
@@ -699,7 +693,12 @@ impl<B: McpBackend> Executor<B> {
             size: Some(input.content.len() as u64),
         };
         let ctx = self.context(&input.server_id, dirty);
-        let decision = self.policy().evaluate(&action, &ctx);
+        let mut preview = Self::preview(
+            "fs_write",
+            &input.server_id,
+            std::slice::from_ref(&canonical),
+        );
+        let decision = self.policy().evaluate_with_preview(&action, &ctx, &preview);
         if decision.outcome == Decision::Deny {
             return Ok(ToolOutcome::Denied(decision));
         }
@@ -727,18 +726,11 @@ impl<B: McpBackend> Executor<B> {
             }
             None => patch::unified_diff("", &input.content),
         };
-        let mut preview = Self::preview(
-            "fs_write",
-            &input.server_id,
-            std::slice::from_ref(&canonical),
-        );
         preview.agent_reason = input.reason.clone();
         preview.unified_diff = Some(diff.clone());
         let dirty = self.dirty_for(&input.server_id, std::slice::from_ref(&canonical));
-        let decision = self
-            .policy()
-            .evaluate(&action, &self.context(&input.server_id, dirty));
-        if let Some(outcome) = self.gate_decision(decision, mode, preview)? {
+        let ctx = self.context(&input.server_id, dirty);
+        if let Some(outcome) = self.gate(&action, &ctx, mode, preview)? {
             return Ok(outcome);
         }
         let backup_id = match previous {
@@ -789,12 +781,13 @@ impl<B: McpBackend> Executor<B> {
             canonical_path: Some(canonical.clone()),
             size: None,
         };
-        let first = self.policy().evaluate(&action, &ctx);
-        let edits_conflict = first
-            .warnings
-            .iter()
-            .any(|warning| matches!(warning, PolicyWarning::EditsConflict));
-        if first.outcome == Decision::Deny || edits_conflict {
+        let mut preview = Self::preview(
+            "fs_patch",
+            &input.server_id,
+            std::slice::from_ref(&canonical),
+        );
+        let first = self.policy().evaluate_with_preview(&action, &ctx, &preview);
+        if first.outcome == Decision::Deny {
             return Ok(ToolOutcome::Denied(first));
         }
         // Tope propio de parcheo: no se usa `rollback.max_file_bytes`, porque
@@ -817,17 +810,10 @@ impl<B: McpBackend> Executor<B> {
             size: Some(result.updated.len() as u64),
         };
         let dirty = self.dirty_for(&input.server_id, std::slice::from_ref(&canonical));
-        let decision = self
-            .policy()
-            .evaluate(&action, &self.context(&input.server_id, dirty));
-        let mut preview = Self::preview(
-            "fs_patch",
-            &input.server_id,
-            std::slice::from_ref(&canonical),
-        );
+        let ctx = self.context(&input.server_id, dirty);
         preview.agent_reason = input.reason.clone();
         preview.unified_diff = Some(result.unified_diff.clone());
-        if let Some(outcome) = self.gate_decision(decision, mode, preview)? {
+        if let Some(outcome) = self.gate(&action, &ctx, mode, preview)? {
             return Ok(outcome);
         }
         let backup_id = self
@@ -1105,7 +1091,7 @@ impl<B: McpBackend> Executor<B> {
             server_id: input.server_id.clone(),
             command: input.command.clone(),
         };
-        let mut decision = self.policy().evaluate(&action, &ctx);
+        let mut decision = self.policy().evaluate_base(&action, &ctx);
         // Un comando denegado nunca puede rebajarse a `Ask` por un cwd fuera
         // del ámbito, ni siquiera con aprobación previa.
         if decision.outcome == Decision::Deny {
@@ -1122,7 +1108,7 @@ impl<B: McpBackend> Executor<B> {
             None => input.command.clone(),
         });
         let policy = self.policy();
-        decision = policy.evaluate(&action, &ctx);
+        decision = policy.evaluate_base(&action, &ctx);
         if decision.outcome == Decision::Deny {
             return Ok(ToolOutcome::Denied(decision));
         }
@@ -1133,7 +1119,7 @@ impl<B: McpBackend> Executor<B> {
                 path: cwd.clone(),
                 canonical_path: Some(canonical.clone()),
             };
-            let path_decision = policy.evaluate(&path_action, &ctx);
+            let path_decision = policy.evaluate_base(&path_action, &ctx);
             preview.paths.push(canonical.clone());
             if path_decision.outcome == Decision::Deny {
                 return Ok(ToolOutcome::Denied(path_decision));
@@ -1148,14 +1134,13 @@ impl<B: McpBackend> Executor<B> {
                     matched_rule: path_decision.matched_rule.clone(),
                     reason: format!("Directorio de trabajo: {}", path_decision.reason),
                     warnings,
-                    requires_launch_vela: decision.requires_launch_vela
-                        || path_decision.requires_launch_vela,
+                    requires_launch_vela: false,
                 };
             } else {
                 decision.warnings.extend(path_decision.warnings);
-                decision.requires_launch_vela |= path_decision.requires_launch_vela;
             }
         }
+        let decision = policy.finish_evaluation(decision, &ctx, Some(&preview));
         if let Some(outcome) = self.gate_decision(decision, mode, preview)? {
             return Ok(outcome);
         }

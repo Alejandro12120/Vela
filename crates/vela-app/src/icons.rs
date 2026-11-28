@@ -40,6 +40,7 @@ pub enum IconName {
     ExternalLink,
     Undo,
     Warning,
+    Clock,
     Error,
     Key,
     Lock,
@@ -97,6 +98,7 @@ impl IconName {
         IconName::ExternalLink,
         IconName::Undo,
         IconName::Warning,
+        IconName::Clock,
         IconName::Error,
         IconName::Key,
         IconName::Lock,
@@ -152,6 +154,7 @@ impl IconName {
             Self::ExternalLink => "icons/external-link.svg",
             Self::Undo => "icons/undo-2.svg",
             Self::Warning => "icons/triangle-alert.svg",
+            Self::Clock => "icons/clock.svg",
             Self::Error => "icons/circle-alert.svg",
             Self::Key => "icons/key-round.svg",
             Self::Lock => "icons/lock.svg",
@@ -174,6 +177,10 @@ impl IconName {
 }
 
 const ICONS: &[(&str, &[u8])] = &[
+    (
+        "icons/clock.svg",
+        include_bytes!("../assets/icons/clock.svg"),
+    ),
     (
         "icons/shield.svg",
         include_bytes!("../assets/icons/shield.svg"),

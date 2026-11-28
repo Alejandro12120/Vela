@@ -956,7 +956,7 @@ chrome = 60
         assert_eq!(settings.terminal_copy_on_select, Some(false));
         assert_eq!(
             settings.terminal_colors,
-            crate::settings::TerminalColorSource::Kitty
+            crate::settings::TerminalColorSource::Imported
         );
         assert_eq!(settings.appearance.scheme, crate::appearance::Scheme::Dark);
         assert_eq!(settings.appearance.light_theme, "lavanda");

@@ -18,7 +18,7 @@ pub enum Action {
     NewFile,
     Rename,
     Run,
-    RunInKitty,
+    RunInExternalTerminal,
     Delete,
     Copy,
     Refresh,
@@ -36,7 +36,7 @@ pub enum RunState {
 struct Item {
     action: Action,
     icon: IconName,
-    label: &'static str,
+    label: gpui::SharedString,
     shortcut: &'static str,
     enabled: bool,
     danger: bool,
@@ -46,14 +46,14 @@ impl Item {
     fn new(
         action: Action,
         icon: IconName,
-        label: &'static str,
+        label: impl Into<gpui::SharedString>,
         shortcut: &'static str,
         enabled: bool,
     ) -> Self {
         Self {
             action,
             icon,
-            label,
+            label: label.into(),
             shortcut,
             enabled,
             danger: false,
@@ -76,7 +76,13 @@ pub struct Menu {
 }
 
 impl Menu {
-    fn actions(&self, selected: usize, run: RunState, copy_icon: IconName) -> Vec<Item> {
+    fn actions(
+        &self,
+        selected: usize,
+        run: RunState,
+        copy_icon: IconName,
+        external: Option<&crate::external_terminal::Installed>,
+    ) -> Vec<Item> {
         let mut actions = vec![
             Item::new(
                 Action::NewFolder,
@@ -111,9 +117,9 @@ impl Menu {
         }
         if run == RunState::Remote {
             actions.push(Item::new(
-                Action::RunInKitty,
+                Action::RunInExternalTerminal,
                 IconName::ExternalLink,
-                "Run in Kitty",
+                crate::external_terminal::action_label("Run", external),
                 "",
                 true,
             ));
@@ -153,7 +159,12 @@ impl Menu {
         theme: Theme,
         cx: &Context<Pane>,
     ) -> AnyElement {
-        let actions = self.actions(selected, run, copy_icon);
+        let actions = self.actions(
+            selected,
+            run,
+            copy_icon,
+            crate::external_terminal::ExternalTerminals::selected(cx),
+        );
         let last = actions.len() - 1;
         let panel = div()
             .id("file-menu")

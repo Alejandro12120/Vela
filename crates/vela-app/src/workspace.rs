@@ -39,12 +39,13 @@ use crate::{
         text_input::TextInput,
     },
     dev,
+    external_terminal::{self, ExternalTerminals},
     file_workspace::{Panes, SessionView, session_switch},
     form::{Errors, Field, Form},
     icons::{IconName, icon},
     pane::{PaneMemory, icon_button},
     sidebar::{self, RowAction, RowMenu, ServerReorder},
-    terminal::{copy_on_select, font_size, kitty::Kitty},
+    terminal::{copy_on_select, font_size},
     theme::Theme,
 };
 
@@ -72,7 +73,7 @@ pub fn bind_keys(cx: &mut gpui::App) {
         KeyBinding::new(
             "escape",
             crate::components::dropdown::Dismiss,
-            Some("EditorMenu"),
+            Some("SettingsMenu"),
         ),
         crate::keybindings::binding(cx, "secondary-s", ToggleSidebar, Some("Workspace")),
         KeyBinding::new("tab", modal::Next, Some("RowMenu")),
@@ -155,7 +156,7 @@ pub struct Workspace {
     key_requests: u64,
     edits: Edits,
     settings: Settings,
-    kitty_settings: Option<Kitty>,
+    terminal_config_generation: u64,
     settings_error: Option<String>,
     settings_page: settings_view::SettingsPage,
     window_background: Option<WindowBackgroundAppearance>,
@@ -310,20 +311,26 @@ impl Workspace {
             let agent = vela_core::bitwarden_agent_sockets().into_iter().next();
             let index = dev::edit_root().and_then(|root| Index::load(dir.clone(), root));
             let loaded = (!preloaded).then(|| Loaded::read(&dir));
-            Ok::<_, std::io::Error>((dir, servers, agent, index, loaded))
+            let terminals = external_terminal::detect();
+            Ok::<_, std::io::Error>((dir, servers, agent, index, loaded, terminals))
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = load.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.loading = false;
                 match result {
-                    Ok((dir, servers, agent, index, loaded)) => {
+                    Ok((dir, servers, agent, index, loaded, terminals)) => {
                         this.load_edits(index, window, cx);
                         if let Some(loaded) = loaded {
                             (this.settings, this.settings_error) = loaded.install(cx);
                             font_size::apply_saved(this.settings.terminal_font_size, cx);
                             copy_on_select::set(this.settings.terminal_copy_on_select, cx);
                         }
+                        cx.set_global(ExternalTerminals {
+                            installed: terminals,
+                            preferred: this.settings.external_terminal.clone(),
+                        });
+                        this.read_terminal_config(window, cx);
                         this.selected = servers.first().map(|server| server.id.clone());
                         this.dir = Some(dir);
                         this.servers = servers;
@@ -498,7 +505,7 @@ impl Workspace {
             key_requests: 0,
             edits: Edits::default(),
             settings,
-            kitty_settings: None,
+            terminal_config_generation: 0,
             settings_error,
             settings_page: settings_view::SettingsPage::new(cx),
             window_background: None,
@@ -2025,14 +2032,17 @@ impl Workspace {
                     }),
                     (panes.view == SessionView::Terminal).then(|| {
                         icon_text_button(
-                            "open-kitty",
+                            "open-external-terminal",
                             IconName::ExternalLink,
-                            "Open in Kitty",
+                            external_terminal::action_label(
+                                "Open",
+                                ExternalTerminals::selected(cx),
+                            ),
                             Variant::Secondary,
                             None,
                             theme,
                             cx.listener(|this, _, window, cx| {
-                                this.open_terminal_in_kitty(window, cx)
+                                this.open_in_external_terminal(window, cx)
                             }),
                         )
                         .h(px(26.))

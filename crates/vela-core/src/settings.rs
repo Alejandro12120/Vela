@@ -14,21 +14,39 @@ use crate::appearance::AppearanceSettings;
 pub enum TerminalColorSource {
     #[default]
     Theme,
+    #[serde(alias = "kitty")]
+    Imported,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TerminalConfigSource {
     Kitty,
+    Ghostty,
+    Alacritty,
+    Foot,
+    Wezterm,
+    None,
+    #[default]
+    #[serde(other)]
+    Auto,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct Settings {
     pub editor: Option<PathBuf>,
+    /// Installed terminal preset ID. When absent, prefer Kitty.
+    pub external_terminal: Option<String>,
+    pub terminal_config: TerminalConfigSource,
     /// Global SSH agent socket. When absent, the first detected Bitwarden
     /// socket is used, if any.
     pub agent_socket: Option<PathBuf>,
-    /// Terminal font size in points. When absent, `kitty.conf` decides.
+    /// Terminal font size in points. When absent, use the imported configuration.
     pub terminal_font_size: Option<f32>,
-    /// Whether selecting terminal text copies it. When absent, `kitty.conf` decides.
+    /// Whether selecting terminal text copies it. When absent, use the imported configuration.
     pub terminal_copy_on_select: Option<bool>,
-    /// Terminal palette source. Kitty falls back to the theme without a configuration file.
+    /// Terminal palette source. Falls back to the theme without a configuration file.
     pub terminal_colors: TerminalColorSource,
     #[serde(default)]
     pub include_prereleases: bool,
@@ -61,6 +79,16 @@ impl Settings {
 
         let default = Self::default();
         fill(&mut self.editor, legacy.editor, default.editor);
+        fill(
+            &mut self.external_terminal,
+            legacy.external_terminal,
+            default.external_terminal,
+        );
+        fill(
+            &mut self.terminal_config,
+            legacy.terminal_config,
+            default.terminal_config,
+        );
         fill(
             &mut self.agent_socket,
             legacy.agent_socket,
@@ -181,6 +209,41 @@ mod tests {
     }
 
     #[test]
+    fn external_terminal_and_config_round_trip_with_legacy_color_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.toml");
+        let defaults = Settings::load(dir.path()).unwrap();
+        assert_eq!(defaults.external_terminal, None);
+        assert_eq!(defaults.terminal_config, TerminalConfigSource::Auto);
+        fs::write(
+            &file,
+            "external_terminal = 'removed'\nterminal_config = 'unknown'\nterminal_colors = 'kitty'",
+        )
+        .unwrap();
+        let mut settings = Settings::load(dir.path()).unwrap();
+        assert_eq!(settings.external_terminal.as_deref(), Some("removed"));
+        assert_eq!(settings.terminal_config, TerminalConfigSource::Auto);
+        assert_eq!(settings.terminal_colors, TerminalColorSource::Imported);
+        settings.external_terminal = Some("ghostty".into());
+        settings.terminal_config = TerminalConfigSource::Alacritty;
+        settings.save(dir.path()).unwrap();
+        assert_eq!(Settings::load(dir.path()).unwrap(), settings);
+        let text = fs::read_to_string(&file).unwrap();
+        assert!(text.contains("external_terminal = \"ghostty\""));
+        assert!(text.contains("terminal_config = \"alacritty\""));
+        assert!(text.contains("terminal_colors = \"imported\""));
+        settings.external_terminal = None;
+        settings.terminal_config = TerminalConfigSource::None;
+        settings.save(dir.path()).unwrap();
+        assert_eq!(Settings::load(dir.path()).unwrap(), settings);
+        assert!(
+            !fs::read_to_string(file)
+                .unwrap()
+                .contains("external_terminal")
+        );
+    }
+
+    #[test]
     fn terminal_font_size_round_trips_and_defaults_to_none() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path();
@@ -199,7 +262,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         for (terminal_colors, value) in [
             (TerminalColorSource::Theme, "theme"),
-            (TerminalColorSource::Kitty, "kitty"),
+            (TerminalColorSource::Imported, "imported"),
         ] {
             Settings {
                 terminal_colors,

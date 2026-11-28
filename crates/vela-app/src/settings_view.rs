@@ -244,7 +244,7 @@ impl Workspace {
     }
 
     pub(crate) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.dir.is_none() || self.dialog.is_some() || self.quitting {
+        if self.dir.is_none() || self.dialog.is_some() || self.mcp.is_open() || self.quitting {
             return;
         }
         if self.settings_open() {
@@ -265,6 +265,8 @@ impl Workspace {
         self.settings_page.scroll = ScrollHandle::new();
         self.probe_agent(window, cx);
         self.scan_edit_copies(window, cx);
+        self.scan_mcp_harnesses(window, cx);
+        self.load_mcp(window, cx);
         if cx.reduce_motion() {
             self.settings_page.opening = false;
         } else {
@@ -484,6 +486,16 @@ impl Workspace {
         }
     }
 
+    pub(super) fn align_mcp_preview(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_open() && crate::dev::settings_page().as_deref() == Some("mcp") {
+            let scroll = self.settings_page.scroll.clone();
+            cx.on_next_frame(window, move |_, window, _| {
+                scroll.scroll_to_top_of_item(6);
+                window.refresh();
+            });
+        }
+    }
+
     pub(super) fn dev_open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let request = crate::dev::settings_page();
         if request.is_some() || crate::dev::edit_view().as_deref() == Some("settings") {
@@ -507,6 +519,7 @@ impl Workspace {
             Some("editor") | Some("editor-low") => Some(3),
             Some("terminal" | "terminal-menu" | "terminal-config-menu") => Some(4),
             Some("updates") => Some(5),
+            Some("mcp") => Some(6),
             _ => None,
         };
         if let Some(section) = section {
@@ -1048,7 +1061,8 @@ impl Workspace {
                             .child(self.agent_section(theme, cx))
                             .child(self.editor_section(theme, cx))
                             .child(self.terminal_section(theme, window, cx))
-                            .child(self.updates_section(theme, cx).pb_6()),
+                            .child(self.updates_section(theme, cx))
+                            .child(self.mcp_section(theme, cx).pb_6()),
                     ),
             )
             .children(self.render_theme_editor(theme, window, cx))
@@ -2357,7 +2371,7 @@ fn arrow_target(index: usize, columns: usize, len: usize, key: &str) -> Option<u
     (next < len).then_some(next)
 }
 
-fn section(label: &'static str) -> Div {
+pub(super) fn section(label: &'static str) -> Div {
     div()
         .flex_none()
         .w_full()
@@ -2375,7 +2389,7 @@ fn section(label: &'static str) -> Div {
         )
 }
 
-fn settings_group(theme: Theme, rows: Vec<Div>) -> Div {
+pub(super) fn settings_group(theme: Theme, rows: Vec<Div>) -> Div {
     let mut group = div()
         .flex()
         .flex_col()
@@ -2394,7 +2408,7 @@ fn settings_group(theme: Theme, rows: Vec<Div>) -> Div {
     group
 }
 
-fn settings_row(
+pub(super) fn settings_row(
     label: &'static str,
     description: Option<SharedString>,
     control: impl gpui::IntoElement,
@@ -2424,7 +2438,7 @@ fn settings_row(
         .child(div().flex_none().child(control.into_any_element()))
 }
 
-fn subtitle(label: &'static str) -> Div {
+pub(super) fn subtitle(label: &'static str) -> Div {
     div()
         .text_size(px(13.))
         .font_weight(FontWeight::MEDIUM)
@@ -2869,6 +2883,39 @@ mod tests {
         assert_eq!(settings.light_theme, "oceano");
         assert_eq!(settings.dark_theme, "ambar");
         assert_eq!(settings.scheme, Scheme::Dark);
+    }
+
+    #[gpui::test]
+    fn mcp_settings_disclosures_toggle_independently(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        crate::dev::TEST_CONFIG.with(|config| *config.borrow_mut() = Some(dir.path().to_owned()));
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::new(None, None, None, window, cx));
+        cx.run_until_parked();
+        workspace.update_in(cx, |this, window, cx| this.open_settings(window, cx));
+        cx.run_until_parked();
+        workspace.update_in(cx, |this, window, _| {
+            this.settings_page.scroll.scroll_to_top_of_item(6);
+            window.refresh();
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("mcp-sim-input").is_none());
+        assert!(cx.debug_bounds("mcp-socket").is_none());
+        let test_rule = cx.debug_bounds("mcp-test-rule").unwrap();
+        cx.simulate_click(test_rule.center(), gpui::Modifiers::none());
+        assert!(cx.debug_bounds("mcp-sim-input").is_some());
+        assert!(cx.debug_bounds("mcp-socket").is_none());
+        press(cx, "space");
+        assert!(cx.debug_bounds("mcp-sim-input").is_none());
+
+        let advanced = cx.debug_bounds("mcp-advanced-storage").unwrap();
+        cx.simulate_click(advanced.center(), gpui::Modifiers::none());
+        assert!(cx.debug_bounds("mcp-socket").is_some());
+        assert!(cx.debug_bounds("mcp-sim-input").is_none());
+        press(cx, "enter");
+        assert!(cx.debug_bounds("mcp-socket").is_none());
     }
 
     #[gpui::test]

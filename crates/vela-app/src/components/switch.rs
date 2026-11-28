@@ -9,6 +9,16 @@ pub fn switch(
     theme: Theme,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
+    switch_with_state(id, label, checked, theme, Some(on_click))
+}
+
+pub fn switch_with_state(
+    id: impl Into<ElementId>,
+    label: &'static str,
+    checked: bool,
+    theme: Theme,
+    on_click: Option<impl Fn(&ClickEvent, &mut Window, &mut App) + 'static>,
+) -> Stateful<Div> {
     div()
         .id(id)
         .role(gpui::Role::Switch)
@@ -18,8 +28,6 @@ pub fn switch(
         } else {
             gpui::Toggled::False
         })
-        .tab_index(0)
-        .cursor_pointer()
         .flex()
         .items_center()
         .justify_between()
@@ -42,7 +50,12 @@ pub fn switch(
                 .rounded_full()
                 .bg(thumb_color(checked, theme)),
         )
-        .on_click(on_click)
+        .when(on_click.is_none(), |track| {
+            track.opacity(0.55).aria_description("Unavailable")
+        })
+        .when_some(on_click, |track, on_click| {
+            track.tab_index(0).cursor_pointer().on_click(on_click)
+        })
 }
 
 fn thumb_color(checked: bool, theme: Theme) -> Rgba {

@@ -10,6 +10,8 @@ mod file_workspace;
 mod form;
 mod icons;
 mod keybindings;
+mod mcp_broker;
+mod mcp_model;
 mod move_paths;
 mod pane;
 #[cfg(target_os = "macos")]
@@ -44,6 +46,9 @@ fn main() {
         .is_some_and(|arg| arg == "askpass")
     {
         std::process::exit(vela_core::askpass::client_main());
+    }
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == "mcp") {
+        std::process::exit(vela_mcp::cli::main(std::env::args_os().skip(2)));
     }
 
     let started_at = Instant::now();

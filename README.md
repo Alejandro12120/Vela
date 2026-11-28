@@ -86,6 +86,14 @@ Vela carries forward indexed remote-edit copies, including pending changes and c
 
 Vela does not support Windows. On Linux, outbound file drag and file clipboard support for Dolphin are still pending.
 
+## MCP
+
+Open **Settings → Agentes (MCP)** to register Vela with supported clients and manage permission profiles. Use **Acceso MCP…** in a server’s context menu or details header to choose its availability and rules. The global switch and new servers start disabled. While MCP is enabled, the **Agentes** control shows live activity, pending approvals, timed access and available rollbacks. Settings changes apply to the open app.
+
+Run `vela mcp` as a stdio MCP server for Vela's SSH and SFTP tools. The CLI also supports `vela mcp status`, `vela mcp install --all` and `vela mcp uninstall --harness <id>`. In builds with the `dev` feature, use temporary directories for `VELA_CONFIG_DIR` and `VELA_MCP_HARNESS_HOME`, then set `VELA_DEV_SETTINGS=mcp` to scroll to the section or `VELA_DEV_MCP_VIEW=harnesses|server:<display name>` to open a dialog at startup. `VELA_DEV_MCP_DIFF=<harness-id>` previews a pending dry-run diff in the installer. See the [MCP setup and integration guide](docs/MCP.md).
+
+Hover over the operation in an MCP approval to read the full paths or command. To preview a transfer with long paths in a `dev` build, save a sample server in the temporary configuration and launch with `VELA_DEV_MCP_LIVE=upload`.
+
 ## Keyboard shortcuts
 
 <details>

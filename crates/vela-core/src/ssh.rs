@@ -19,7 +19,46 @@ use crate::{Error, askpass};
 
 pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
-const EXIT_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const EXIT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Límite duro de duración de un comando no interactivo.
+pub const MAX_EXEC_TIMEOUT: Duration = Duration::from_secs(300);
+/// Tope de salida capturada por stream cuando no se indica otro valor.
+pub const DEFAULT_MAX_EXEC_OUTPUT: usize = 64 * 1024;
+
+/// Opciones de un comando remoto no interactivo ejecutado sobre el `ControlPath`
+/// de una sesión activa.
+#[derive(Clone, Debug)]
+pub struct ExecOptions {
+    /// Directorio de trabajo remoto. Se envuelve con [`shell_quote`] antes de
+    /// anteponerlo al comando, nunca se concatena sin escapar.
+    pub cwd: Option<String>,
+    pub timeout: Duration,
+    /// Tope duro de bytes acumulados por stream (stdout y stderr por separado).
+    pub max_output_bytes: usize,
+}
+
+impl Default for ExecOptions {
+    fn default() -> Self {
+        Self {
+            cwd: None,
+            timeout: Duration::from_secs(30),
+            max_output_bytes: DEFAULT_MAX_EXEC_OUTPUT,
+        }
+    }
+}
+
+/// Resultado de un comando remoto no interactivo.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct ExecOutput {
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+    pub timed_out: bool,
+    pub duration: Duration,
+}
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -129,6 +168,35 @@ impl ConnectionSpec {
             &[remote_command],
         )
     }
+
+    /// Arguments for a non-interactive command on the same master connection.
+    /// Agent forwarding and all forwardings are disabled, no TTY is allocated
+    /// and batch mode guarantees that `ssh` never prompts for credentials.
+    pub fn exec_command(&self, control_dir: &Path, remote_command: &str) -> Vec<OsString> {
+        self.argv(
+            control_dir,
+            &[
+                "-o",
+                "ControlMaster=no",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ForwardAgent=no",
+                "-o",
+                "ClearAllForwardings=yes",
+                "-T",
+            ],
+            &[remote_command],
+        )
+    }
+}
+
+/// Compone el comando remoto, anteponiendo un `cd` escapado cuando hay `cwd`.
+pub fn exec_remote_command(command: &str, cwd: Option<&str>) -> String {
+    match cwd {
+        Some(directory) => format!("cd {} && {command}", shell_quote(directory)),
+        None => command.to_owned(),
+    }
 }
 
 /// Wrap `value` in single quotes for a POSIX shell, writing each `'` as `'\''`.
@@ -192,7 +260,7 @@ pub(crate) fn control_dir() -> io::Result<PathBuf> {
     Ok(path)
 }
 
-fn validate_control_dir(path: &Path, uid: u32) -> io::Result<()> {
+fn validate_control_dir(path: &Path, uid: u32) -> io::Result<PathBuf> {
     let meta = fs::symlink_metadata(path)?;
     if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o7777 != 0o700 {
         return Err(io::Error::new(
@@ -203,15 +271,37 @@ fn validate_control_dir(path: &Path, uid: u32) -> io::Result<()> {
             ),
         ));
     }
-    check_control_path(&path.canonicalize()?)
+    let path = path.canonicalize()?;
+    check_control_path(&path)?;
+    Ok(path)
+}
+
+pub(crate) fn isolated_control_dir(path: &Path) -> io::Result<PathBuf> {
+    // SAFETY: geteuid has no preconditions.
+    let path = validate_control_dir(path, unsafe { libc::geteuid() })?;
+    if path
+        .as_os_str()
+        .as_encoded_bytes()
+        .iter()
+        .any(|byte| matches!(byte, b'%' | b'$'))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "SSH control directory contains OpenSSH expansion characters",
+        ));
+    }
+    Ok(path)
 }
 
 fn check_control_path(dir: &Path) -> io::Result<()> {
-    // OpenSSH expands %C to a 40-character SHA-1 digest.
-    if dir.join("0".repeat(40)).as_os_str().len() > 100 {
+    // macOS sun_path holds 104 bytes including the NUL. OpenSSH expands %C
+    // to 40 characters and binds a temporary socket with a 17-byte suffix.
+    const MAX_SOCKET_BYTES: usize = 103;
+    const CONTROL_BASENAME_AND_SUFFIX_BYTES: usize = 1 + 40 + 17;
+    if dir.as_os_str().len() + CONTROL_BASENAME_AND_SUFFIX_BYTES > MAX_SOCKET_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "SSH ControlPath exceeds 100 bytes",
+            "SSH ControlPath is too long for the temporary Unix socket",
         ));
     }
     Ok(())
@@ -256,6 +346,22 @@ pub(crate) fn command(
         .env_remove("SSH_ASKPASS_PROMPT")
         .kill_on_drop(true);
     askpass.configure(&mut cmd);
+    cmd
+}
+
+/// `ssh` process for a non-interactive command reusing an existing master.
+/// The local agent is removed from the environment too: with `ForwardAgent=no`
+/// the remote must never receive `SSH_AUTH_SOCK`.
+pub(crate) fn exec_process(spec: &ConnectionSpec, control_dir: &Path, remote: &str) -> Command {
+    let mut cmd = Command::new("/usr/bin/ssh");
+    cmd.args(spec.exec_command(control_dir, remote))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("LC_ALL", "C")
+        .env_remove("SSH_ASKPASS_PROMPT")
+        .env_remove("SSH_AUTH_SOCK")
+        .kill_on_drop(true);
     cmd
 }
 
@@ -812,7 +918,39 @@ mod tests {
 
     #[test]
     fn control_path_maximum_counts_bytes() {
-        assert!(check_control_path(Path::new(&format!("/{}", "ñ".repeat(29)))).is_ok());
-        assert!(check_control_path(Path::new(&format!("/{}a", "ñ".repeat(29)))).is_err());
+        assert!(check_control_path(Path::new(&format!("/{}", "ñ".repeat(22)))).is_ok());
+        assert!(check_control_path(Path::new(&format!("/{}a", "ñ".repeat(22)))).is_err());
+    }
+
+    #[test]
+    fn exec_command_reuses_master_without_agent_or_tty() {
+        let spec = ConnectionSpec::new("host".into(), 2200, "user".into(), Auth::Password);
+        let args = spec.exec_command(Path::new("/tmp/vela-1"), "pwd");
+        for flag in [
+            "-o",
+            "ControlMaster=no",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ForwardAgent=no",
+            "-o",
+            "ClearAllForwardings=yes",
+            "-T",
+            "-o",
+            "ControlPath=/tmp/vela-1/%C",
+        ] {
+            assert!(args.iter().any(|arg| arg == flag), "missing {flag}");
+        }
+        assert_eq!(args.last().unwrap(), "pwd");
+        assert!(!args.iter().any(|arg| arg == "-t"));
+    }
+
+    #[test]
+    fn exec_command_quotes_the_working_directory() {
+        assert_eq!(exec_remote_command("ls", None), "ls");
+        assert_eq!(
+            exec_remote_command("ls", Some("/srv/it's ñ")),
+            "cd '/srv/it'\\''s ñ' && ls"
+        );
     }
 }

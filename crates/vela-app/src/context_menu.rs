@@ -245,20 +245,17 @@ impl Menu {
 
 pub struct Tooltip(pub gpui::SharedString);
 
+impl Tooltip {
+    pub fn wrapped(text: gpui::SharedString) -> impl gpui::Render {
+        WrappedTooltip(text)
+    }
+}
+
 impl gpui::Render for Tooltip {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
         let theme = Theme::current(window, cx);
         let (title, details) = self.0.split_once('\n').unwrap_or((&self.0, ""));
-        div()
-            .debug_selector(|| "tooltip".into())
-            .px_2()
-            .py_1()
-            .rounded(px(6.))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.raised)
-            .text_color(theme.text)
-            .text_size(px(12.))
+        tooltip_surface(theme)
             .child(title.to_owned())
             .when(!details.is_empty(), |tooltip| {
                 tooltip.child(
@@ -271,4 +268,38 @@ impl gpui::Render for Tooltip {
                 )
             })
     }
+}
+
+struct WrappedTooltip(gpui::SharedString);
+
+impl gpui::Render for WrappedTooltip {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        let viewport = window.viewport_size();
+        tooltip_surface(Theme::current(window, cx))
+            .id("wrapped-tooltip")
+            .role(Role::Tooltip)
+            .max_w((viewport.width - px(16.)).min(px(480.)))
+            .max_h(viewport.height * 0.5)
+            .overflow_y_scroll()
+            .font_family(crate::theme::monospace())
+            .whitespace_normal()
+            .children(self.0.lines().enumerate().map(|(index, line)| {
+                div()
+                    .when(index > 0, |line| line.mt_1())
+                    .child(line.to_owned())
+            }))
+    }
+}
+
+fn tooltip_surface(theme: Theme) -> gpui::Div {
+    div()
+        .debug_selector(|| "tooltip".into())
+        .px_2()
+        .py_1()
+        .rounded(px(6.))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.raised)
+        .text_color(theme.text)
+        .text_size(px(12.))
 }

@@ -9,11 +9,12 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use openssh_sftp_client::Sftp;
 use tokio::{
+    io::{AsyncRead, AsyncReadExt},
     runtime::Builder,
     sync::oneshot,
     task::{AbortHandle, JoinSet},
@@ -21,7 +22,7 @@ use tokio::{
 };
 
 use crate::{
-    ConnectionSpec, Entry, Error,
+    ConnectionSpec, Entry, Error, ExecOptions, ExecOutput,
     agent::{self, AgentError, AgentKey},
     askpass, sftp, ssh, transfer,
 };
@@ -126,7 +127,7 @@ impl Client {
             let result = tokio::select! {
                 _ = stopping.recv() => Err(Error::Cancelled),
                 result = async {
-                    let askpass = askpass::Server::start(app, requests, spec.destination())?;
+                    let askpass = askpass::Server::start(app, requests, spec.destination(), None)?;
                     ssh::identities(&spec, &askpass).await
                 } => result,
             };
@@ -163,7 +164,8 @@ impl Client {
         spec: ConnectionSpec,
         readiness_timeout: Duration,
     ) -> Result<Session, Error> {
-        self.connect_inner(spec, readiness_timeout, None).await
+        self.connect_inner(spec, readiness_timeout, None, None)
+            .await
     }
 
     pub async fn connect_with_cancel(
@@ -182,7 +184,19 @@ impl Client {
         readiness_timeout: Duration,
         cancel: ConnectCancel,
     ) -> Result<Session, Error> {
-        self.connect_inner(spec, readiness_timeout, Some(cancel))
+        self.connect_inner(spec, readiness_timeout, Some(cancel), None)
+            .await
+    }
+
+    /// Connect using an existing private 0700 directory owned by the caller.
+    /// Reserve it for this connection and keep it until the client shuts down.
+    pub async fn connect_in_control_dir(
+        &self,
+        spec: ConnectionSpec,
+        directory: PathBuf,
+        cancel: ConnectCancel,
+    ) -> Result<Session, Error> {
+        self.connect_inner(spec, ssh::CONNECT_TIMEOUT, Some(cancel), Some(directory))
             .await
     }
 
@@ -191,6 +205,7 @@ impl Client {
         spec: ConnectionSpec,
         readiness_timeout: Duration,
         cancel: Option<ConnectCancel>,
+        directory: Option<PathBuf>,
     ) -> Result<Session, Error> {
         let (send, reply) = oneshot::channel();
         let app = self.app.clone();
@@ -202,7 +217,16 @@ impl Client {
             // until the end of the job, so only `stopping` can interrupt it.
             let (keep_open, unused_cancel) = async_channel::bounded(1);
             let cancel = cancel.unwrap_or(unused_cancel);
-            let result = connect(spec, app, requests, readiness_timeout, &stopping, &cancel).await;
+            let result = connect(
+                spec,
+                app,
+                requests,
+                readiness_timeout,
+                &stopping,
+                &cancel,
+                directory,
+            )
+            .await;
             drop(keep_open);
             match result {
                 Ok((master, channel, process)) => {
@@ -237,6 +261,74 @@ fn closed<T>(_: T) -> Error {
     .into()
 }
 
+/// Acumula como máximo `max` bytes y drena el resto hasta EOF para no bloquear
+/// al proceso hijo ni consumir memoria sin límite.
+async fn read_capped<R: AsyncRead + Unpin>(reader: &mut R, max: usize) -> (Vec<u8>, bool) {
+    let mut bytes = Vec::new();
+    let mut chunk = vec![0; 8192];
+    let mut truncated = false;
+    loop {
+        match reader.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(len) => {
+                if bytes.len().saturating_add(len) > max {
+                    let room = max.saturating_sub(bytes.len());
+                    bytes.extend_from_slice(&chunk[..room]);
+                    truncated = true;
+                } else {
+                    bytes.extend_from_slice(&chunk[..len]);
+                }
+            }
+            Err(_) => {
+                truncated = true;
+                break;
+            }
+        }
+    }
+    (bytes, truncated)
+}
+
+/// Evita filtrar al agente la ruta interna del directorio de control.
+fn sanitize_stderr(stderr: &str, control_dir: &std::path::Path) -> String {
+    let directory = control_dir.to_string_lossy();
+    if directory.is_empty() {
+        return stderr.to_owned();
+    }
+    stderr.replace(directory.as_ref(), "<control-dir>")
+}
+
+#[cfg(test)]
+mod exec_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn capped_reader_drains_without_accumulating() {
+        let bytes = vec![7u8; 30_000];
+        let mut reader = &bytes[..];
+        let (kept, truncated) = read_capped(&mut reader, 100).await;
+        assert_eq!(kept.len(), 100);
+        assert!(truncated);
+    }
+
+    #[tokio::test]
+    async fn capped_reader_reports_clean_eof() {
+        let bytes = b"hola";
+        let mut reader = &bytes[..];
+        let (kept, truncated) = read_capped(&mut reader, 100).await;
+        assert_eq!(kept, b"hola");
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn stderr_hides_the_control_directory() {
+        let text = "Control socket connect(/tmp/vela-1000/abc): failure";
+        assert_eq!(
+            sanitize_stderr(text, std::path::Path::new("/tmp/vela-1000")),
+            "Control socket connect(<control-dir>/abc): failure"
+        );
+    }
+}
+
 fn worker(jobs: async_channel::Receiver<Job>, stopping: async_channel::Receiver<()>) {
     let Ok(runtime) = Builder::new_current_thread().enable_all().build() else {
         return;
@@ -268,11 +360,12 @@ async fn connect(
     readiness_timeout: Duration,
     stopping: &async_channel::Receiver<()>,
     cancel: &async_channel::Receiver<()>,
+    directory: Option<PathBuf>,
 ) -> Result<(ssh::Master, Sftp, ssh::Process), Error> {
     if cancel.is_closed() {
         return Err(Error::Cancelled);
     }
-    let server = askpass::Server::start(app, requests, spec.destination())?;
+    let server = askpass::Server::start(app, requests, spec.destination(), directory)?;
     let mut master =
         ssh::Master::connect(spec, server, readiness_timeout, stopping, cancel).await?;
     let channel = tokio::select! {
@@ -382,6 +475,11 @@ pub struct Session {
 }
 
 impl Session {
+    /// Whether the worker has stopped accepting commands for this session.
+    pub fn is_closed(&self) -> bool {
+        self.commands.is_closed()
+    }
+
     pub async fn closed(&self) {
         self.commands.closed().await;
     }
@@ -416,6 +514,61 @@ impl Session {
             .await
     }
 
+    /// Ejecuta un comando no interactivo reutilizando el `ControlPath` de la
+    /// sesión. Nunca abre un TTY, nunca reenvía el agente y nunca espera una
+    /// contraseña. La salida se acota por stream y un vencimiento mata al hijo.
+    pub async fn exec(&self, command: String, options: ExecOptions) -> Result<ExecOutput, Error> {
+        let spec = self.terminal.0.clone();
+        let control_dir = self.terminal.1.clone();
+        // El proceso, las lecturas concurrentes y la espera viven dentro de
+        // `run`, en el worker Tokio `vela-network`. Así se puede llamar desde
+        // el hilo de GPUI (sin reactor) y una desconexión aborta la operación:
+        // `kill_on_drop(true)` mata al `ssh` hijo y el `oneshot` devuelve
+        // `BrokenPipe` al llamante.
+        self.run(move |_sftp| async move {
+            let budget = options.timeout.min(ssh::MAX_EXEC_TIMEOUT);
+            let limit = options.max_output_bytes;
+            let remote = ssh::exec_remote_command(&command, options.cwd.as_deref());
+            let mut child = ssh::exec_process(&spec, &control_dir, &remote).spawn()?;
+            let mut stdout = child.stdout.take().expect("piped stdout");
+            let mut stderr = child.stderr.take().expect("piped stderr");
+            let out = tokio::spawn(async move { read_capped(&mut stdout, limit).await });
+            let err = tokio::spawn(async move { read_capped(&mut stderr, limit).await });
+
+            let started = Instant::now();
+            let (exit_code, timed_out) = match timeout(budget, child.wait()).await {
+                Ok(status) => (status?.code(), false),
+                Err(_) => {
+                    let _ = child.start_kill();
+                    let _ = timeout(ssh::EXIT_TIMEOUT, child.wait()).await;
+                    (None, true)
+                }
+            };
+            let duration = started.elapsed();
+            let (stdout, stdout_truncated) = timeout(ssh::EXIT_TIMEOUT, out)
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or_default();
+            let (stderr, stderr_truncated) = timeout(ssh::EXIT_TIMEOUT, err)
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or_default();
+
+            Ok(ExecOutput {
+                exit_code,
+                stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                stderr: sanitize_stderr(&String::from_utf8_lossy(&stderr), &control_dir),
+                stdout_truncated,
+                stderr_truncated,
+                timed_out,
+                duration,
+            })
+        })
+        .await
+    }
+
     pub async fn list_dir(&self, path: PathBuf) -> Result<Vec<Entry>, Error> {
         self.run(move |sftp| async move { sftp::list_dir(&sftp, &path).await })
             .await
@@ -426,8 +579,30 @@ impl Session {
             .await
     }
 
+    /// Cambia los permisos de una ruta remota (bits `0o7777`).
+    pub async fn chmod(&self, path: PathBuf, mode: u32) -> Result<(), Error> {
+        self.run(move |sftp| async move { sftp::chmod(&sftp, &path, mode).await })
+            .await
+    }
+
+    /// Lee como máximo `max_bytes`; el booleano indica que el archivo sigue.
+    pub async fn read_bytes_limited(
+        &self,
+        path: PathBuf,
+        max_bytes: u64,
+    ) -> Result<(Vec<u8>, bool), Error> {
+        self.run(move |sftp| async move { sftp::read_bytes_limited(&sftp, &path, max_bytes).await })
+            .await
+    }
+
+    /// Escribe bytes y cierra el handle SFTP antes de devolver el control.
+    pub async fn write_bytes(&self, path: PathBuf, bytes: Vec<u8>) -> Result<(), Error> {
+        self.run(move |sftp| async move { sftp::write_bytes(&sftp, &path, bytes).await })
+            .await
+    }
+
     pub async fn mkdir(&self, path: PathBuf) -> Result<(), Error> {
-        self.run(move |sftp| async move { Ok(sftp.fs().create_dir(path).await?) })
+        self.run(move |sftp| async move { sftp::mkdir(&sftp, &path).await })
             .await
     }
 
@@ -445,8 +620,22 @@ impl Session {
         .await
     }
 
+    /// SFTP v3 RENAME rejects an occupied destination.
+    pub async fn rename_exclusive(&self, from: PathBuf, to: PathBuf) -> Result<(), Error> {
+        let connection = self.terminal.clone();
+        self.run(move |sftp| async move {
+            sftp::rename_exclusive(&sftp, &connection.0, &connection.1, from, to).await
+        })
+        .await
+    }
+
     pub async fn remove_file(&self, path: PathBuf) -> Result<(), Error> {
         self.run(move |sftp| async move { Ok(sftp.fs().remove_file(path).await?) })
+            .await
+    }
+
+    pub async fn remove_dir(&self, path: PathBuf) -> Result<(), Error> {
+        self.run(move |sftp| async move { sftp::remove_dir(&sftp, &path).await })
             .await
     }
 

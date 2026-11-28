@@ -67,6 +67,14 @@ pub fn theme_ids() -> Option<(String, String)> {
     })
 }
 
+pub fn mcp_view() -> Option<String> {
+    value("VELA_DEV_MCP_VIEW")
+}
+
+pub fn mcp_diff() -> Option<String> {
+    value("VELA_DEV_MCP_DIFF")
+}
+
 pub fn settings_page() -> Option<String> {
     value("VELA_DEV_SETTINGS")
 }

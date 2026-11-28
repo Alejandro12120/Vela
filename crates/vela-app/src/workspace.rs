@@ -1,5 +1,7 @@
 #[path = "edits_view.rs"]
 mod edits_view;
+#[path = "mcp_view.rs"]
+mod mcp_view;
 #[path = "settings_view.rs"]
 mod settings_view;
 #[path = "terminal_workspace.rs"]
@@ -63,6 +65,7 @@ actions!(
 );
 
 pub fn bind_keys(cx: &mut gpui::App) {
+    mcp_view::bind(cx);
     cx.bind_keys([
         crate::keybindings::binding(cx, "secondary-1", ShowFiles, Some("Workspace")),
         crate::keybindings::binding(cx, "secondary-2", ShowTerminal, Some("Workspace")),
@@ -159,6 +162,8 @@ pub struct Workspace {
     terminal_config_generation: u64,
     settings_error: Option<String>,
     settings_page: settings_view::SettingsPage,
+    mcp: mcp_view::McpView,
+    mcp_live: mcp_view::Live,
     window_background: Option<WindowBackgroundAppearance>,
     loading: bool,
     sidebar_visible: Rc<Cell<bool>>,
@@ -439,6 +444,8 @@ impl Workspace {
                             None => {}
                         }
                         this.dev_open_settings(window, cx);
+                        this.load_mcp(window, cx);
+                        this.dev_open_mcp(window, cx);
                         if dev::prompt().as_deref() == Some("password-rejected") {
                             #[cfg(feature = "dev")]
                             {
@@ -508,6 +515,8 @@ impl Workspace {
             terminal_config_generation: 0,
             settings_error,
             settings_page: settings_view::SettingsPage::new(cx),
+            mcp: mcp_view::McpView::new(cx),
+            mcp_live: mcp_view::Live::default(),
             window_background: None,
             loading: true,
             sidebar_visible: Rc::new(Cell::new(!dev::hide_sidebar())),
@@ -534,6 +543,7 @@ impl Workspace {
 
     fn shutdown(&mut self, cx: &mut Context<Self>) -> impl Future<Output = ()> + use<> {
         let executor = cx.background_executor().clone();
+        let mcp = self.mcp_live.stop();
         self.dialog = None;
         self.prompt_task.take();
         self.prompts.clear();
@@ -550,6 +560,7 @@ impl Workspace {
         let client = self.client.clone();
         let index = self.edits.shutdown();
         async move {
+            mcp.await;
             for cleanup in terminal_cleanup {
                 cleanup.await;
             }
@@ -848,6 +859,7 @@ impl Workspace {
             }
             RowAction::Pin => self.toggle_pin(&id, cx),
             RowAction::Edit => self.open_form(Some(&id), window, cx),
+            RowAction::Mcp => self.open_mcp_server(id, window, cx),
             RowAction::Duplicate => self.open_duplicate_form(&id, window, cx),
             RowAction::Delete => self.open_delete(id, window, cx),
         }
@@ -1537,7 +1549,7 @@ impl Workspace {
     }
 
     fn show_next_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.dialog.is_some() {
+        if self.dialog.is_some() || self.mcp.is_open() {
             return;
         }
         while let Some(request) = self.prompts.pop_front() {
@@ -2052,7 +2064,13 @@ impl Workspace {
                     self.sidebar_visible.get() && window.viewport_size().width < px(862.),
                 ),
                 theme,
-                self.edit_header(&id, theme, cx),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .children(self.mcp_agent_header(theme, cx))
+                    .child(self.mcp_header(&id, theme, cx))
+                    .child(self.edit_header(&id, theme, cx)),
                 self.edit_status(&id, theme, cx),
                 cx.listener(move |this, _, window, cx| this.disconnect(&id, window, cx)),
             );
@@ -2092,17 +2110,20 @@ impl Workspace {
             } else {
                 "Connect to a server to get started"
             };
-            return panel.when(self.config_error.is_none(), |panel| {
-                panel.child(
-                    div()
-                        .size_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_color(theme.secondary_text)
-                        .child(hint),
-                )
-            });
+            return panel.children(self.mcp_agent_header(theme, cx)).when(
+                self.config_error.is_none(),
+                |panel| {
+                    panel.child(
+                        div()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(theme.secondary_text)
+                            .child(hint),
+                    )
+                },
+            );
         };
         let id = &server.id;
         let header = div()
@@ -2131,7 +2152,16 @@ impl Workspace {
                             .child(format!("{}@{}", server.user, server.host)),
                     ),
             )
-            .child(div().flex_none().child(self.edit_header(id, theme, cx)));
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .children(self.mcp_agent_header(theme, cx))
+                    .child(self.mcp_header(id, theme, cx))
+                    .child(self.edit_header(id, theme, cx)),
+            );
         let mut details = div()
             .mt_2()
             .flex()
@@ -2682,6 +2712,9 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|this, _: &DismissMenu, window, cx| {
+                if this.close_mcp_denial(window, cx) {
+                    return;
+                }
                 if this.reorder.is_some() {
                     cx.stop_active_drag(window);
                     this.finish_reorder(false, cx);
@@ -2689,6 +2722,9 @@ impl Render for Workspace {
                 }
                 if this.settings_page.is_open() && this.dialog.is_none() && this.row_menu.is_none()
                 {
+                    if this.close_mcp_settings_popup(window, cx) {
+                        return;
+                    }
                     if !this.dismiss_theme_editor(window, cx) {
                         this.close_settings(window, cx);
                     }
@@ -2696,18 +2732,27 @@ impl Render for Workspace {
                 }
                 this.dismiss_row_menu(window, cx);
                 this.edits.popover = false;
+                this.dismiss_mcp_activity(cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &modal::Confirm, window, cx| {
+                if this.mcp.is_open() {
+                    this.confirm_mcp(window, cx);
+                    return;
+                }
                 if !matches!(this.dialog, Some(Dialog::Update))
                     || this.confirm_focus.is_focused(window)
                 {
                     this.confirm_dialog(window, cx);
                 }
             }))
-            .on_action(
-                cx.listener(|this, _: &modal::Cancel, window, cx| this.cancel_dialog(window, cx)),
-            )
+            .on_action(cx.listener(|this, _: &modal::Cancel, window, cx| {
+                if this.mcp.is_open() {
+                    this.cancel_mcp(window, cx);
+                } else {
+                    this.cancel_dialog(window, cx);
+                }
+            }))
             // Each zone paints its own backdrop in glass mode. A full-window
             // base here would increase the effective opacity under every zone.
             .when(!theme.glassy, |root| root.bg(theme.background))
@@ -2737,7 +2782,9 @@ impl Render for Workspace {
                             .top(titlebar_height)
                             .children(transfer_overlay)
                             .children(self.edit_popover(theme, titlebar_height, window, cx))
+                            .children(self.mcp_live_overlay(theme, window, cx))
                             .children(self.render_dialog(theme, cx))
+                            .children(self.render_mcp_dialog(theme, cx))
                             .children(self.row_menu.as_ref().and_then(|menu| {
                                 let server =
                                     self.servers.iter().find(|server| server.id == menu.id)?;
@@ -3449,7 +3496,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn the_five_item_row_menu_keeps_its_tab_wrap(cx: &mut TestAppContext) {
+    async fn the_server_menu_keeps_its_tab_wrap_and_opens_mcp(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let (workspace, cx) = open(dir.path(), cx);
         cx.update(|_, cx| bind_keys(cx));
@@ -3462,7 +3509,7 @@ mod tests {
             (menu.first.clone(), menu.last.clone())
         });
         cx.update(|window, cx| assert_eq!(window.focused(cx), Some(first.clone())));
-        for _ in 0..4 {
+        for _ in 0..5 {
             cx.simulate_keystrokes("tab");
             cx.run_until_parked();
         }
@@ -3470,6 +3517,16 @@ mod tests {
         cx.simulate_keystrokes("tab");
         cx.run_until_parked();
         cx.update(|window, cx| assert_eq!(window.focused(cx), Some(first)));
+        for _ in 0..3 {
+            cx.simulate_keystrokes("tab");
+            cx.run_until_parked();
+        }
+        cx.simulate_keystrokes("enter");
+        cx.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse("enter").unwrap(),
+        });
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, _| assert!(workspace.mcp.is_open()));
     }
 
     #[gpui::test]

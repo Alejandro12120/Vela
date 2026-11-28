@@ -105,7 +105,11 @@ impl Workspace {
         let (ui, mut requests) = mpsc::unbounded_channel();
         let broker = self.mcp_live.broker.clone();
         let mut updates = broker.subscribe();
-        let worker = match Worker::start(broker.clone(), path, ui) {
+        #[cfg(not(test))]
+        let worker = Worker::start(broker.clone(), path, ui);
+        #[cfg(test)]
+        let worker = Worker::start_for_gpui_test(broker.clone(), path, ui);
+        let worker = match worker {
             Ok(worker) => worker,
             Err(error) => {
                 self.mcp.config_error = Some(format!("Couldn’t start the MCP server. {error}"));
@@ -1448,6 +1452,11 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        fs::Permissions,
+        os::unix::fs::{FileTypeExt, PermissionsExt},
+    };
+
     use gpui::{Modifiers, TestAppContext, VisualTestContext};
     use vela_core::{Auth, config::Server};
 
@@ -1469,6 +1478,16 @@ mod tests {
             }],
         )
         .unwrap();
+    }
+
+    fn live_server() -> tempfile::TempDir {
+        // IPC requires a private parent and a short Unix socket path.
+        let dir = tempfile::Builder::new()
+            .permissions(Permissions::from_mode(0o700))
+            .tempdir_in("/tmp")
+            .unwrap();
+        server(dir.path());
+        dir
     }
 
     fn fixture_config() -> McpConfig {
@@ -1498,8 +1517,7 @@ mod tests {
 
     #[gpui::test]
     fn saves_from_settings_publish_the_new_config_to_the_running_broker(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        server(dir.path());
+        let dir = live_server();
         let (workspace, cx) =
             cx.add_window_view(|window, cx| Workspace::new(None, None, None, window, cx));
         cx.run_until_parked();
@@ -1507,6 +1525,14 @@ mod tests {
             this.save_mcp(window, cx, false, |config| *config = fixture_config())
         });
         cx.run_until_parked();
+        assert!(
+            dir.path()
+                .join("mcp.sock")
+                .metadata()
+                .expect("MCP listener socket")
+                .file_type()
+                .is_socket()
+        );
         workspace.read_with(cx, |this, _| {
             assert!(this.mcp_live.worker.is_some());
             assert_eq!(this.mcp_live.broker.state().config, fixture_config());
@@ -1665,8 +1691,7 @@ mod tests {
     fn approval_keeps_selected_request_and_draft_when_an_earlier_request_leaves(
         cx: &mut TestAppContext,
     ) {
-        let dir = tempfile::tempdir().unwrap();
-        server(dir.path());
+        let dir = live_server();
         vela_mcp::config::save(dir.path(), &fixture_config()).unwrap();
         let (workspace, cx) =
             cx.add_window_view(|window, cx| Workspace::new(None, None, None, window, cx));

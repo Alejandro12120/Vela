@@ -7,7 +7,10 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::{
+    runtime::{Builder, Handle, Runtime},
+    sync::{mpsc, oneshot, watch},
+};
 use vela_core::{Session, edit::Edit};
 use vela_mcp::{
     EvalContext, JitGrants, McpAction, McpConfig, PolicyEngine, ServerIdentity,
@@ -374,7 +377,9 @@ impl Broker {
 pub(super) struct Worker {
     enabled: watch::Sender<bool>,
     done: oneshot::Receiver<()>,
-    pub runtime: tokio::runtime::Handle,
+    pub runtime: Handle,
+    #[cfg(test)]
+    test_runtime: Option<Runtime>,
 }
 
 impl Worker {
@@ -383,12 +388,8 @@ impl Worker {
         path: PathBuf,
         ui: mpsc::UnboundedSender<UiRequest>,
     ) -> io::Result<Self> {
-        let (enabled, control) = watch::channel(true);
-        let (finished, done) = oneshot::channel();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        let handle = runtime.handle().clone();
+        let runtime = Builder::new_current_thread().enable_all().build()?;
+        let (worker, control, finished) = Self::with_runtime(&runtime);
         std::thread::Builder::new()
             .name("vela-mcp".into())
             .spawn(move || {
@@ -396,11 +397,44 @@ impl Worker {
                 drop(runtime);
                 let _ = finished.send(());
             })?;
-        Ok(Self {
-            enabled,
-            done,
-            runtime: handle,
-        })
+        Ok(worker)
+    }
+
+    #[cfg(test)]
+    pub fn start_for_gpui_test(
+        broker: Broker,
+        path: PathBuf,
+        ui: mpsc::UnboundedSender<UiRequest>,
+    ) -> io::Result<Self> {
+        let runtime = Builder::new_current_thread().enable_all().build()?;
+        let (mut worker, control, finished) = Self::with_runtime(&runtime);
+        let (started, ready) = oneshot::channel();
+        runtime.spawn(async move {
+            let _ = started.send(());
+            Handler { broker, ui }.listen(path, control).await;
+            let _ = finished.send(());
+        });
+        // GPUI's test scheduler requires wakeups on the test thread. Drive the
+        // listener through its first poll before returning to GPUI.
+        runtime.block_on(ready).expect("MCP listener task started");
+        worker.test_runtime = Some(runtime);
+        Ok(worker)
+    }
+
+    fn with_runtime(runtime: &Runtime) -> (Self, watch::Receiver<bool>, oneshot::Sender<()>) {
+        let (enabled, control) = watch::channel(true);
+        let (finished, done) = oneshot::channel();
+        (
+            Self {
+                enabled,
+                done,
+                runtime: runtime.handle().clone(),
+                #[cfg(test)]
+                test_runtime: None,
+            },
+            control,
+            finished,
+        )
     }
 
     pub fn set_enabled(&self, enabled: bool) {
@@ -413,6 +447,11 @@ impl Worker {
 
     pub async fn shutdown(self) {
         drop(self.enabled);
+        #[cfg(test)]
+        if let Some(runtime) = self.test_runtime {
+            let _ = runtime.block_on(self.done);
+            return;
+        }
         let _ = self.done.await;
     }
 }

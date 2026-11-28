@@ -63,7 +63,8 @@ fn generate(key: &Path) {
 pub struct Fixture {
     server: Option<Process>,
     _agent: Process,
-    temp: TempDir,
+    _temp: TempDir,
+    root: PathBuf,
     pub port: u16,
     pub user: String,
 }
@@ -75,7 +76,8 @@ impl Fixture {
             .permissions(fs::Permissions::from_mode(0o700))
             .tempdir_in("/tmp")
             .unwrap();
-        let base = temp.path();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        let base = &root;
         generate(&base.join("host"));
         generate(&base.join("client"));
         File::create(base.join("config")).unwrap();
@@ -115,7 +117,8 @@ impl Fixture {
         let mut fixture = Self {
             server: None,
             _agent: agent,
-            temp,
+            _temp: temp,
+            root,
             port,
             user,
         };
@@ -124,16 +127,16 @@ impl Fixture {
     }
 
     pub fn path(&self, name: &str) -> PathBuf {
-        self.temp.path().join(name)
+        self.root.join(name)
     }
 
     pub fn root(&self) -> PathBuf {
-        self.temp.path().to_path_buf()
+        self.root.clone()
     }
 
     fn start_server(&mut self) {
         let cfg = self.path("sshd_config");
-        let base = self.temp.path().display();
+        let base = self.root.display();
         fs::write(
             &cfg,
             format!(

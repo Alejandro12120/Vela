@@ -1,10 +1,10 @@
-//! Modelos de Ajustes MCP independientes de GPUI.
+//! Modelos de la interfaz MCP independientes de GPUI.
 
-use std::{collections::HashMap, io, path::Path};
+use std::{borrow::Cow, collections::HashMap, io, path::Path};
 
 use vela_core::Auth;
 use vela_mcp::{
-    Decision, McpConfig, PermissionProfile, ServerAvailability, ServerMcpPolicy,
+    ApprovalPreview, Decision, McpConfig, PermissionProfile, ServerAvailability, ServerMcpPolicy,
     config::{ExecMode, RollbackConfig},
     harness::{
         self, ChangeReport, EntryState, HarnessEnv, HarnessError, HarnessId, HarnessStatus,
@@ -12,6 +12,91 @@ use vela_mcp::{
     },
     presets,
 };
+
+pub struct ApprovalText<'a> {
+    pub summary: String,
+    pub tooltip_lines: Vec<String>,
+    pub command: Option<Cow<'a, str>>,
+}
+
+pub fn approval_text<'a>(preview: &'a ApprovalPreview, server: &str) -> ApprovalText<'a> {
+    let operation = escape_approval_value(&preview.operation);
+    let paths: Vec<_> = preview
+        .paths
+        .iter()
+        .map(|path| escape_approval_value(path))
+        .collect();
+    let command = preview.command.as_deref().map(escape_approval_value);
+    let mut tooltip_lines = match (paths.as_slice(), &command) {
+        ([from, to], None) => match preview.operation.as_str() {
+            "transfer_upload" => vec![
+                format!("From (local): {from}"),
+                format!("To ({}): {to}", escape_approval_value(server)),
+            ],
+            "transfer_download" => vec![
+                format!("From ({}): {from}", escape_approval_value(server)),
+                format!("To (local): {to}"),
+            ],
+            _ => vec![format!("From: {from}"), format!("To: {to}")],
+        },
+        (_, Some(command)) => std::iter::once(command.to_string())
+            .chain(
+                paths
+                    .iter()
+                    .map(|path| format!("Working directory: {path}")),
+            )
+            .collect(),
+        _ => paths.iter().map(ToString::to_string).collect(),
+    };
+    let parameter = preview.scope_parameter.as_deref().map(|parameter| {
+        escape_approval_value(if parameter == "recursivo" {
+            "Recursive"
+        } else {
+            parameter
+        })
+    });
+    if let Some(parameter) = &parameter {
+        tooltip_lines.push(parameter.to_string());
+    }
+    let summary = std::iter::once(operation.as_ref())
+        .chain(paths.iter().map(AsRef::as_ref))
+        .chain(command.as_deref())
+        .chain(parameter.as_deref())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let summary = match summary.char_indices().nth(240) {
+        Some((end, _)) => format!("{}…", &summary[..end]),
+        None => summary,
+    };
+    ApprovalText {
+        summary,
+        tooltip_lines,
+        command,
+    }
+}
+
+fn escape_approval_value(value: &str) -> Cow<'_, str> {
+    let needs_escape = |ch: char| {
+        ch.is_control()
+            || matches!(ch,
+                '\\' | '\u{061c}' | '\u{200e}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+            )
+    };
+    if !value.chars().any(needs_escape) {
+        return Cow::Borrowed(value);
+    }
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch == '\\' {
+            escaped.push_str("\\\\");
+        } else if needs_escape(ch) {
+            escaped.extend(ch.escape_unicode());
+        } else {
+            escaped.push(ch);
+        }
+    }
+    Cow::Owned(escaped)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Tone {
@@ -458,6 +543,107 @@ pub fn rollback_limits(
 mod tests {
     use super::*;
     use vela_mcp::{EvalContext, PolicyEngine, path::valid_scope_pattern};
+
+    fn preview(operation: &str, paths: &[&str]) -> ApprovalPreview {
+        ApprovalPreview {
+            operation: operation.into(),
+            paths: paths.iter().map(|path| (*path).into()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn approval_upload_labels_local_source_and_remote_destination() {
+        let request = preview("transfer_upload", &["/home/local/a", "/srv/a"]);
+        let text = approval_text(&request, "HomeAssistant");
+        assert_eq!(text.summary, "transfer_upload · /home/local/a · /srv/a");
+        assert_eq!(
+            text.tooltip_lines,
+            ["From (local): /home/local/a", "To (HomeAssistant): /srv/a"]
+        );
+    }
+
+    #[test]
+    fn approval_download_labels_remote_source_and_local_destination() {
+        let request = preview("transfer_download", &["/srv/a", "/home/local/a"]);
+        let text = approval_text(&request, "HomeAssistant");
+        assert_eq!(text.summary, "transfer_download · /srv/a · /home/local/a");
+        assert_eq!(
+            text.tooltip_lines,
+            ["From (HomeAssistant): /srv/a", "To (local): /home/local/a"]
+        );
+    }
+
+    #[test]
+    fn approval_move_labels_both_paths() {
+        let request = preview("fs_move", &["/srv/old", "/srv/new"]);
+        let text = approval_text(&request, "HomeAssistant");
+        assert_eq!(text.summary, "fs_move · /srv/old · /srv/new");
+        assert_eq!(text.tooltip_lines, ["From: /srv/old", "To: /srv/new"]);
+    }
+
+    #[test]
+    fn approval_with_one_path_displays_that_path() {
+        let request = preview("fs_read", &["/srv/data.toml"]);
+        let text = approval_text(&request, "HomeAssistant");
+        assert_eq!(text.summary, "fs_read · /srv/data.toml");
+        assert_eq!(text.tooltip_lines, ["/srv/data.toml"]);
+    }
+
+    #[test]
+    fn approval_exec_displays_effective_command_and_optional_working_directory() {
+        let command = "cd -- '/srv/config' && cat config.toml";
+        let mut request = preview("exec_command", &["/srv/config"]);
+        request.command = Some(command.into());
+        let text = approval_text(&request, "HomeAssistant");
+        assert_eq!(
+            text.summary,
+            format!("exec_command · /srv/config · {command}")
+        );
+        assert_eq!(
+            text.tooltip_lines,
+            [command, "Working directory: /srv/config"]
+        );
+        request.paths.clear();
+        assert_eq!(
+            approval_text(&request, "HomeAssistant").tooltip_lines,
+            [command]
+        );
+    }
+
+    #[test]
+    fn approval_escapes_bidi_controls_line_breaks_and_literal_backslashes() {
+        let path = "/srv/\u{061c}\u{200e}\u{200f}\u{202a}\u{202b}\u{202c}\u{202d}\u{202e}\u{2066}\u{2067}\u{2068}\u{2069}\n\r\t\u{009b}\u{2028}\u{2029}\\name";
+        let escaped = r"/srv/\u{61c}\u{200e}\u{200f}\u{202a}\u{202b}\u{202c}\u{202d}\u{202e}\u{2066}\u{2067}\u{2068}\u{2069}\u{a}\u{d}\u{9}\u{9b}\u{2028}\u{2029}\\name";
+        let request = preview("fs_write", &[path]);
+        let text = approval_text(&request, "HomeAssistant");
+        assert_eq!(text.summary, format!("fs_write · {escaped}"));
+        assert_eq!(text.tooltip_lines, [escaped]);
+
+        let mut request = preview("exec_command", &[]);
+        request.command = Some("echo ok\n\u{202e}echo second\x1b".into());
+        let escaped = r"echo ok\u{a}\u{202e}echo second\u{1b}";
+        let text = approval_text(&request, "HomeAssistant");
+        assert_eq!(text.summary, format!("exec_command · {escaped}"));
+        assert_eq!(text.tooltip_lines, [escaped]);
+        assert_eq!(text.command.as_deref(), Some(escaped));
+    }
+
+    #[test]
+    fn approval_keeps_long_paths_complete_in_tooltip() {
+        let local = format!("/home/{}first.tar", "archives/".repeat(400));
+        let remote = format!("/srv/{}last.tar", "backups/".repeat(400));
+        let request = preview("transfer_upload", &[&local, &remote]);
+        let text = approval_text(&request, "HomeAssistant");
+        assert!(text.summary.ends_with('…'));
+        assert_eq!(
+            text.tooltip_lines,
+            [
+                format!("From (local): {local}"),
+                format!("To (HomeAssistant): {remote}")
+            ]
+        );
+    }
 
     #[test]
     fn classifies_unified_diff_lines_for_display() {

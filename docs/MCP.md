@@ -123,6 +123,8 @@ El proceso `vela mcp` en marcha relee `mcp.toml` al comienzo de cada llamada de 
 
 ### Aprobaciones
 
+Al pasar el cursor sobre la operación, el panel muestra la ruta o el comando completo. En traslados y transferencias, **From** y **To** identifican el origen y el destino. Las transferencias también indican qué ruta es local y cuál corresponde al servidor. Los caracteres de control y las marcas de dirección aparecen como secuencias visibles, por ejemplo `\u{202e}`. El texto completo también está disponible para lectores de pantalla.
+
 El panel de aprobación aparece en la esquina inferior derecha sin cambiar el foco. Muestra la operación, el destino, el motivo del agente, los avisos, la vista previa y el tiempo restante. Cuando Vela está en segundo plano, el aviso nativo incluye solo el nombre del agente, la operación y el servidor. Los clientes que solicitan progreso reciben actualizaciones mientras esperan. Al cancelar la llamada, desconectarse o vencer el plazo, la aprobación se retira y se registra. El panel conserva la solicitud visible y su borrador aunque se retire otra solicitud de la cola. Si se retira la solicitud visible, el panel pasa a la primera disponible y descarta el borrador.
 
 - **Allow Once** vuelve a evaluar la solicitud y aplica la decisión a esa llamada. Si el destino, el diff, el comando o el riesgo cambian, Vela vuelve a solicitar aprobación.

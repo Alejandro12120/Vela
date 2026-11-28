@@ -16,7 +16,7 @@ use super::*;
 use crate::{
     components::button::{icon_text_button, small_icon_text_button},
     mcp_broker::{Activity, Answer, Approval, Backend, Broker, Reply, Status, UiRequest, Worker},
-    mcp_model::{DiffLine, classify_diff_line},
+    mcp_model::{DiffLine, approval_text, classify_diff_line},
     workspace::Connection,
 };
 
@@ -498,13 +498,8 @@ impl Workspace {
         let count = queue.len();
         let id = item.id;
         let preview = &item.preview;
-        let target = preview
-            .paths
-            .iter()
-            .chain(preview.scope_parameter.iter())
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(" · ");
+        let text = approval_text(preview, &item.server);
+        let full_text: SharedString = text.tooltip_lines.join("\n").into();
         let width = window.viewport_size().width.min(px(500.)) - px(24.);
         let can_grant = (!preview.paths.is_empty() || preview.command.is_some())
             && !preview.operation.starts_with("Connect via SSH");
@@ -558,10 +553,7 @@ impl Workspace {
         } else {
             "Vela backs up the existing file if it’s within the size limit."
         };
-        let code = preview
-            .unified_diff
-            .as_deref()
-            .or(preview.command.as_deref());
+        let code = preview.unified_diff.as_deref().or(text.command.as_deref());
         let header = div()
             .flex()
             .items_center()
@@ -633,16 +625,15 @@ impl Workspace {
             .child(header)
             .child(
                 div()
+                    .id(("mcp-approval-operation", id))
+                    .debug_selector(|| "mcp-approval-operation".into())
                     .font_family(crate::theme::monospace())
                     .text_size(px(12.))
-                    .text_ellipsis()
-                    .overflow_hidden()
-                    .child(format!(
-                        "{}{}{}",
-                        preview.operation,
-                        if target.is_empty() { "" } else { " · " },
-                        short(&target, 240)
-                    )),
+                    .truncate()
+                    .when(!full_text.is_empty(), |row| {
+                        with_approval_tooltip(row, full_text.clone())
+                    })
+                    .child(text.summary),
             )
             .when(!preview.warnings.is_empty(), |panel| {
                 panel.child(div().flex().flex_wrap().gap_1().children(
@@ -673,7 +664,11 @@ impl Workspace {
                 },
             )
             .when_some(code, |panel, code| {
-                panel.child(code_box(id, code, preview.unified_diff.is_some(), theme))
+                let diff = preview.unified_diff.is_some();
+                panel.child(
+                    code_box(id, code, diff, theme)
+                        .when(!diff, |box_| with_approval_tooltip(box_, full_text)),
+                )
             })
             .child(
                 div()
@@ -1151,6 +1146,12 @@ fn danger_button(
         .text_color(theme.danger)
 }
 
+fn with_approval_tooltip(row: Stateful<Div>, full_text: SharedString) -> Stateful<Div> {
+    row.role(gpui::Role::Label)
+        .aria_label(full_text.clone())
+        .hoverable_tooltip(move |_, cx| cx.new(|_| Tooltip::wrapped(full_text.clone())).into())
+}
+
 fn code_box(id: u64, code: &str, diff: bool, theme: Theme) -> Stateful<Div> {
     let content = code
         .lines()
@@ -1321,8 +1322,10 @@ fn notify_approval(item: &Approval) {
 impl Workspace {
     fn dev_mcp_live(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
         let mode = std::env::var("VELA_DEV_MCP_LIVE").unwrap_or_default();
-        if !matches!(mode.as_str(), "patch" | "exec" | "conflict" | "activity")
-            || crate::dev::uses_default_config()
+        if !matches!(
+            mode.as_str(),
+            "patch" | "exec" | "upload" | "conflict" | "activity"
+        ) || crate::dev::uses_default_config()
         {
             return false;
         }
@@ -1355,6 +1358,44 @@ impl Workspace {
         }
         let mut pending = Vec::new();
         let now = SystemTime::now();
+        if mode == "upload" {
+            let paths: Vec<String> = vec![
+                "/home/alejandro/Documents/HomeAssistant/backups/2026-11-28/attachments/9e47c3a2d90e4e42a4639df1047ec8f7/nightly-backup/home-assistant-configuration.tar.gz".into(),
+                "/srv/homeassistant/imports/maintenance/2026-11-28/configuration/archive/awaiting-validation/nightly-backup/home-assistant-configuration.tar.gz".into(),
+            ];
+            let warnings = paths
+                .iter()
+                .zip([
+                    vela_mcp::path::EMPTY_LOCAL_SCOPE_REASON,
+                    vela_mcp::path::EMPTY_REMOTE_SCOPE_REASON,
+                ])
+                .map(|(path, reason)| {
+                    format!(
+                        "{:?}",
+                        vela_mcp::PolicyWarning::OutOfScopePath {
+                            path: path.clone(),
+                            reason: reason.into(),
+                        }
+                    )
+                })
+                .collect();
+            let (_, receive) = live.broker.preview_approval(Approval {
+                id: 0,
+                agent: "Claude Code".into(),
+                server: name.clone(),
+                preview: ApprovalPreview {
+                    operation: "transfer_upload".into(),
+                    server_id: id.clone(),
+                    paths,
+                    agent_reason: Some("Upload the Home Assistant configuration archive.".into()),
+                    warnings,
+                    ..Default::default()
+                },
+                deadline: Instant::now() + Duration::from_secs(180),
+                rollback: false,
+            });
+            pending.push(receive);
+        }
         if matches!(mode.as_str(), "patch" | "exec") {
             let deadline = Instant::now() + Duration::from_secs(180);
             for (agent, preview) in [
@@ -1605,12 +1646,32 @@ mod tests {
         cx.update(|window, cx| focus.focus(window, cx));
         let broker = workspace.read_with(cx, |this, _| this.mcp_live.broker.clone());
         broker.configure(fixture_config());
-        let mut first = preview(&broker, "/tmp/first");
+        let mut first = preview(&broker, &format!("/tmp/{}first", "archive/".repeat(400)));
         let mut second = preview(&broker, "/tmp/second");
         workspace.update(cx, |_, cx| cx.notify());
         cx.run_until_parked();
         assert!(cx.debug_bounds("mcp-approval").is_some());
         cx.update(|window, _| assert!(focus.is_focused(window)));
+        let operation = cx.debug_bounds("mcp-approval-operation").unwrap();
+        cx.simulate_mouse_move(operation.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        let tooltip = cx
+            .debug_bounds("tooltip")
+            .expect("approval tooltip on hover");
+        cx.update(|window, _| {
+            assert!(focus.is_focused(window));
+            assert!(tooltip.size.width <= px(480.));
+            assert_eq!(tooltip.size.height, window.viewport_size().height * 0.5);
+            assert!(tooltip.right() <= window.viewport_size().width);
+            assert!(tooltip.bottom() <= window.viewport_size().height);
+        });
+        cx.simulate_mouse_move(point(px(0.), px(0.)), None, Modifiers::none());
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("tooltip").is_none());
         click("Next", cx);
         let second_id = broker.state().pending()[1].id;
         workspace.read_with(cx, |this, _| {

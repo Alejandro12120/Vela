@@ -455,7 +455,7 @@ impl Pane {
             Action::NewFile => self.new_item(folder, false, window, cx),
             Action::Rename => self.start_selected_rename(window, cx),
             Action::Run => self.run_selected(false, window, cx),
-            Action::RunInKitty => self.run_selected(true, window, cx),
+            Action::RunInExternalTerminal => self.run_selected(true, window, cx),
             Action::Delete => self.delete_selected(cx),
             Action::Copy => self.copy_to_other(window, cx),
             Action::Refresh => self.refresh(window, cx),
@@ -497,7 +497,7 @@ impl Pane {
         }
     }
 
-    fn run_selected(&mut self, kitty: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn run_selected(&mut self, external: bool, window: &mut Window, cx: &mut Context<Self>) {
         if !matches!(self.run_state(), RunState::Enabled | RunState::Remote) {
             return;
         }
@@ -509,41 +509,39 @@ impl Pane {
             .entry()
             .and_then(|entry| entry.mode)
             .is_some_and(|mode| mode & 0o111 != 0);
-        let (failure, launch): (Option<&str>, Box<dyn FnOnce() -> io::Result<()> + Send>) =
-            match &self.source {
-                Source::Local => (None, Box::new(move || dev::open_default(&path))),
-                Source::Remote(session) => {
-                    let (Some(directory), Some(name)) = (
-                        path.parent().and_then(Path::to_str),
-                        path.file_name().and_then(std::ffi::OsStr::to_str),
-                    ) else {
-                        self.report_error(
-                            "The filename can't be passed to the shell as text.".into(),
-                            cx,
-                        );
-                        return;
-                    };
-                    if !kitty {
-                        cx.emit(super::RunRemote {
-                            directory: directory.into(),
-                            name: name.into(),
-                            executable,
-                        });
-                        return;
-                    }
-                    let command = vela_core::run_script_command(directory, name, executable);
-                    let args = session.terminal_command(&command);
-                    (
-                        Some("Couldn't open Kitty"),
-                        Box::new(move || dev::open_kitty_ssh(&args)),
-                    )
+        let executor = cx.background_executor();
+        let task = match &self.source {
+            Source::Local => executor
+                .spawn(async move { dev::open_default(&path).map_err(|error| error.to_string()) }),
+            Source::Remote(session) => {
+                let (Some(directory), Some(name)) = (
+                    path.parent().and_then(Path::to_str),
+                    path.file_name().and_then(std::ffi::OsStr::to_str),
+                ) else {
+                    self.report_error(
+                        "The filename can't be passed to the shell as text.".into(),
+                        cx,
+                    );
+                    return;
+                };
+                if !external {
+                    cx.emit(super::RunRemote {
+                        directory: directory.into(),
+                        name: name.into(),
+                        executable,
+                    });
+                    return;
                 }
-            };
-        let task = cx.background_executor().spawn(async move { launch() });
+                let command = vela_core::run_script_command(directory, name, executable);
+                let args = session.terminal_command(&command);
+                let terminal = crate::external_terminal::ExternalTerminals::selected(cx).cloned();
+                executor
+                    .spawn(async move { crate::external_terminal::launch(terminal, &args).await })
+            }
+        };
         cx.spawn_in(window, async move |pane, cx| {
             if let Err(error) = task.await {
-                let message = failure.map_or_else(|| error.to_string(), str::to_owned);
-                let _ = pane.update_in(cx, |pane, _, cx| pane.report_error(message, cx));
+                let _ = pane.update_in(cx, |pane, _, cx| pane.report_error(error, cx));
             }
         })
         .detach();

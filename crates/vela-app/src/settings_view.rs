@@ -24,7 +24,7 @@ use vela_core::{
         save_user_theme, unused_theme_id,
     },
     path::abbreviate_path,
-    settings::{Settings, TerminalColorSource},
+    settings::{Settings, TerminalColorSource, TerminalConfigSource},
 };
 
 use super::{Context, Dialog, Theme, Variant, Window, Workspace, button, div};
@@ -39,10 +39,12 @@ use crate::{
         text_input::TextInput,
     },
     context_menu::Tooltip,
+    external_terminal::ExternalTerminals,
     icons::{IconName, icon},
     terminal::{
         colors::{effective_source, terminal_palette},
         font_size,
+        imported::{self, ImportedConfig},
     },
 };
 
@@ -101,13 +103,65 @@ pub(crate) fn installed_editors(roots: &[PathBuf]) -> Vec<(&'static str, PathBuf
     found
 }
 
-struct EditorMenu {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Picker {
+    Editor,
+    ExternalTerminal,
+    TerminalConfig,
+}
+
+impl Picker {
+    fn trigger(self, page: &SettingsPage) -> &FocusHandle {
+        &page.picker_triggers[self as usize]
+    }
+
+    fn bounds(self, page: &SettingsPage) -> &Rc<Cell<Option<Bounds<Pixels>>>> {
+        &page.picker_bounds[self as usize]
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Editor => "Editor",
+            Self::ExternalTerminal => "External Terminal",
+            Self::TerminalConfig => "Configuration Source",
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::Editor => "editor-picker",
+            Self::ExternalTerminal => "external-terminal-picker",
+            Self::TerminalConfig => "terminal-config-picker",
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum PickerValue {
+    Editor(Option<PathBuf>),
+    OtherEditor,
+    External(Option<&'static str>),
+    Config(TerminalConfigSource),
+}
+
+struct SettingsMenu {
+    picker: Picker,
     placement: Placement,
+    height: Pixels,
     items: Vec<FocusHandle>,
-    entries: Vec<(&'static str, Option<PathBuf>)>,
+    entries: Vec<(&'static str, PickerValue)>,
+    scroll: ScrollHandle,
     closing: bool,
     restore_focus: bool,
     generation: u64,
+}
+
+impl SettingsMenu {
+    fn focus(&self, index: usize, window: &mut Window, cx: &mut gpui::App) {
+        let separator = usize::from(matches!(self.entries[index].1, PickerValue::OtherEditor));
+        self.scroll.scroll_to_item(index + separator);
+        self.items[index].focus(window, cx);
+    }
 }
 
 pub(super) struct SettingsPage {
@@ -126,11 +180,11 @@ pub(super) struct SettingsPage {
     agent_probe: Option<AgentProbe>,
     agent_editing: bool,
     agent_input: Option<Entity<TextInput>>,
-    editor_trigger: FocusHandle,
-    editor_trigger_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    picker_triggers: [FocusHandle; 3],
+    picker_bounds: [Rc<Cell<Option<Bounds<Pixels>>>>; 3],
     settings_viewport: Rc<Cell<Option<Bounds<Pixels>>>>,
-    editor_menu: Option<EditorMenu>,
-    editor_generation: u64,
+    settings_menu: Option<SettingsMenu>,
+    menu_generation: u64,
     edit_copies: Option<(usize, u64)>,
     pending_settings: Option<Settings>,
 }
@@ -153,11 +207,11 @@ impl SettingsPage {
             agent_probe: None,
             agent_editing: false,
             agent_input: None,
-            editor_trigger: cx.focus_handle().tab_stop(true),
-            editor_trigger_bounds: Rc::new(Cell::new(None)),
+            picker_triggers: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
+            picker_bounds: Default::default(),
             settings_viewport: Rc::new(Cell::new(None)),
-            editor_menu: None,
-            editor_generation: 0,
+            settings_menu: None,
+            menu_generation: 0,
             edit_copies: None,
             pending_settings: None,
         }
@@ -207,10 +261,8 @@ impl Workspace {
         self.settings_page.previous_focus =
             Some(window.focused(cx).unwrap_or_else(|| self.focus.clone()));
         self.settings_page.focus.focus(window, cx);
+        crate::terminal::view::font_names(cx);
         self.settings_page.scroll = ScrollHandle::new();
-        if self.active_terminal_settings(cx).is_none() && self.kitty_settings.is_none() {
-            self.read_kitty(false, window, cx);
-        }
         self.probe_agent(window, cx);
         self.scan_edit_copies(window, cx);
         self.scan_mcp_harnesses(window, cx);
@@ -403,7 +455,7 @@ impl Workspace {
     pub(super) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.finish_glass_drag(window, cx);
         self.close_theme_editor(window, cx);
-        self.close_editor_menu(false, window, cx);
+        self.close_settings_menu(false, window, cx);
         if let Some(previous) = self.settings_page.previous_focus.take() {
             // Focus goes back at once; the page keeps painting while it fades.
             previous.focus(window, cx);
@@ -465,7 +517,7 @@ impl Workspace {
             Some("interface") => Some(1),
             Some("agent") => Some(2),
             Some("editor") | Some("editor-low") => Some(3),
-            Some("terminal") => Some(4),
+            Some("terminal" | "terminal-menu" | "terminal-config-menu") => Some(4),
             Some("updates") => Some(5),
             Some("mcp") => Some(6),
             _ => None,
@@ -482,11 +534,21 @@ impl Workspace {
                 if low {
                     this.scroll_editor_to_bottom(cx);
                     cx.on_next_frame(window, move |this, window, cx| {
-                        this.open_editor_menu(window, cx)
+                        this.open_settings_menu(Picker::Editor, window, cx)
                     });
                 } else {
-                    this.open_editor_menu(window, cx);
+                    this.open_settings_menu(Picker::Editor, window, cx);
                 }
+            });
+        }
+        let terminal_picker = match request.as_deref() {
+            Some("terminal-menu") => Some(Picker::ExternalTerminal),
+            Some("terminal-config-menu") => Some(Picker::TerminalConfig),
+            _ => None,
+        };
+        if let Some(picker) = terminal_picker {
+            cx.on_next_frame(window, move |this, window, cx| {
+                this.open_settings_menu(picker, window, cx);
             });
         }
         if crate::dev::empty_confirm() {
@@ -505,38 +567,30 @@ impl Workspace {
         }
     }
 
-    fn active_terminal_settings<'a>(
-        &'a self,
-        cx: &'a gpui::App,
-    ) -> Option<&'a crate::terminal::kitty::Kitty> {
-        let id = self.selected.as_ref()?;
-        let super::Connection::Connected { panes, .. } = self.connections.get(id)? else {
-            return None;
-        };
-        panes.terminal.as_ref().map(|view| view.read(cx).settings())
-    }
-
-    pub(super) fn read_kitty(&mut self, apply: bool, window: &Window, cx: &mut Context<Self>) {
+    pub(super) fn read_terminal_config(&mut self, window: &Window, cx: &mut Context<Self>) {
+        self.terminal_config_generation += 1;
+        let generation = self.terminal_config_generation;
+        let source = self.settings.terminal_config;
+        let external =
+            ExternalTerminals::selected(cx).and_then(|installed| installed.preset.config_source());
         let read = cx
             .background_executor()
-            .spawn(async { crate::terminal::kitty::Kitty::load() });
+            .spawn(async move { imported::load(source, external) });
         cx.spawn_in(window, async move |workspace, cx| {
-            let mut settings = read.await;
+            let settings = read.await;
             let _ = workspace.update_in(cx, |workspace, window, cx| {
-                settings.resolve_family(crate::terminal::view::font_names(cx));
-                if apply {
-                    for connection in workspace.connections.values() {
-                        if let super::Connection::Connected { panes, .. } = connection
-                            && let Some(view) = &panes.terminal
-                        {
-                            view.update(cx, |view, cx| view.reload(settings.clone(), window, cx));
-                        }
+                if workspace.terminal_config_generation != generation {
+                    return;
+                }
+                for connection in workspace.connections.values() {
+                    if let super::Connection::Connected { panes, .. } = connection
+                        && let Some(view) = &panes.terminal
+                    {
+                        view.update(cx, |view, cx| view.reload(settings.clone(), window, cx));
                     }
                 }
-                workspace.kitty_settings = Some(settings);
-                if window.is_window_active() {
-                    cx.notify();
-                }
+                cx.set_global(settings);
+                cx.notify();
             });
         })
         .detach();
@@ -588,14 +642,20 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let Some(dir) = self.dir.clone() else { return };
-        let colors_changed = self.settings.terminal_colors != next.terminal_colors;
+        let external_changed = self.settings.external_terminal != next.external_terminal;
+        let config_changed = self.settings.terminal_config != next.terminal_config
+            || (external_changed && next.terminal_config == TerminalConfigSource::Auto);
+        if external_changed && cx.has_global::<ExternalTerminals>() {
+            cx.global_mut::<ExternalTerminals>().preferred = next.external_terminal.clone();
+        }
         self.settings = next.clone();
         crate::terminal::copy_on_select::set(next.terminal_copy_on_select, cx);
+        if config_changed {
+            self.read_terminal_config(window, cx);
+        }
         if self.settings_page.busy || self.settings_page.glass_drag.is_some() {
             self.settings_page.pending_settings = Some(next);
-            if colors_changed {
-                cx.notify();
-            }
+            cx.notify();
             return;
         }
         self.settings_page.busy = true;
@@ -1373,33 +1433,80 @@ impl Workspace {
         ))
     }
 
-    fn select_editor(
+    fn apply_picker_value(
         &mut self,
-        editor: Option<PathBuf>,
+        value: PickerValue,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.close_settings_menu(true, window, cx);
         let mut next = self.settings.clone();
-        next.editor = editor;
-        self.save_settings(next, window, cx);
+        match value {
+            PickerValue::Editor(editor) => next.editor = editor,
+            PickerValue::External(id) => next.external_terminal = id.map(str::to_owned),
+            PickerValue::Config(source) => next.terminal_config = source,
+            PickerValue::OtherEditor => {
+                #[cfg(target_os = "macos")]
+                self.choose_editor(window, cx);
+                return;
+            }
+        }
+        if next != self.settings {
+            self.save_settings(next, window, cx);
+        }
     }
 
-    fn editor_entries(&self) -> Vec<(&'static str, Option<PathBuf>)> {
-        let mut entries = vec![("System Default", None)];
-        entries.extend(
-            installed_editors(&crate::dev::editor_roots())
-                .into_iter()
-                .map(|(name, path)| (name, Some(path))),
-        );
-        #[cfg(target_os = "macos")]
-        entries.push(("Other Application…", None));
-        entries
+    fn picker_entries(&self, picker: Picker, cx: &gpui::App) -> Vec<(&'static str, PickerValue)> {
+        match picker {
+            Picker::Editor => {
+                let mut entries = vec![("System Default", PickerValue::Editor(None))];
+                entries.extend(
+                    installed_editors(&crate::dev::editor_roots())
+                        .into_iter()
+                        .map(|(name, path)| (name, PickerValue::Editor(Some(path)))),
+                );
+                if cfg!(target_os = "macos") {
+                    entries.push(("Other Application…", PickerValue::OtherEditor));
+                }
+                entries
+            }
+            Picker::ExternalTerminal => {
+                let mut entries = vec![("Automatic", PickerValue::External(None))];
+                if let Some(terminals) = cx.try_global::<ExternalTerminals>() {
+                    entries.extend(terminals.installed.iter().map(|terminal| {
+                        (
+                            terminal.preset.name,
+                            PickerValue::External(Some(terminal.preset.id)),
+                        )
+                    }));
+                }
+                entries
+            }
+            Picker::TerminalConfig => imported::SOURCES
+                .iter()
+                .map(|&(source, label)| (label, PickerValue::Config(source)))
+                .collect(),
+        }
+    }
+
+    fn picker_selection(&self, picker: Picker, cx: &gpui::App) -> Option<PickerValue> {
+        match picker {
+            Picker::Editor => Some(PickerValue::Editor(self.settings.editor.clone())),
+            Picker::ExternalTerminal => {
+                let preferred = self.settings.external_terminal.as_deref();
+                let id = ExternalTerminals::selected(cx).map(|terminal| terminal.preset.id);
+                Some(PickerValue::External(
+                    id.filter(|id| Some(*id) == preferred),
+                ))
+            }
+            Picker::TerminalConfig => Some(PickerValue::Config(self.settings.terminal_config)),
+        }
     }
 
     fn scroll_editor_to_bottom(&mut self, cx: &mut Context<Self>) {
         let shift = match (
             self.settings_page.settings_viewport.get(),
-            self.settings_page.editor_trigger_bounds.get(),
+            Picker::Editor.bounds(&self.settings_page).get(),
         ) {
             (Some(viewport), Some(trigger)) => (viewport.bottom() - px(8.)) - trigger.bottom(),
             (Some(viewport), None) => viewport.size.height - px(88.),
@@ -1412,99 +1519,103 @@ impl Workspace {
         cx.notify();
     }
 
-    fn open_editor_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_settings_menu(&mut self, picker: Picker, window: &mut Window, cx: &mut Context<Self>) {
         if self
             .settings_page
-            .editor_menu
+            .settings_menu
             .as_ref()
-            .is_some_and(|menu| !menu.closing)
+            .is_some_and(|menu| menu.picker == picker && !menu.closing)
         {
-            self.close_editor_menu(true, window, cx);
+            self.close_settings_menu(true, window, cx);
             return;
         }
-        let entries = self.editor_entries();
-        let separators = usize::from(cfg!(target_os = "macos"));
-        let height = menu_height(entries.len(), separators);
-        let trigger = self.settings_page.editor_trigger_bounds.get();
+        let entries = self.picker_entries(picker, cx);
+        let selected = self.picker_selection(picker, cx);
+        let desired_height = picker_menu_height(&entries);
         let viewport = self.settings_page.settings_viewport.get();
-        let placement = trigger
+        let trigger = picker.bounds(&self.settings_page).get();
+        if let (Some(trigger), Some(viewport)) = (trigger, viewport)
+            && (trigger.top() < viewport.top() || trigger.bottom() > viewport.bottom())
+        {
+            let shift = if trigger.top() < viewport.top() {
+                viewport.top() - trigger.top()
+            } else {
+                viewport.bottom() - trigger.bottom() - desired_height - px(dropdown::GAP)
+            };
+            let offset = self.settings_page.scroll.offset();
+            self.settings_page
+                .scroll
+                .set_offset(point(offset.x, (offset.y + shift).min(px(0.))));
+        }
+        let (placement, height) = trigger
             .zip(viewport)
-            .and_then(|(trigger, viewport)| place(trigger, viewport, height))
-            .unwrap_or_else(|| {
-                if let (Some(trigger), Some(viewport)) = (trigger, viewport) {
-                    let needed = height + px(dropdown::GAP);
-                    let shift = if trigger.top() < viewport.top() {
-                        viewport.top() - trigger.top()
-                    } else if trigger.bottom() + needed > viewport.bottom() {
-                        viewport.bottom() - trigger.bottom() - needed
-                    } else {
-                        px(0.)
-                    };
-                    if shift != px(0.) {
-                        let offset = self.settings_page.scroll.offset();
-                        self.settings_page
-                            .scroll
-                            .set_offset(point(offset.x, (offset.y + shift).min(px(0.))));
-                    }
-                }
-                Placement::Below
-            });
+            .and_then(|(trigger, viewport)| picker_placement(trigger, viewport, desired_height))
+            .unwrap_or((Placement::Below, desired_height));
         let items = (0..entries.len())
             .map(|_| cx.focus_handle().tab_stop(true))
-            .collect::<Vec<_>>();
-        let checked = self.settings.editor.as_deref();
+            .collect();
         let focus = entries
             .iter()
-            .position(|(_, path)| path.as_deref() == checked)
+            .position(|(_, value)| Some(value) == selected.as_ref())
             .unwrap_or(0);
-        let generation = self.settings_page.editor_generation;
-        self.settings_page.editor_generation += 1;
-        self.settings_page.editor_menu = Some(EditorMenu {
+        let generation = self.settings_page.menu_generation;
+        self.settings_page.menu_generation += 1;
+        let menu = SettingsMenu {
+            picker,
             placement,
+            height,
             items,
             entries,
+            scroll: ScrollHandle::new(),
             closing: false,
             restore_focus: true,
             generation,
-        });
-        self.settings_page.editor_menu.as_ref().unwrap().items[focus].focus(window, cx);
+        };
+        menu.focus(focus, window, cx);
+        self.settings_page.settings_menu = Some(menu);
         cx.notify();
     }
 
-    fn set_editor_menu_placement(&mut self, placement: Option<Placement>, cx: &mut Context<Self>) {
-        match placement {
-            Some(placement) => {
-                let changed = self.settings_page.editor_menu.as_mut().is_some_and(|menu| {
-                    if menu.closing || menu.placement == placement {
-                        return false;
-                    }
-                    menu.placement = placement;
-                    true
-                });
-                if changed {
-                    cx.notify();
-                }
+    fn update_settings_menu_placement(&mut self, picker: Picker, cx: &mut Context<Self>) {
+        let trigger = picker.bounds(&self.settings_page).get();
+        let viewport = self.settings_page.settings_viewport.get();
+        let Some(menu) = self
+            .settings_page
+            .settings_menu
+            .as_mut()
+            .filter(|menu| menu.picker == picker && !menu.closing)
+        else {
+            return;
+        };
+        match trigger.zip(viewport).and_then(|(trigger, viewport)| {
+            picker_placement(trigger, viewport, picker_menu_height(&menu.entries))
+        }) {
+            Some((placement, height)) if (menu.placement, menu.height) != (placement, height) => {
+                menu.placement = placement;
+                menu.height = height;
+                cx.notify();
             }
-            None => self.begin_editor_menu_close(false, None, cx),
+            Some(_) => {}
+            None => self.begin_settings_menu_close(false, None, cx),
         }
     }
 
-    fn close_editor_menu(
+    fn close_settings_menu(
         &mut self,
         restore_focus: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.begin_editor_menu_close(restore_focus, Some(window), cx);
+        self.begin_settings_menu_close(restore_focus, Some(window), cx);
     }
 
-    fn begin_editor_menu_close(
+    fn begin_settings_menu_close(
         &mut self,
         restore_focus: bool,
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
-        let Some(menu) = self.settings_page.editor_menu.as_mut() else {
+        let Some(menu) = self.settings_page.settings_menu.as_mut() else {
             return;
         };
         if menu.closing {
@@ -1513,10 +1624,11 @@ impl Workspace {
         menu.closing = true;
         menu.restore_focus = restore_focus;
         let generation = menu.generation;
+        let picker = menu.picker;
         if cx.reduce_motion() {
-            self.settings_page.editor_menu = None;
+            self.settings_page.settings_menu = None;
             if restore_focus && let Some(window) = window {
-                self.settings_page.editor_trigger.focus(window, cx);
+                picker.trigger(&self.settings_page).focus(window, cx);
             }
             cx.notify();
             return;
@@ -1527,53 +1639,64 @@ impl Workspace {
                 .timer(crate::components::motion::FAST)
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
-                let remove = this
+                let Some(menu) = this
                     .settings_page
-                    .editor_menu
+                    .settings_menu
                     .as_ref()
-                    .is_some_and(|menu| menu.closing && menu.generation == generation);
-                if !remove {
+                    .filter(|menu| menu.closing && menu.generation == generation)
+                else {
                     return;
+                };
+                if menu.restore_focus {
+                    picker.trigger(&this.settings_page).focus(window, cx);
                 }
-                let restore = this
-                    .settings_page
-                    .editor_menu
-                    .as_ref()
-                    .is_some_and(|menu| menu.restore_focus);
-                this.settings_page.editor_menu = None;
-                if restore {
-                    this.settings_page.editor_trigger.focus(window, cx);
-                }
+                this.settings_page.settings_menu = None;
                 cx.notify();
             });
         })
         .detach();
     }
 
-    fn render_editor_control(&self, theme: Theme, cx: &Context<Self>) -> AnyElement {
-        if !crate::dev::editor_picker() {
+    fn render_settings_picker(
+        &self,
+        picker: Picker,
+        theme: Theme,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        if picker == Picker::Editor && !crate::dev::editor_picker() {
             return div()
                 .text_size(px(13.))
                 .text_color(theme.secondary_text)
                 .child("Default application (xdg-open)")
                 .into_any_element();
         }
-        let label = self
-            .settings
-            .editor
-            .as_deref()
-            .and_then(|path| path.file_stem())
-            .map_or_else(
-                || "System Default".to_owned(),
-                |name| name.to_string_lossy().into_owned(),
-            );
-        let bounds = self.settings_page.editor_trigger_bounds.clone();
+        let checked = self.picker_selection(picker, cx);
+        let label = match checked.as_ref() {
+            Some(PickerValue::Editor(path)) => {
+                path.as_deref().and_then(Path::file_stem).map_or_else(
+                    || "System Default".into(),
+                    |name| name.to_string_lossy().into_owned(),
+                )
+            }
+            Some(PickerValue::External(Some(_))) => ExternalTerminals::selected(cx).map_or_else(
+                || "Automatic".into(),
+                |terminal| terminal.preset.name.into(),
+            ),
+            Some(PickerValue::Config(source)) => imported::SOURCES
+                .iter()
+                .find(|(id, _)| id == source)
+                .map_or("Automatic", |(_, label)| *label)
+                .into(),
+            _ => "Automatic".into(),
+        };
+        let bounds = picker.bounds(&self.settings_page).clone();
         let weak = cx.weak_entity();
         let trigger = div()
-            .id("editor-picker")
+            .id(picker.id())
+            .aria_label(picker.label())
             .role(Role::Button)
             .tab_index(0)
-            .track_focus(&self.settings_page.editor_trigger)
+            .track_focus(picker.trigger(&self.settings_page))
             .flex()
             .items_center()
             .justify_between()
@@ -1589,13 +1712,13 @@ impl Workspace {
             .cursor_pointer()
             .hover(move |style| style.bg(theme.hover))
             .focus(move |style| style.border_color(theme.accent))
-            .on_click(
-                cx.listener(|this, _: &ClickEvent, window, cx| this.open_editor_menu(window, cx)),
-            )
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.open_settings_menu(picker, window, cx)
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 if matches!(event.keystroke.key.as_str(), "enter" | "space" | "down") {
                     cx.stop_propagation();
-                    this.open_editor_menu(window, cx);
+                    this.open_settings_menu(picker, window, cx);
                 }
             }))
             .child(label)
@@ -1614,32 +1737,7 @@ impl Workspace {
                         let weak = weak.clone();
                         cx.defer(move |cx| {
                             let _ = weak.update(cx, |this, cx| {
-                                let Some(menu) = this.settings_page.editor_menu.as_ref() else {
-                                    return;
-                                };
-                                if menu.closing {
-                                    return;
-                                }
-                                let height = menu_height(
-                                    menu.entries.len(),
-                                    usize::from(cfg!(target_os = "macos")),
-                                );
-                                let result = this
-                                    .settings_page
-                                    .editor_trigger_bounds
-                                    .get()
-                                    .zip(this.settings_page.settings_viewport.get())
-                                    .and_then(|(trigger, viewport)| {
-                                        place(trigger, viewport, height)
-                                    });
-                                if result != Some(menu.placement) {
-                                    let weak = cx.weak_entity();
-                                    cx.defer(move |cx| {
-                                        let _ = weak.update(cx, |this, cx| {
-                                            this.set_editor_menu_placement(result, cx)
-                                        });
-                                    });
-                                }
+                                this.update_settings_menu_placement(picker, cx);
                             });
                         });
                     },
@@ -1650,187 +1748,166 @@ impl Workspace {
             )
             .child(trigger);
         wrapper
-            .when_some(self.settings_page.editor_menu.as_ref(), |wrapper, menu| {
-                let placement = menu.placement;
-                let closing = menu.closing;
-                let generation = menu.generation;
-                let rise = if placement == Placement::Below {
-                    -4.
-                } else {
-                    4.
-                };
-                let chosen = self.settings.editor.as_deref();
-                let mut rows: Vec<AnyElement> = Vec::new();
-                for (index, (label, path)) in menu.entries.iter().enumerate() {
-                    #[cfg(target_os = "macos")]
-                    if index + 1 == menu.entries.len() {
+            .when_some(
+                self.settings_page
+                    .settings_menu
+                    .as_ref()
+                    .filter(|menu| menu.picker == picker),
+                |wrapper, menu| {
+                    let placement = menu.placement;
+                    let closing = menu.closing;
+                    let generation = menu.generation;
+                    let rise = if placement == Placement::Below {
+                        -4.
+                    } else {
+                        4.
+                    };
+                    let mut rows: Vec<AnyElement> = Vec::new();
+                    for (index, (label, value)) in menu.entries.iter().enumerate() {
+                        if matches!(value, PickerValue::OtherEditor) {
+                            rows.push(
+                                div()
+                                    .id("editor-menu-separator")
+                                    .h(px(1.))
+                                    .my(px(4.))
+                                    .bg(theme.border)
+                                    .into_any_element(),
+                            );
+                        }
+                        let focus = menu.items[index].clone();
+                        let value = value.clone();
                         rows.push(
-                            div()
-                                .id("editor-menu-separator")
-                                .h(px(1.))
-                                .my(px(4.))
-                                .bg(theme.border)
-                                .into_any_element(),
+                            dropdown_item(
+                                ("settings-menu-item", index),
+                                *label,
+                                checked.as_ref() == Some(&value),
+                                &focus,
+                                theme,
+                            )
+                            .flex_none()
+                            .when(!closing, |row| {
+                                row.on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation()
+                                })
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.apply_picker_value(value.clone(), window, cx);
+                                    },
+                                ))
+                            })
+                            .into_any_element(),
                         );
                     }
-                    let focus = menu.items[index].clone();
-                    let editor = path.clone();
-                    rows.push(
-                        dropdown_item(
-                            ("editor-menu-item", index),
-                            *label,
-                            path.as_deref() == chosen,
-                            &focus,
-                            theme,
-                        )
-                        .when(!closing, |row| {
-                            row.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    cx.stop_propagation();
-                                    #[cfg(target_os = "macos")]
-                                    let count = this
-                                        .settings_page
-                                        .editor_menu
-                                        .as_ref()
-                                        .map_or(0, |m| m.entries.len());
-                                    this.close_editor_menu(true, window, cx);
-                                    #[cfg(target_os = "macos")]
-                                    if index + 1 == count {
-                                        this.choose_editor(window, cx);
-                                        return;
-                                    }
-                                    this.select_editor(editor.clone(), window, cx);
-                                }))
-                        })
-                        .into_any_element(),
-                    );
-                }
-                let panel = dropdown_panel("editor-menu", theme)
-                    .role(Role::Menu)
-                    .key_context("EditorMenu")
-                    .when(!closing, |panel| {
-                        panel
-                            .on_action(cx.listener(|this, _: &dropdown::Dismiss, window, cx| {
-                                cx.stop_propagation();
-                                this.close_editor_menu(true, window, cx);
-                            }))
-                            .on_key_down(cx.listener(
-                                move |this, event: &KeyDownEvent, window, cx| {
-                                    let key = event.keystroke.key.as_str();
-                                    match key {
-                                        "tab" => {
-                                            this.close_editor_menu(true, window, cx);
-                                        }
-                                        "up" | "down" | "home" | "end" => {
-                                            cx.stop_propagation();
-                                            let Some(items) = this
-                                                .settings_page
-                                                .editor_menu
-                                                .as_ref()
-                                                .map(|menu| menu.items.clone())
-                                            else {
-                                                return;
-                                            };
-                                            let current = items
-                                                .iter()
-                                                .position(|handle| handle.is_focused(window))
-                                                .unwrap_or(0);
-                                            let next = match key {
-                                                "down" => (current + 1) % items.len(),
-                                                "up" => (current + items.len() - 1) % items.len(),
-                                                "end" => items.len() - 1,
-                                                _ => 0,
-                                            };
-                                            items[next].focus(window, cx);
-                                        }
-                                        "enter" | "space" => {
-                                            cx.stop_propagation();
-                                            let Some(menu) =
-                                                this.settings_page.editor_menu.as_ref()
-                                            else {
-                                                return;
-                                            };
-                                            let index = menu
-                                                .items
-                                                .iter()
-                                                .position(|handle| handle.is_focused(window))
-                                                .unwrap_or(0);
-                                            let editor = menu.entries[index].1.clone();
-                                            #[cfg(target_os = "macos")]
-                                            let count = menu.entries.len();
-                                            this.close_editor_menu(true, window, cx);
-                                            #[cfg(target_os = "macos")]
-                                            if index + 1 == count {
-                                                this.choose_editor(window, cx);
-                                                return;
+                    let panel = dropdown_panel("settings-menu", theme)
+                        .role(Role::Menu)
+                        .key_context("SettingsMenu")
+                        .max_h(menu.height)
+                        .track_scroll(&menu.scroll)
+                        .when(!closing, |panel| {
+                            panel
+                                .on_action(cx.listener(
+                                    move |this, _: &dropdown::Dismiss, window, cx| {
+                                        cx.stop_propagation();
+                                        this.close_settings_menu(true, window, cx);
+                                    },
+                                ))
+                                .on_key_down(cx.listener(
+                                    move |this, event: &KeyDownEvent, window, cx| {
+                                        let key = event.keystroke.key.as_str();
+                                        match key {
+                                            "tab" => this.close_settings_menu(true, window, cx),
+                                            "up" | "down" | "home" | "end" | "enter" | "space" => {
+                                                cx.stop_propagation();
+                                                let Some(menu) =
+                                                    this.settings_page.settings_menu.as_ref()
+                                                else {
+                                                    return;
+                                                };
+                                                let current = menu
+                                                    .items
+                                                    .iter()
+                                                    .position(|handle| handle.is_focused(window))
+                                                    .unwrap_or(0);
+                                                let len = menu.items.len();
+                                                let next = match key {
+                                                    "down" => (current + 1) % len,
+                                                    "up" => (current + len - 1) % len,
+                                                    "home" => 0,
+                                                    "end" => len - 1,
+                                                    _ => {
+                                                        let value = menu.entries[current].1.clone();
+                                                        this.apply_picker_value(value, window, cx);
+                                                        return;
+                                                    }
+                                                };
+                                                menu.focus(next, window, cx);
                                             }
-                                            this.select_editor(editor, window, cx);
+                                            _ => {}
                                         }
-                                        _ => {}
-                                    }
-                                },
-                            ))
-                            .on_mouse_down_out(cx.listener(
-                                |this, event: &MouseDownEvent, window, cx| {
-                                    if this
-                                        .settings_page
-                                        .editor_trigger_bounds
-                                        .get()
-                                        .is_some_and(|bounds| bounds.contains(&event.position))
-                                    {
-                                        return;
-                                    }
-                                    this.close_editor_menu(false, window, cx);
-                                },
-                            ))
-                    })
-                    .children(rows);
-                let panel = if closing {
-                    panel
-                        .with_animation(
-                            ("editor-menu-close", generation),
-                            Animation::new(crate::components::motion::FAST)
-                                .with_easing(ease_out_quint()),
-                            move |panel, t| panel.opacity(1. - t).relative().top(px(rise * t)),
+                                    },
+                                ))
+                                .on_mouse_down_out(cx.listener(
+                                    move |this, event: &MouseDownEvent, window, cx| {
+                                        if picker
+                                            .bounds(&this.settings_page)
+                                            .get()
+                                            .is_some_and(|bounds| bounds.contains(&event.position))
+                                        {
+                                            return;
+                                        }
+                                        this.close_settings_menu(false, window, cx);
+                                    },
+                                ))
+                        })
+                        .children(rows);
+                    let panel = if closing {
+                        panel
+                            .with_animation(
+                                ("settings-menu-close", generation),
+                                Animation::new(crate::components::motion::FAST)
+                                    .with_easing(ease_out_quint()),
+                                move |panel, t| panel.opacity(1. - t).relative().top(px(rise * t)),
+                            )
+                            .into_any_element()
+                    } else if cx.reduce_motion() {
+                        panel.into_any_element()
+                    } else {
+                        let side: usize = match placement {
+                            Placement::Below => 0,
+                            Placement::Above => 1,
+                        };
+                        crate::components::motion::appear(
+                            panel,
+                            ("settings-menu-open", side),
+                            rise,
+                            crate::components::motion::FAST,
                         )
                         .into_any_element()
-                } else if cx.reduce_motion() {
-                    panel.into_any_element()
-                } else {
-                    let side: usize = match placement {
-                        Placement::Below => 0,
-                        Placement::Above => 1,
                     };
-                    crate::components::motion::appear(
-                        panel,
-                        ("editor-menu-open", side),
-                        rise,
-                        crate::components::motion::FAST,
+                    wrapper.child(
+                        deferred(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .min_w_full()
+                                .when(placement == Placement::Below, |menu| {
+                                    menu.top(px(28. + dropdown::GAP))
+                                })
+                                .when(placement == Placement::Above, |menu| {
+                                    menu.bottom(px(28. + dropdown::GAP))
+                                })
+                                .child(panel),
+                        )
+                        .with_priority(1),
                     )
-                    .into_any_element()
-                };
-                wrapper.child(
-                    deferred(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .min_w_full()
-                            .when(placement == Placement::Below, |menu| {
-                                menu.top(px(28. + dropdown::GAP))
-                            })
-                            .when(placement == Placement::Above, |menu| {
-                                menu.bottom(px(28. + dropdown::GAP))
-                            })
-                            .child(panel),
-                    )
-                    .with_priority(1),
-                )
-            })
+                },
+            )
             .into_any_element()
     }
 
     fn editor_section(&self, theme: Theme, cx: &Context<Self>) -> Div {
-        let editor_control = self.render_editor_control(theme, cx);
+        let editor_control = self.render_settings_picker(Picker::Editor, theme, cx);
 
         let copies = self.settings_page.edit_copies;
         let caption = match copies {
@@ -1888,15 +1965,15 @@ impl Workspace {
     }
 
     fn terminal_section(&self, theme: Theme, window: &Window, cx: &Context<Self>) -> Div {
-        let kitty = self
-            .active_terminal_settings(cx)
-            .or(self.kitty_settings.as_ref())
+        let imported = cx
+            .try_global::<ImportedConfig>()
             .cloned()
             .unwrap_or_default();
-        let kitty_found = kitty.path.is_some();
+        let has_palette = imported.has_palette();
         let source = self.settings.terminal_colors;
-        let palette = terminal_palette(source, kitty_found, kitty.palette, theme.terminal);
-        let size = font_size::effective(kitty.size, cx);
+        let palette = terminal_palette(source, has_palette, imported.palette, theme.terminal);
+        let base_size = imported.size;
+        let size = font_size::effective(base_size, cx);
         let green = gpui::rgb(palette.ansi[2]);
         let blue = gpui::rgb(palette.ansi[4]);
         let cursor = palette
@@ -1956,9 +2033,9 @@ impl Workspace {
         let step = |delta: f32| {
             move |_: &ClickEvent, _: &mut Window, cx: &mut gpui::App| {
                 if delta > 0. {
-                    font_size::increase(cx, kitty.size);
+                    font_size::increase(cx, base_size);
                 } else {
-                    font_size::decrease(cx, kitty.size);
+                    font_size::decrease(cx, base_size);
                 }
             }
         };
@@ -2036,11 +2113,11 @@ impl Workspace {
             ));
         let reset = crate::components::button::icon_button(
             "reset-font-size",
-            "Reset Font Size to kitty.conf",
+            "Reset Font Size to Configuration Default",
             IconName::RotateCcw,
             Variant::Secondary,
             theme,
-            cx.listener(move |_, _, _, cx| font_size::reset(cx, kitty.size)),
+            cx.listener(move |_, _, _, cx| font_size::reset(cx, base_size)),
         )
         .size(px(24.));
         let size_control = div()
@@ -2051,11 +2128,11 @@ impl Workspace {
             .when(self.settings.terminal_font_size.is_some(), |row| {
                 row.child(reset)
             });
-        let kitty_default = kitty.copy_on_select;
+        let imported_default = imported.copy_on_select;
         let copy_value = self
             .settings
             .terminal_copy_on_select
-            .unwrap_or(kitty_default);
+            .unwrap_or(imported_default);
         let font_description = if cfg!(target_os = "macos") {
             "Use ⌘+, ⌘−, or ⌘0. The size is saved across launches."
         } else {
@@ -2064,21 +2141,25 @@ impl Workspace {
 
         let appearance = cx.global::<Appearance>();
         let variant = appearance.variant_for(window);
-        let effective = effective_source(source, kitty_found);
+        let effective = effective_source(source, has_palette);
+        let file_name = imported
+            .path
+            .as_deref()
+            .and_then(Path::file_name)
+            .map(|name| name.to_string_lossy())
+            .unwrap_or_else(|| "configuration".into());
         let colors_description: SharedString = match effective {
             TerminalColorSource::Theme => format!(
                 "Uses the terminal colors of the “{}” theme.",
                 appearance.selected(variant).name,
             )
             .into(),
-            TerminalColorSource::Kitty => "Uses the colors from kitty.conf.".into(),
+            TerminalColorSource::Imported => format!("Uses the colors from {file_name}.").into(),
         };
-        let unavailable = (!kitty_found).then_some("kitty.conf not found");
-        let sources = [TerminalColorSource::Theme, TerminalColorSource::Kitty];
+        let unavailable = (!has_palette).then_some("Imported colors unavailable");
+        let sources = [TerminalColorSource::Theme, TerminalColorSource::Imported];
         let choose_source = cx.listener(move |this, index: &usize, window, cx| {
             let source = sources[*index];
-            // Compare with the saved choice, so picking Vela theme while a saved
-            // kitty choice falls back (no kitty.conf) still persists it.
             if source == this.settings.terminal_colors {
                 return;
             }
@@ -2094,8 +2175,8 @@ impl Workspace {
             .child(segmented(
                 "terminal-colors",
                 "Colors",
-                &[("Vela theme", None), ("kitty.conf", unavailable)],
-                usize::from(effective == TerminalColorSource::Kitty),
+                &[("Vela theme", None), ("Imported", unavailable)],
+                usize::from(effective == TerminalColorSource::Imported),
                 theme,
                 move |index, window, cx| choose_source(&index, window, cx),
             ))
@@ -2106,26 +2187,14 @@ impl Workspace {
                     .child(reason)
             }));
 
-        let show = kitty.path.clone();
-        let kitty_control = div()
+        let show = imported.path.clone();
+        let config_control = div()
             .flex()
             .items_center()
             .gap(px(8.))
-            .when_some(
-                show.as_deref().map(|path| abbreviate_path(path, 40)),
-                |row, path_label| {
-                    row.child(
-                        div()
-                            .font_family(crate::theme::monospace())
-                            .text_size(px(12.))
-                            .text_color(theme.secondary_text)
-                            .child(path_label),
-                    )
-                },
-            )
             .children(show.map(|path| {
                 small_button(
-                    "show-kitty",
+                    "show-terminal-config",
                     "Show",
                     Variant::Secondary,
                     theme,
@@ -2148,19 +2217,54 @@ impl Workspace {
                 )
             }))
             .child(small_icon_text_button(
-                "reload-kitty",
+                "reload-terminal-config",
                 IconName::Refresh,
                 "Reload",
                 Variant::Secondary,
                 theme,
-                cx.listener(|this, _, window, cx| this.read_kitty(true, window, cx)),
+                cx.listener(|this, _, window, cx| this.read_terminal_config(window, cx)),
             ));
+
+        let external = ExternalTerminals::selected(cx).map_or_else(
+            || "No supported external terminal found.".into(),
+            |terminal| format!("Opens new SSH sessions in {}.", terminal.preset.name),
+        );
+        let config_description = imported
+            .path
+            .as_deref()
+            .map(|path| abbreviate_path(path, 52))
+            .unwrap_or_else(|| {
+                if self.settings.terminal_config == TerminalConfigSource::None {
+                    "Uses Vela defaults.".into()
+                } else {
+                    "No supported configuration file found.".into()
+                }
+            });
+        let family = imported.resolved_family(crate::terminal::view::cached_font_names(cx));
 
         section("Terminal")
             .child(preview)
             .child(settings_group(
                 theme,
                 vec![
+                    settings_row(
+                        "External Terminal",
+                        Some(external.into()),
+                        self.render_settings_picker(Picker::ExternalTerminal, theme, cx),
+                        theme,
+                    ),
+                    settings_row(
+                        "Configuration Source",
+                        None,
+                        self.render_settings_picker(Picker::TerminalConfig, theme, cx),
+                        theme,
+                    ),
+                    settings_row(
+                        "Configuration File",
+                        Some(config_description.into()),
+                        config_control,
+                        theme,
+                    ),
                     settings_row(
                         "Font Size",
                         Some(font_description.into()),
@@ -2179,7 +2283,7 @@ impl Workspace {
                                 let current = this
                                     .settings
                                     .terminal_copy_on_select
-                                    .unwrap_or(kitty_default);
+                                    .unwrap_or(imported_default);
                                 let mut next = this.settings.clone();
                                 next.terminal_copy_on_select = Some(!current);
                                 this.save_settings(next, window, cx);
@@ -2193,25 +2297,47 @@ impl Workspace {
                         div()
                             .text_size(px(12.))
                             .text_color(theme.secondary_text)
-                            .child(format!(
-                                "{}, {}",
-                                kitty.family,
-                                if kitty.path.is_some() {
-                                    "from kitty.conf"
-                                } else {
-                                    "default"
-                                }
-                            )),
+                            .child(family.to_owned()),
                         theme,
                     ),
                     settings_row("Colors", Some(colors_description), colors_control, theme),
-                    settings_row("kitty.conf", None, kitty_control, theme),
                 ],
             ))
             .when_some(self.settings_error.clone(), |section, error| {
                 section.child(div().text_color(theme.danger).child(error))
             })
     }
+}
+
+fn picker_menu_height(entries: &[(&str, PickerValue)]) -> Pixels {
+    let separator = usize::from(
+        entries
+            .last()
+            .is_some_and(|(_, value)| *value == PickerValue::OtherEditor),
+    );
+    menu_height(entries.len(), separator)
+}
+
+fn picker_placement(
+    trigger: Bounds<Pixels>,
+    viewport: Bounds<Pixels>,
+    desired: Pixels,
+) -> Option<(Placement, Pixels)> {
+    if let Some(placement) = place(trigger, viewport, desired) {
+        return Some((placement, desired));
+    }
+    let above = trigger.top() - viewport.top();
+    let below = viewport.bottom() - trigger.bottom();
+    if above < px(0.) || below < px(0.) {
+        return None;
+    }
+    let (placement, room) = if below >= above {
+        (Placement::Below, below)
+    } else {
+        (Placement::Above, above)
+    };
+    let height = room - px(dropdown::GAP);
+    (height >= menu_height(1, 0)).then_some((placement, height))
 }
 
 fn reveal_theme_card(scroll: &ScrollHandle, rect: Bounds<Pixels>, rows: f32) {
@@ -2904,11 +3030,13 @@ mod tests {
         cx.simulate_keystrokes("secondary-,");
         cx.run_until_parked();
         workspace.update_in(cx, |workspace, window, cx| {
-            workspace.settings_page.editor_trigger.focus(window, cx);
+            Picker::Editor
+                .trigger(&workspace.settings_page)
+                .focus(window, cx);
         });
         press(cx, "enter");
         workspace.update_in(cx, |workspace, window, _| {
-            let menu = workspace.settings_page.editor_menu.as_ref().unwrap();
+            let menu = workspace.settings_page.settings_menu.as_ref().unwrap();
             assert!(!menu.closing);
             assert!(menu.items[0].is_focused(window));
         });
@@ -2924,7 +3052,9 @@ mod tests {
         cx.simulate_keystrokes("secondary-,");
         cx.run_until_parked();
         workspace.update_in(cx, |workspace, window, cx| {
-            workspace.settings_page.editor_trigger.focus(window, cx);
+            Picker::Editor
+                .trigger(&workspace.settings_page)
+                .focus(window, cx);
         });
         press(cx, "enter");
         press(cx, "escape");
@@ -2932,8 +3062,12 @@ mod tests {
             .advance_clock(crate::components::motion::FAST * 2);
         cx.run_until_parked();
         workspace.update_in(cx, |workspace, window, _| {
-            assert!(workspace.settings_page.editor_menu.is_none());
-            assert!(workspace.settings_page.editor_trigger.is_focused(window));
+            assert!(workspace.settings_page.settings_menu.is_none());
+            assert!(
+                Picker::Editor
+                    .trigger(&workspace.settings_page)
+                    .is_focused(window)
+            );
         });
     }
 
@@ -2947,7 +3081,9 @@ mod tests {
         cx.simulate_keystrokes("secondary-,");
         cx.run_until_parked();
         workspace.update_in(cx, |workspace, window, cx| {
-            workspace.settings_page.editor_trigger.focus(window, cx);
+            Picker::Editor
+                .trigger(&workspace.settings_page)
+                .focus(window, cx);
         });
         press(cx, "enter");
         // Below the macOS title bar strip, whose mouse down starts a window
@@ -2962,7 +3098,7 @@ mod tests {
             .advance_clock(crate::components::motion::FAST * 2);
         cx.run_until_parked();
         workspace.update(cx, |workspace, _| {
-            assert!(workspace.settings_page.editor_menu.is_none());
+            assert!(workspace.settings_page.settings_menu.is_none());
         });
     }
 
@@ -2976,7 +3112,9 @@ mod tests {
         cx.simulate_keystrokes("secondary-,");
         cx.run_until_parked();
         workspace.update_in(cx, |workspace, window, cx| {
-            workspace.settings_page.editor_trigger.focus(window, cx);
+            Picker::Editor
+                .trigger(&workspace.settings_page)
+                .focus(window, cx);
         });
         press(cx, "enter");
         press(cx, "down");
@@ -2997,13 +3135,14 @@ mod tests {
         cx.simulate_keystrokes("secondary-,");
         cx.run_until_parked();
         workspace.update_in(cx, |workspace, window, cx| {
-            workspace.settings_page.editor_trigger.focus(window, cx);
+            Picker::Editor
+                .trigger(&workspace.settings_page)
+                .focus(window, cx);
         });
         press(cx, "enter");
         let centre = workspace.update(cx, |workspace, _| {
-            workspace
-                .settings_page
-                .editor_trigger_bounds
+            Picker::Editor
+                .bounds(&workspace.settings_page)
                 .get()
                 .unwrap()
                 .center()
@@ -3013,7 +3152,7 @@ mod tests {
             .advance_clock(crate::components::motion::FAST * 2);
         cx.run_until_parked();
         workspace.update(cx, |workspace, _| {
-            assert!(workspace.settings_page.editor_menu.is_none());
+            assert!(workspace.settings_page.settings_menu.is_none());
         });
     }
 

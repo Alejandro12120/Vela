@@ -7,7 +7,7 @@ use crate::{
     theme::Theme,
 };
 
-gpui::actions!(editor_menu, [Dismiss]);
+gpui::actions!(settings_menu, [Dismiss]);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Placement {

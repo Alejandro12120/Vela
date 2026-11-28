@@ -24,7 +24,7 @@ Vela puts a dual-pane SFTP file manager and an SSH terminal in one native binary
 - **System OpenSSH transport.** Vela honors `~/.ssh/config`, `ProxyJump`, and `known_hosts`. It keeps one `ControlMaster` connection per server, so OpenSSH asks for a password, passphrase, or agent approval once per session.
 - **Bitwarden SSH agent and password auth.** The server form lists keys from your Bitwarden SSH agent and passes `IdentitiesOnly=yes` with the chosen public key, so extra keys do not exhaust authentication attempts. Password authentication prompts at connection time and never writes passwords to disk.
 - **Remote editing with upload on save.** Double-clicking a remote text file downloads a working copy and opens it in your editor, including VS Code, Cursor, Zed, Sublime Text, or the OS default. When you save, Vela checks the remote file for conflicts and uploads in place, keeping the remote inode, owner, and permissions.
-- **Integrated SSH terminal.** Each session has a full-window terminal built on `alacritty_terminal` and GPUI. It reads font settings from `kitty.conf` when available. In Settings → Terminal → Colors, choose Vela theme or kitty.conf. You can also open the active session in Kitty.
+- **Integrated SSH terminal.** Each session has a full-window terminal built on `alacritty_terminal` and GPUI. Settings → Terminal lets you choose an external terminal, import font and color settings, and reload the configuration. Open the active SSH session or run a remote script in a new tab or window of your chosen terminal. See [Terminal settings](docs/TERMINALS.md).
 - **Desktop integration.** On macOS, you can drag files to and from Finder and copy or paste remote files with Finder. Deleting local files moves them to macOS Trash or freedesktop Trash on Linux.
 - **Themes and translucency.** Six built-in themes come with separate light and dark selections, a live color editor with contrast checks, and optional frosted glass.
 
@@ -32,7 +32,7 @@ Vela puts a dual-pane SFTP file manager and an SSH terminal in one native binary
   <tr>
     <td width="50%">
       <img alt="Integrated SSH terminal" src="docs/screenshots/terminal-dark.png">
-      <p align="center"><sub>The integrated SSH terminal supports Vela theme colors and kitty.conf colors.</sub></p>
+      <p align="center"><sub>The integrated SSH terminal supports Vela theme colors and imported colors.</sub></p>
     </td>
     <td width="50%">
       <img alt="Settings and themes" src="docs/screenshots/settings-dark.png">

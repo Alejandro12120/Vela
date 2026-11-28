@@ -27,9 +27,9 @@ use super::{
     colors::{Palette, terminal_palette},
     copy_on_select,
     element::{Geometry, ShapeCache, Surface},
-    font_size, keys,
-    kitty::{Kitty, OptionAsAlt},
-    mouse,
+    font_size,
+    imported::{ImportedConfig, OptionAsAlt},
+    keys, mouse,
 };
 
 actions!(
@@ -78,9 +78,9 @@ pub fn bind_keys(cx: &mut App) {
 pub(super) fn should_copy(
     finished_selection: bool,
     setting: Option<bool>,
-    kitty_default: bool,
+    imported_default: bool,
 ) -> bool {
-    finished_selection && setting.unwrap_or(kitty_default)
+    finished_selection && setting.unwrap_or(imported_default)
 }
 
 pub struct Restart;
@@ -92,10 +92,10 @@ pub(super) struct Marked {
 
 pub struct TerminalView {
     pub(super) terminal: Option<Terminal>,
-    pub(super) settings: Kitty,
+    pub(super) settings: ImportedConfig,
     pub(super) palette: Palette,
     color_source: TerminalColorSource,
-    kitty_size: f32,
+    imported_size: f32,
     pub(super) focus: FocusHandle,
     pub(super) fonts: [Font; 4],
     pub(super) geometry: Option<Geometry>,
@@ -106,7 +106,7 @@ pub struct TerminalView {
     selected: bool,
     window_active: Option<bool>,
     error: Option<String>,
-    kitty_error: Option<String>,
+    external_launch_error: Option<String>,
     pending: Vec<String>,
     startup: Option<Task<()>>,
     ready_to_spawn: Option<Vec<OsString>>,
@@ -127,10 +127,10 @@ impl TerminalView {
             .detach();
         let mut view = Self {
             terminal: None,
-            settings: Kitty::default(),
+            settings: ImportedConfig::default(),
             palette: Palette::default(),
             color_source: TerminalColorSource::default(),
-            kitty_size: Kitty::default().size,
+            imported_size: ImportedConfig::default().size,
             focus: cx.focus_handle(),
             fonts: std::array::from_fn(|_| font(crate::theme::monospace())),
             geometry: None,
@@ -141,7 +141,7 @@ impl TerminalView {
             selected: false,
             window_active: None,
             error: None,
-            kitty_error: None,
+            external_launch_error: None,
             pending: Vec::new(),
             startup: None,
             ready_to_spawn: None,
@@ -152,7 +152,7 @@ impl TerminalView {
             mouse_press: None,
             last_report: None,
         };
-        view.set_settings(Kitty::default(), cx);
+        view.set_settings(ImportedConfig::default(), cx);
         view
     }
 
@@ -185,8 +185,8 @@ impl TerminalView {
         }
     }
 
-    pub fn kitty_error(&mut self, error: String, cx: &mut Context<Self>) {
-        self.kitty_error = Some(format!("Couldn't open Kitty: {error}"));
+    pub fn external_launch_error(&mut self, error: String, cx: &mut Context<Self>) {
+        self.external_launch_error = Some(error);
         cx.notify();
     }
 
@@ -206,7 +206,7 @@ impl TerminalView {
         })
     }
 
-    pub fn reload(&mut self, settings: Kitty, window: &Window, cx: &mut Context<Self>) {
+    pub fn reload(&mut self, settings: ImportedConfig, window: &Window, cx: &mut Context<Self>) {
         self.set_settings(settings, cx);
         self.set_palette(Theme::current(window, cx).terminal, self.color_source);
         if self.selected && window.is_window_active() {
@@ -236,7 +236,7 @@ impl TerminalView {
         }
         self.marked.take();
         self.error.take();
-        self.kitty_error.take();
+        self.external_launch_error.take();
         self.pending.clear();
         self.last_logged_size.take();
         self.scroll_remainder = 0.;
@@ -252,18 +252,10 @@ impl TerminalView {
                 }
             }));
         }
-        let settings = cx.background_executor().spawn(async { Kitty::load() });
-        self.startup = Some(cx.spawn_in(window, async move |view, cx| {
-            let settings = settings.await;
-            let _ = view.update_in(cx, |view, window, cx| {
-                view.startup.take();
-                view.set_settings(settings, cx);
-                view.ready_to_spawn = Some(args);
-                if view.selected && window.is_window_active() {
-                    cx.notify();
-                }
-            });
-        }));
+        if let Some(config) = cx.try_global::<ImportedConfig>().cloned() {
+            self.reload(config, window, cx);
+        }
+        self.ready_to_spawn = Some(args);
         cx.notify();
     }
 
@@ -337,7 +329,7 @@ impl TerminalView {
         }));
     }
 
-    pub fn set_settings(&mut self, mut settings: Kitty, cx: &mut App) {
+    pub fn set_settings(&mut self, mut settings: ImportedConfig, cx: &mut App) {
         let names = font_names(cx);
         let configured = settings.family.clone();
         settings.resolve_family(names);
@@ -351,7 +343,7 @@ impl TerminalView {
                 .as_ref()
                 .map_or_else(|| "none".to_owned(), |path| path.display().to_string());
             crate::dev::log(format!(
-                "Terminal: kitty.conf {path}; font_family {configured}; resolved {}; installed {}",
+                "Terminal: config {path}; font_family {configured}; resolved {}; installed {}",
                 settings.family,
                 if present { "yes" } else { "no" }
             ));
@@ -379,8 +371,8 @@ impl TerminalView {
             }
             face
         });
-        self.kitty_size = settings.size;
-        settings.size = font_size::effective(self.kitty_size, cx);
+        self.imported_size = settings.size;
+        settings.size = font_size::effective(self.imported_size, cx);
         if let Some(terminal) = &self.terminal {
             terminal.reconfigure(&settings);
         }
@@ -390,7 +382,7 @@ impl TerminalView {
     }
 
     fn apply_font_size(&mut self, cx: &mut Context<Self>) {
-        let size = font_size::effective(self.kitty_size, cx);
+        let size = font_size::effective(self.imported_size, cx);
         if self.settings.size == size {
             return;
         }
@@ -404,7 +396,7 @@ impl TerminalView {
         self.color_source = source;
         let palette = terminal_palette(
             source,
-            self.settings.path.is_some(),
+            self.settings.has_palette(),
             self.settings.palette,
             colors,
         );
@@ -416,7 +408,8 @@ impl TerminalView {
         }
     }
 
-    pub fn settings(&self) -> &Kitty {
+    #[cfg(test)]
+    pub fn settings(&self) -> &ImportedConfig {
         &self.settings
     }
 
@@ -593,6 +586,10 @@ pub(crate) fn font_names(cx: &mut App) -> &[String] {
     &cx.global::<FontNames>().0
 }
 
+pub(crate) fn cached_font_names(cx: &App) -> &[String] {
+    cx.try_global::<FontNames>().map_or(&[], |fonts| &fonts.0)
+}
+
 fn scroll_key(application: bool, lines: i32) -> Cow<'static, [u8]> {
     const COUNT: usize = 64;
     const fn repeat(key: [u8; 3]) -> [u8; 3 * COUNT] {
@@ -677,13 +674,13 @@ impl Render for TerminalView {
                 }
             }))
             .on_action(cx.listener(|view, _: &IncreaseFontSize, _, cx| {
-                font_size::increase(cx, view.kitty_size);
+                font_size::increase(cx, view.imported_size);
             }))
             .on_action(cx.listener(|view, _: &DecreaseFontSize, _, cx| {
-                font_size::decrease(cx, view.kitty_size);
+                font_size::decrease(cx, view.imported_size);
             }))
             .on_action(cx.listener(|view, _: &ResetFontSize, _, cx| {
-                font_size::reset(cx, view.kitty_size);
+                font_size::reset(cx, view.imported_size);
             }))
             .child(
                 div()
@@ -705,7 +702,7 @@ impl Render for TerminalView {
                     .on_scroll(cx.listener(Self::scroll))
                     .child(Surface(cx.entity())),
             )
-            .when_some(self.kitty_error.clone(), |view, error| {
+            .when_some(self.external_launch_error.clone(), |view, error| {
                 view.child(div().px_2().py_1().text_color(theme.danger).child(error))
             })
             .when(ended, |view| {
@@ -967,16 +964,16 @@ mod tests {
 
         terminal.update_in(cx, |view, window, cx| {
             let theme = Theme::current(window, cx);
-            let kitty = Kitty {
+            let kitty = ImportedConfig {
                 path: Some("kitty.conf".into()),
                 ..view.settings().clone()
             };
-            view.set_palette(theme.terminal, TerminalColorSource::Kitty);
+            view.set_palette(theme.terminal, TerminalColorSource::Imported);
             assert_eq!(view.palette.background, 0x171f1b);
 
             view.reload(kitty.clone(), window, cx);
             assert_eq!(view.palette, kitty.palette);
-            view.reload(Kitty::default(), window, cx);
+            view.reload(ImportedConfig::default(), window, cx);
             assert_eq!(view.palette.background, 0x171f1b);
             view.reload(kitty.clone(), window, cx);
             assert_eq!(view.palette, kitty.palette);
@@ -1061,11 +1058,11 @@ mod tests {
     }
 
     #[gpui::test]
-    fn font_size_reset_uses_kitty_size_outside_clamp(cx: &mut TestAppContext) {
+    fn font_size_reset_uses_imported_size_outside_clamp(cx: &mut TestAppContext) {
         let (_, terminal, _, cx) = open(cx);
         for base in [4.5, 60.] {
             terminal.update_in(cx, |view, _, cx| {
-                view.kitty_size = base;
+                view.imported_size = base;
                 view.apply_font_size(cx);
                 assert_eq!(view.settings.size, base);
             });
@@ -1148,7 +1145,7 @@ mod tests {
         let child = Terminal::spawn(
             "/bin/sh",
             vec!["-c".into(), "printf 'hola\\n'; sleep 0.5".into()],
-            &Kitty::default(),
+            &ImportedConfig::default(),
             GridSize::INITIAL,
         )
         .unwrap();

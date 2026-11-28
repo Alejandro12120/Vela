@@ -6108,6 +6108,7 @@ name = "vela-app"
 version = "0.1.4"
 dependencies = [
  "alacritty_terminal",
+ "async-process",
  "gpui-pre",
  "gpui-pre-platform",
  "libc",
@@ -6118,6 +6119,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "toml 1.2.1+spec-1.1.0",
  "unicode-segmentation",
  "vela-core",
  "vela-mcp",

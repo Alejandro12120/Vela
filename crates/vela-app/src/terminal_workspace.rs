@@ -7,7 +7,8 @@ use crate::{
     terminal::view::{Restart, TerminalView},
 };
 
-use super::{Connection, Context, Window, Workspace, dev};
+use super::{Connection, Context, Window, Workspace};
+use crate::external_terminal::{self, ExternalTerminals};
 
 impl Workspace {
     pub(super) fn terminal_for(
@@ -107,21 +108,24 @@ impl Workspace {
             terminal.update(cx, |terminal, cx| terminal.start(args, window, cx));
         } else {
             let error = if view.alternate_screen() {
-                Some("The terminal is busy")
+                Some("The terminal is busy".to_owned())
             } else if run
                 .directory
                 .chars()
                 .chain(run.name.chars())
                 .any(char::is_control)
             {
-                Some("The filename contains control characters. Use “Run in Kitty.”")
+                Some(format!(
+                    "The filename contains control characters. Use “{}”.",
+                    external_terminal::action_label("Run", ExternalTerminals::selected(cx)),
+                ))
             } else {
                 None
             };
             if let Some(error) = error {
                 panes
                     .remote()
-                    .update(cx, |pane, cx| pane.report_error(error.into(), cx));
+                    .update(cx, |pane, cx| pane.report_error(error, cx));
                 return;
             }
             let command = format!(
@@ -134,7 +138,7 @@ impl Workspace {
         self.switch_session_view(SessionView::Terminal, window, cx);
     }
 
-    pub(super) fn open_terminal_in_kitty(&self, window: &Window, cx: &mut Context<Self>) {
+    pub(super) fn open_in_external_terminal(&self, window: &Window, cx: &mut Context<Self>) {
         let Some(id) = &self.selected else { return };
         let Some(Connection::Connected { panes, session }) = self.connections.get(id) else {
             return;
@@ -143,16 +147,16 @@ impl Workspace {
             terminal_start_command(&panes.remote().read(cx).directory().to_string_lossy());
         let args = session.terminal_command(&command);
         let terminal = panes.terminal.as_ref().map(gpui::Entity::downgrade);
+        let external = ExternalTerminals::selected(cx).cloned();
         let result = cx
             .background_executor()
-            .spawn(async move { dev::open_kitty_ssh(&args) });
+            .spawn(async move { external_terminal::launch(external, &args).await });
         cx.spawn_in(window, async move |_, cx| {
             if let Err(error) = result.await
                 && let Some(terminal) = terminal
             {
-                let _ = terminal.update(cx, |terminal, cx| {
-                    terminal.kitty_error(error.to_string(), cx)
-                });
+                let _ =
+                    terminal.update(cx, |terminal, cx| terminal.external_launch_error(error, cx));
             }
         })
         .detach();

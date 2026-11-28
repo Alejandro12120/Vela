@@ -251,7 +251,7 @@ impl Panes {
         edit_status: impl IntoElement,
         disconnect: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> Stateful<Div> {
-        let (sidebar_button, view_switch, kitty_button, compact) = controls;
+        let (sidebar_button, view_switch, external_terminal_button, compact) = controls;
         let identity = div()
             .flex_1()
             .min_w_0()
@@ -297,7 +297,7 @@ impl Panes {
                 .px_1(),
             )
             .child(edit_header)
-            .children(kitty_button)
+            .children(external_terminal_button)
             .when(compact, |actions| actions.justify_end().pb_2());
         div()
             .id("main")

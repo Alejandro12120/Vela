@@ -1194,7 +1194,18 @@ fn code_box(id: u64, code: &str, diff: bool, theme: Theme) -> Stateful<Div> {
 }
 
 fn warning_label(warning: &str) -> String {
-    let label = if warning.contains("ContainsSudo") {
+    let label = if warning.starts_with("OutOfScopePath") {
+        let reason = warning
+            .rsplit_once(r#", reason: ""#)
+            .and_then(|(_, reason)| reason.strip_suffix(r#"" }"#));
+        match reason {
+            Some(vela_mcp::path::EMPTY_REMOTE_SCOPE_REASON) => {
+                "Sin carpetas permitidas en este servidor"
+            }
+            Some(vela_mcp::path::EMPTY_LOCAL_SCOPE_REASON) => "Sin carpetas locales permitidas",
+            _ => "Ruta fuera del ámbito",
+        }
+    } else if warning.contains("ContainsSudo") {
         "Contiene sudo"
     } else if warning.contains("ShellChaining") {
         "Encadenamiento de shell"
@@ -1204,12 +1215,46 @@ fn warning_label(warning: &str) -> String {
         "Subshell"
     } else if warning.starts_with("FileExceedsRollbackLimit") {
         "Supera el límite de rollback"
-    } else if warning.starts_with("OutOfScopePath") {
-        "Ruta fuera del ámbito"
     } else {
         warning
     };
     short(label, 48)
+}
+
+#[test]
+fn out_of_scope_warning_explains_an_empty_folder_scope() {
+    use vela_mcp::path::{PathAccess, check_local_path, check_remote_path};
+
+    let path = "/home/ContainsSudo";
+    let warning = |access| {
+        let PathAccess::OutsideScope { reason } = access else {
+            panic!("expected an out of scope path");
+        };
+        format!(
+            "{:?}",
+            vela_mcp::PolicyWarning::OutOfScopePath {
+                path: path.into(),
+                reason,
+            }
+        )
+    };
+    assert_eq!(
+        warning_label(&warning(check_remote_path(path, None, &[], &[]))),
+        "Sin carpetas permitidas en este servidor"
+    );
+    assert_eq!(
+        warning_label(&warning(check_local_path(path, None, None, None, &[]))),
+        "Sin carpetas locales permitidas"
+    );
+    assert_eq!(
+        warning_label(&warning(check_remote_path(
+            path,
+            None,
+            &["/srv/**".into()],
+            &[]
+        ))),
+        "Ruta fuera del ámbito"
+    );
 }
 
 fn countdown(duration: Duration) -> String {

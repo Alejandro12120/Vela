@@ -21,10 +21,12 @@ pub fn segmented(
     let available = enabled.contains(&true);
     div()
         .id(id)
+        .debug_selector(move || id.to_owned())
         .role(Role::RadioGroup)
         .aria_label(label)
         .flex()
         .flex_none()
+        .self_start()
         .items_center()
         .gap(px(2.))
         .p(px(2.))

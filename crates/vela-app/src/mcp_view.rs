@@ -95,6 +95,8 @@ struct ServerDraft {
     id: String,
     initial: ServerMcpPolicy,
     policy: ServerMcpPolicy,
+    editing_folder_scope: bool,
+    advanced: bool,
     notes: Entity<TextInput>,
     rules: RuleInputs,
 }
@@ -337,10 +339,7 @@ impl Workspace {
 
     pub(super) fn cancel_mcp(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.mcp.select.is_some() {
-            if let Some(focus) = self.mcp.select_trigger.take() {
-                focus.focus(window, cx);
-            }
-            self.clear_mcp_select();
+            self.dismiss_mcp_select(window, cx);
         } else if self.mcp.saving || self.mcp.applying {
             return;
         } else if self.mcp.confirmation.take().is_some() {
@@ -644,6 +643,14 @@ impl Workspace {
         self.mcp.choices.clear();
     }
 
+    fn dismiss_mcp_select(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(focus) = self.mcp.select_trigger.take() {
+            focus.focus(window, cx);
+        }
+        self.clear_mcp_select();
+        cx.notify();
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn mcp_select(
         &self,
@@ -656,81 +663,110 @@ impl Workspace {
         choose: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) + Clone + 'static,
     ) -> Div {
         let count = choices.len();
+        let selected_index = choices.iter().position(|(value, _)| value == selected);
+        let open = self.mcp.select == Some(id);
+        let label = label.into();
         let trigger = button(
             id,
-            label,
+            "",
             Variant::Secondary,
             theme,
             cx.listener(move |this, _, window, cx| {
-                if this.mcp.select.take() == Some(id) {
-                    this.clear_mcp_select();
+                if this.mcp.select == Some(id) {
+                    this.dismiss_mcp_select(window, cx);
                 } else {
                     this.mcp.select = Some(id);
                     this.mcp.select_trigger = window.focused(cx);
                     this.mcp.choices = (0..count)
                         .map(|_| cx.focus_handle().tab_stop(true))
                         .collect();
-                    if let Some(first) = this.mcp.choices.first() {
-                        first.focus(window, cx);
+                    if let Some(focus) = this.mcp.choices.get(selected_index.unwrap_or(0)) {
+                        focus.focus(window, cx);
                     }
                 }
                 cx.notify();
             }),
         )
+        .debug_selector(move || id.to_owned())
+        .aria_label(label.clone())
+        .aria_expanded(open)
         .w_full()
-        .justify_between()
+        .gap_2()
         .min_w_0()
         .focus(|style| style)
         .focus_visible(move |style| style.border_color(theme.accent))
+        .child(div().flex_1().min_w_0().truncate().child(label))
         .child(
             icon(IconName::ChevronDown)
                 .size(px(14.))
+                .flex_none()
                 .text_color(theme.secondary_text),
         );
         div()
+            .relative()
+            .w_full()
             .min_w_0()
-            .flex()
-            .flex_col()
-            .gap_1()
             .child(trigger)
-            .when(self.mcp.select == Some(id), |row| {
+            .when(open, |row| {
+                let panel = dropdown::dropdown_panel(format!("{id}-options"), theme)
+                    .debug_selector(move || format!("{id}-options"))
+                    .role(gpui::Role::Menu)
+                    .max_w(px(348.))
+                    .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.dismiss_mcp_select(window, cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &modal::Next, window, cx| {
+                        cx.stop_propagation();
+                        this.dismiss_mcp_select(window, cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &modal::Previous, window, cx| {
+                        cx.stop_propagation();
+                        this.dismiss_mcp_select(window, cx);
+                    }))
+                    .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                        let delta = match event.keystroke.key.as_str() {
+                            "down" => 1,
+                            "up" => -1,
+                            _ => return,
+                        };
+                        let items = &this.mcp.choices;
+                        if let Some(current) = items.iter().position(|item| item.is_focused(window))
+                        {
+                            cx.stop_propagation();
+                            let next = (current as isize + delta).rem_euclid(items.len() as isize);
+                            items[next as usize].focus(window, cx);
+                        }
+                    }))
+                    .children(choices.into_iter().zip(&self.mcp.choices).enumerate().map(
+                        |(index, ((value, label), focus))| {
+                            let choose = choose.clone();
+                            dropdown::dropdown_item(
+                                (id, index),
+                                label,
+                                value == selected,
+                                focus,
+                                theme,
+                            )
+                            .flex_none()
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    this.dismiss_mcp_select(window, cx);
+                                    choose(this, value.clone(), window, cx);
+                                },
+                            ))
+                        },
+                    ));
                 row.child(
-                    dropdown::dropdown_panel(format!("{id}-options"), theme)
-                        .min_w_0()
-                        .on_key_down(|event, window, cx| match event.keystroke.key.as_str() {
-                            "down" => {
-                                cx.stop_propagation();
-                                window.focus_next(cx);
-                            }
-                            "up" => {
-                                cx.stop_propagation();
-                                window.focus_prev(cx);
-                            }
-                            _ => {}
-                        })
-                        .children(choices.into_iter().zip(&self.mcp.choices).enumerate().map(
-                            |(index, ((value, label), focus))| {
-                                let choose = choose.clone();
-                                dropdown::dropdown_item(
-                                    (id, index),
-                                    label,
-                                    value == selected,
-                                    focus,
-                                    theme,
-                                )
-                                .flex_none()
-                                .on_click(cx.listener(
-                                    move |this, _, window, cx| {
-                                        if let Some(focus) = this.mcp.select_trigger.take() {
-                                            focus.focus(window, cx);
-                                        }
-                                        this.clear_mcp_select();
-                                        choose(this, value.clone(), window, cx);
-                                        cx.notify();
-                                    },
-                                ))
-                            },
-                        )),
+                    gpui::deferred(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .top(gpui::relative(1.))
+                            .mt(px(dropdown::GAP))
+                            .child(gpui::anchored().child(panel)),
+                    )
+                    .with_priority(1),
                 )
             })
     }
@@ -881,8 +917,16 @@ fn stack() -> Div {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::TestAppContext;
+    use gpui::{Modifiers, TestAppContext, VisualTestContext, point, size};
     use vela_core::{Auth, config::Server};
+
+    fn press(cx: &mut VisualTestContext, key: &'static str) {
+        cx.simulate_keystrokes(key);
+        cx.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse(key).unwrap(),
+        });
+        cx.run_until_parked();
+    }
 
     #[gpui::test]
     fn harness_modal_opens_with_apply_disabled_and_closes_with_escape(cx: &mut TestAppContext) {
@@ -902,8 +946,9 @@ mod tests {
         view.update(cx, |this, _| assert!(!this.mcp.is_open()));
     }
 
-    #[gpui::test]
-    fn server_sheet_requires_changes_and_confirms_discard(cx: &mut TestAppContext) {
+    fn open_server_sheet(
+        cx: &mut TestAppContext,
+    ) -> (tempfile::TempDir, Entity<Workspace>, &mut VisualTestContext) {
         let dir = tempfile::tempdir().unwrap();
         vela_core::config::save(
             dir.path(),
@@ -928,6 +973,12 @@ mod tests {
             this.open_mcp_server("fixture".into(), window, cx)
         });
         cx.run_until_parked();
+        (dir, view, cx)
+    }
+
+    #[gpui::test]
+    fn server_sheet_requires_changes_and_confirms_discard(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open_server_sheet(cx);
         view.update(cx, |this, cx| {
             let Some(View::Server(draft)) = &mut this.mcp.dialog else {
                 panic!("no server view")
@@ -955,5 +1006,80 @@ mod tests {
             assert!(!this.mcp.is_open());
         });
         assert!(!dir.path().join(vela_mcp::config::CONFIG_FILE_NAME).exists());
+    }
+
+    #[gpui::test]
+    fn server_sheet_menu_floats_and_restores_trigger_focus(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open_server_sheet(cx);
+        cx.simulate_resize(size(px(640.), px(560.)));
+        cx.run_until_parked();
+        let trigger = cx.debug_bounds("mcp-server-profile").unwrap();
+        let folders = cx.debug_bounds("mcp-folder-scope").unwrap();
+        cx.simulate_click(trigger.center(), Modifiers::none());
+        let panel = cx.debug_bounds("mcp-server-profile-options").unwrap();
+        assert!(panel.top() >= px(0.) && panel.bottom() <= px(560.));
+        assert_eq!(cx.debug_bounds("mcp-server-profile"), Some(trigger));
+        assert_eq!(cx.debug_bounds("mcp-folder-scope"), Some(folders));
+        let trigger_focus = view.read_with(cx, |this, _| {
+            this.mcp.select_trigger.clone().expect("trigger focus")
+        });
+
+        press(cx, "down");
+        press(cx, "enter");
+        view.update_in(cx, |this, window, _| {
+            let Some(View::Server(draft)) = &this.mcp.dialog else {
+                panic!("no server view")
+            };
+            assert_eq!(draft.policy.profile_id, "diagnostics");
+            assert!(trigger_focus.is_focused(window));
+        });
+        assert!(cx.debug_bounds("mcp-server-profile-options").is_none());
+
+        press(cx, "space");
+        assert!(cx.debug_bounds("mcp-server-profile-options").is_some());
+        cx.simulate_keystrokes("escape");
+        assert!(cx.debug_bounds("mcp-server-profile-options").is_none());
+        cx.update(|window, _| assert!(trigger_focus.is_focused(window)));
+
+        press(cx, "enter");
+        assert!(cx.debug_bounds("mcp-server-profile-options").is_some());
+        cx.simulate_click(point(px(5.), px(5.)), Modifiers::none());
+        assert!(cx.debug_bounds("mcp-server-profile-options").is_none());
+        cx.update(|window, _| assert!(trigger_focus.is_focused(window)));
+    }
+
+    #[gpui::test]
+    fn folder_scope_preserves_the_editor_and_advanced_defaults_to_closed(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open_server_sheet(cx);
+        let scope = cx.debug_bounds("mcp-folder-scope").unwrap();
+        let toggle = cx.debug_bounds("mcp-advanced-toggle").unwrap();
+        assert!(cx.debug_bounds("mcp-exec").is_none());
+        cx.simulate_click(toggle.center(), Modifiers::none());
+        assert!(cx.debug_bounds("mcp-exec").is_some());
+        assert!(cx.debug_bounds("Comandos permitidos-add").is_none());
+        let privacy = cx.debug_bounds("mcp-server-hide").unwrap();
+        assert!(privacy.size.width < scope.size.width);
+        press(cx, "space");
+        assert!(cx.debug_bounds("mcp-exec").is_none());
+        view.update(cx, |this, cx| assert!(!this.mcp_has_draft_changes(cx)));
+
+        let select_at = |x, scope: gpui::Bounds<_>, cx: &mut VisualTestContext| {
+            cx.simulate_click(point(x, scope.center().y), Modifiers::none());
+        };
+        assert!(cx.debug_bounds("Permitidas-add").is_none());
+        select_at(scope.left() + px(8.), scope, cx);
+        view.update(cx, |this, _| {
+            let Some(View::Server(draft)) = &this.mcp.dialog else {
+                panic!("no server view")
+            };
+            assert_eq!(draft.policy.allowed_remote_paths, ["/**"]);
+        });
+        let scope = cx.debug_bounds("mcp-folder-scope").unwrap();
+        select_at(scope.center().x, scope, cx);
+        assert!(cx.debug_bounds("Permitidas-add").is_some());
+        view.update(cx, |this, cx| assert!(!this.mcp_has_draft_changes(cx)));
+        let scope = cx.debug_bounds("mcp-folder-scope").unwrap();
+        select_at(scope.right() - px(8.), scope, cx);
+        assert!(cx.debug_bounds("Permitidas-add").is_none());
     }
 }

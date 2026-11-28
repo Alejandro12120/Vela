@@ -64,37 +64,94 @@ impl Workspace {
             settings_row(
                 "Con Vela cerrada (headless)",
                 Some("Qué hacer con las acciones que requieren aprobación.".into()),
-                segmented("mcp-headless", "Con Vela cerrada", &[("Denegar", unavailable), ("Abrir Vela", unavailable)],
-                    usize::from(config.headless_ask == HeadlessAskBehavior::OpenVela), theme,
-                    on_segment(cx, |this, index, window, cx| this.save_mcp(window, cx, false, |config| {
-                        config.headless_ask = if index == 0 { HeadlessAskBehavior::Deny } else { HeadlessAskBehavior::OpenVela };
-                    }))).focus(|style| style).focus_visible(move |style| style.border_color(theme.accent)),
+                segmented(
+                    "mcp-headless",
+                    "Con Vela cerrada",
+                    &[("Denegar", unavailable), ("Abrir Vela", unavailable)],
+                    usize::from(config.headless_ask == HeadlessAskBehavior::OpenVela),
+                    theme,
+                    on_segment(cx, |this, index, window, cx| {
+                        this.save_mcp(window, cx, false, |config| {
+                            config.headless_ask = if index == 0 {
+                                HeadlessAskBehavior::Deny
+                            } else {
+                                HeadlessAskBehavior::OpenVela
+                            };
+                        })
+                    }),
+                )
+                .focus(|style| style)
+                .focus_visible(move |style| style.border_color(theme.accent)),
                 theme,
             ),
             settings_row(
                 "Ocultar dirección y usuario a los agentes",
-                Some("El agente ve el ID, el alias y las notas de los servidores autorizados.".into()),
-                switch_with_state("mcp-hide", "Ocultar dirección y usuario", hidden, theme,
-                    (!busy).then_some(cx.listener(move |this, _, window, cx| this.save_mcp(window, cx, false, |config| config.hide_server_identity = !hidden))))
-                    .focus(|style| style).focus_visible(move |style| style.border_color(theme.text)),
+                Some(
+                    "El agente ve el ID, el alias y las notas de los servidores autorizados."
+                        .into(),
+                ),
+                switch_with_state(
+                    "mcp-hide",
+                    "Ocultar dirección y usuario",
+                    hidden,
+                    theme,
+                    (!busy).then_some(cx.listener(move |this, _, window, cx| {
+                        this.save_mcp(window, cx, false, |config| {
+                            config.hide_server_identity = !hidden
+                        })
+                    })),
+                )
+                .focus(|style| style)
+                .focus_visible(move |style| style.border_color(theme.text)),
                 theme,
             ),
             settings_row(
                 "Compartir carpeta abierta",
-                Some("Comparte con el agente el servidor y la carpeta que tienes abiertos en Vela. Estará disponible con el puente de la ventana (M6).".into()),
-                switch_with_state("mcp-context", "Compartir carpeta abierta", share, theme,
-                    (!busy).then_some(cx.listener(move |this, _, window, cx| this.save_mcp(window, cx, false, |config| config.share_ui_context = !share))))
-                    .focus(|style| style).focus_visible(move |style| style.border_color(theme.text)),
+                Some(
+                    "Comparte con el agente el servidor y la carpeta que tienes abiertos en Vela."
+                        .into(),
+                ),
+                switch_with_state(
+                    "mcp-context",
+                    "Compartir carpeta abierta",
+                    share,
+                    theme,
+                    (!busy).then_some(cx.listener(move |this, _, window, cx| {
+                        this.save_mcp(window, cx, false, |config| config.share_ui_context = !share)
+                    })),
+                )
+                .focus(|style| style)
+                .focus_visible(move |style| style.border_color(theme.text)),
                 theme,
             ),
             settings_row(
                 "Espera máxima de aprobación",
-                Some(if timeout_index < timing.len() { "Al agotarse la espera, se deniega la acción.".into() }
-                    else { format!("Ajuste actual: {timeout} s. Al agotarse la espera, se deniega la acción.").into() }),
-                segmented("mcp-timeout", "Espera máxima de aprobación", &[("1 min", unavailable), ("3 min", unavailable), ("5 min", unavailable)],
-                    timeout_index, theme, on_segment(cx, move |this, index, window, cx|
-                        this.save_mcp(window, cx, false, |config| config.approval_timeout_secs = timing[index])))
-                    .focus(|style| style).focus_visible(move |style| style.border_color(theme.accent)),
+                Some(if timeout_index < timing.len() {
+                    "Al agotarse la espera, se deniega la acción.".into()
+                } else {
+                    format!(
+                        "Ajuste actual: {timeout} s. Al agotarse la espera, se deniega la acción."
+                    )
+                    .into()
+                }),
+                segmented(
+                    "mcp-timeout",
+                    "Espera máxima de aprobación",
+                    &[
+                        ("1 min", unavailable),
+                        ("3 min", unavailable),
+                        ("5 min", unavailable),
+                    ],
+                    timeout_index,
+                    theme,
+                    on_segment(cx, move |this, index, window, cx| {
+                        this.save_mcp(window, cx, false, |config| {
+                            config.approval_timeout_secs = timing[index]
+                        })
+                    }),
+                )
+                .focus(|style| style)
+                .focus_visible(move |style| style.border_color(theme.accent)),
                 theme,
             ),
         ];

@@ -6,6 +6,9 @@ use thiserror::Error;
 
 use crate::presets::CRITICAL_DENIED_PATHS;
 
+pub const EMPTY_REMOTE_SCOPE_REASON: &str = "no hay rutas permitidas configuradas";
+pub const EMPTY_LOCAL_SCOPE_REASON: &str = "no hay rutas locales permitidas configuradas";
+
 /// Error al normalizar una ruta solicitada.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum PathError {
@@ -171,6 +174,7 @@ fn access_for(
     allowed: &[String],
     denied: &[String],
     home: Option<&Path>,
+    empty_scope_reason: &str,
 ) -> PathAccess {
     let requested_norm = match normalize_input(requested, home) {
         Ok(path) => path,
@@ -211,7 +215,7 @@ fn access_for(
 
     if allowed.is_empty() {
         return PathAccess::OutsideScope {
-            reason: "no hay rutas permitidas configuradas".to_owned(),
+            reason: empty_scope_reason.to_owned(),
         };
     }
 
@@ -258,7 +262,14 @@ pub fn check_remote_path(
     // Las reglas explícitas van primero para que `matched_rule` identifique la
     // del usuario; la crítica se añade después pero se evalúa igualmente.
     let all_denied: Vec<String> = denied.iter().cloned().chain(critical).collect();
-    access_for(requested, canonical, allowed, &all_denied, None)
+    access_for(
+        requested,
+        canonical,
+        allowed,
+        &all_denied,
+        None,
+        EMPTY_REMOTE_SCOPE_REASON,
+    )
 }
 
 /// Comprueba una ruta local. `~/.ssh/**` y el directorio de configuración de
@@ -289,7 +300,14 @@ pub fn check_local_path(
             matched_rule: "vela_config_dir".into(),
         };
     }
-    access_for(requested, canonical, allowed, &fixed_denied, home_dir)
+    access_for(
+        requested,
+        canonical,
+        allowed,
+        &fixed_denied,
+        home_dir,
+        EMPTY_LOCAL_SCOPE_REASON,
+    )
 }
 
 #[cfg(test)]

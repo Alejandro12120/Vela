@@ -4,13 +4,69 @@ use super::*;
 use crate::{
     components::{radio::radio_dot, segmented::segmented},
     mcp_model::{
-        availability_allowed, decision_label, decision_tone, exec_label, permission_save_hint,
-        profile_usage, server_permission_issue, valid_notes,
+        availability_allowed, decision_label, exec_label, permission_save_hint, profile_usage,
+        server_permission_issue, valid_notes,
     },
     workspace::settings_view::settings_group,
 };
 
 type DialogContent = (SharedString, AnyElement, String, Option<&'static str>, bool);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FolderScope {
+    EntireServer,
+    SelectedFolders,
+    Ask,
+}
+
+impl FolderScope {
+    const OPTIONS: [Self; 3] = [Self::EntireServer, Self::SelectedFolders, Self::Ask];
+    const LABELS: [(&str, Option<&str>); 3] = [
+        ("Todo el servidor", None),
+        ("Solo carpetas", None),
+        ("Preguntar", None),
+    ];
+}
+
+impl ServerDraft {
+    fn folder_scope(&self) -> FolderScope {
+        match self.policy.allowed_remote_paths.as_slice() {
+            [root] if root == "/**" => FolderScope::EntireServer,
+            [] if !self.editing_folder_scope => FolderScope::Ask,
+            _ => FolderScope::SelectedFolders,
+        }
+    }
+
+    fn set_folder_scope(&mut self, scope: FolderScope) {
+        let previous = self.folder_scope();
+        self.editing_folder_scope = scope == FolderScope::SelectedFolders;
+        let paths = &mut self.policy.allowed_remote_paths;
+        match scope {
+            FolderScope::EntireServer => *paths = vec!["/**".into()],
+            FolderScope::Ask => paths.clear(),
+            FolderScope::SelectedFolders if previous == FolderScope::EntireServer => paths.clear(),
+            FolderScope::SelectedFolders => {}
+        }
+    }
+
+    fn advanced_count(&self, cx: &App) -> usize {
+        let policy = &self.policy;
+        [
+            policy.exec_mode.is_some(),
+            policy.sudo.is_some(),
+            policy.hide_server_identity.is_some(),
+            optional_text(&self.notes, cx).is_some(),
+        ]
+        .into_iter()
+        .filter(|custom| *custom)
+        .count()
+            + policy.allowed_commands.len()
+            + policy.denied_commands.len()
+            + policy.denied_remote_paths.len()
+            + policy.allowed_local_paths.len()
+            + policy.scoped_rules.len()
+    }
+}
 
 #[derive(Clone, Copy)]
 enum Rule {
@@ -115,6 +171,19 @@ impl RuleInputs {
             .values()
             .all(|field| field.read(cx).value().trim().is_empty())
     }
+
+    fn clear(&mut self, rule: Rule, window: &mut Window, cx: &mut Context<Workspace>) {
+        let label = rule.label();
+        self.fields[label].update(cx, |field, cx| field.set_value("", window, cx));
+        if self.error.is_some_and(|(field, _)| field == label) {
+            self.error = None;
+        }
+    }
+
+    fn clear_command_inputs(&mut self, window: &mut Window, cx: &mut Context<Workspace>) {
+        self.clear(Rule::CommandAllow, window, cx);
+        self.clear(Rule::CommandDeny, window, cx);
+    }
 }
 
 fn optional_text(input: &Entity<TextInput>, cx: &App) -> Option<String> {
@@ -174,6 +243,8 @@ impl Workspace {
         self.mcp.dialog = Some(View::Server(Box::new(ServerDraft {
             id,
             initial: policy.clone(),
+            editing_folder_scope: !policy.allowed_remote_paths.is_empty(),
+            advanced: false,
             policy,
             notes,
             rules: RuleInputs::new(cx),
@@ -424,89 +495,174 @@ impl Workspace {
         let profile_name = profile
             .as_ref()
             .map_or("Perfil no encontrado", |profile| profile.name.as_str());
-        let body = stack().gap_3().children(self.mcp_error(theme, cx))
-            .child(div().flex().items_start().gap_2().justify_between()
-                .child(stack().gap_0().flex_1()
-                    .child(ellipsis("mcp-endpoint", format!("{}@{}:{}", server.user, server.host, server.port), theme).font_family(crate::theme::monospace()))
-                    .when(policy.hides_identity(config), |heading| heading.child(muted(policy.alias.as_ref().map_or_else(
-                        || format!("Oculto a los agentes · ID {}", server.id),
-                        |alias| format!("Oculto a los agentes (alias {alias})"),
-                    ), theme))))
-                .child(badge(profile_name.to_owned(), Tone::Neutral, theme).max_w(px(210.))))
-            .child(self.availability_rows(policy.availability, &server.auth, theme, cx))
-            .child(settings_group(theme, vec![
-                permission_row(
-                    "Perfil de permisos",
-                    None,
-                    self.mcp_select("mcp-server-profile", profile_name.to_owned(),
-                        presets::all_profiles(config).into_iter().map(|profile| (profile.id, profile.name)).collect(),
-                        &policy.profile_id, theme, cx, |this, id, _, _| {
-                            if let Some(View::Server(draft)) = &mut this.mcp.dialog { draft.policy.profile_id = id; }
-                        }),
-                ),
-                permission_row(
-                    "Notas para el agente",
-                    Some(technical_sentence("Contexto breve visible en", "list_servers", ".", theme)),
-                    draft.notes.clone(),
-                ),
-                permission_row("Ocultar host y usuario",
-                    Some(muted(format!("Ajuste global {}.", if config.hide_server_identity { "activo" } else { "inactivo" }), theme)),
-                    segmented("mcp-server-hide", "Ocultar host y usuario", &[("Heredar", None), ("Sí", None), ("No", None)],
-                        match policy.hide_server_identity { None => 0, Some(true) => 1, Some(false) => 2 }, theme,
-                        on_segment(cx, |this, index, _, cx| {
-                            if let Some(View::Server(draft)) = &mut this.mcp.dialog {
-                                draft.policy.hide_server_identity = [None, Some(true), Some(false)][index];
-                                cx.notify();
-                            }
-                        })).focus(|style| style).focus_visible(move |style| style.border_color(theme.accent)))
-            ]))
-            .child(permission_group(
-                "Rutas remotas",
-                Some("Los patrones permitidos delimitan el ámbito de las operaciones que permite el perfil."),
-                vec![
-                    self.rule_list(Rule::RemoteAllow, &policy.allowed_remote_paths, profile.as_ref().map_or(&[], |profile| &profile.default_allowed_remote_paths), Some(&draft.rules), theme, cx),
-                    self.rule_list(Rule::RemoteDeny, &policy.denied_remote_paths, &profile.as_ref().map_or_else(presets::critical_denied_paths, PermissionProfile::denied_paths), Some(&draft.rules), theme, cx),
-                ],
-                theme,
-            ))
-            .child(permission_group(
-                "Comandos y transferencias",
+        let folders = draft.folder_scope();
+        let inherited_folders = profile.as_ref().map_or(&[][..], |profile| {
+            profile.default_allowed_remote_paths.as_slice()
+        });
+        let mut permissions = vec![
+            permission_row(
+                "Perfil",
                 None,
-                vec![
-                    self.exec_control((policy.exec_mode, profile.as_ref().map(|profile| profile.exec_mode)), false, false, theme, cx),
-                    self.sudo_control((policy.sudo, profile.as_ref().map(|profile| profile.sudo)), false, false, theme, cx),
-                    self.rule_list(Rule::CommandAllow, &policy.allowed_commands, profile.as_ref().map_or(&[], |profile| &profile.allowed_commands), Some(&draft.rules), theme, cx),
-                    self.rule_list(Rule::CommandDeny, &policy.denied_commands, profile.as_ref().map_or(&[], |profile| &profile.denied_commands), Some(&draft.rules), theme, cx),
-                    self.rule_list(Rule::LocalAllow, &policy.allowed_local_paths, &[], Some(&draft.rules), theme, cx),
-                ],
+                self.mcp_select(
+                    "mcp-server-profile",
+                    profile_name.to_owned(),
+                    presets::all_profiles(config)
+                        .into_iter()
+                        .map(|profile| (profile.id, profile.name))
+                        .collect(),
+                    &policy.profile_id,
+                    theme,
+                    cx,
+                    |this, id, window, cx| {
+                        let inherited = this
+                            .mcp
+                            .config()
+                            .and_then(|config| presets::resolve_profile(config, &id))
+                            .map(|profile| profile.exec_mode);
+                        if let Some(View::Server(draft)) = &mut this.mcp.dialog {
+                            draft.policy.profile_id = id;
+                            if draft.policy.exec_mode.or(inherited).unwrap_or_default()
+                                == ExecMode::Disabled
+                            {
+                                draft.rules.clear_command_inputs(window, cx);
+                            }
+                        }
+                    },
+                ),
+            )
+            .when_some(
+                profile
+                    .as_ref()
+                    .filter(|profile| !profile.description.is_empty()),
+                |row, profile| {
+                    stack()
+                        .gap_0()
+                        .child(row.pb_1())
+                        .child(div().px_3().pb_2().child(ellipsis(
+                            "mcp-profile-description",
+                            profile.description.clone(),
+                            theme,
+                        )))
+                },
+            ),
+            permission_row(
+                "Ámbito de carpetas",
+                None,
+                segmented(
+                    "mcp-folder-scope",
+                    "Ámbito de carpetas",
+                    &FolderScope::LABELS,
+                    FolderScope::OPTIONS
+                        .iter()
+                        .position(|scope| *scope == folders)
+                        .unwrap(),
+                    theme,
+                    on_segment(cx, |this, index, window, cx| {
+                        if let Some(View::Server(draft)) = &mut this.mcp.dialog {
+                            let scope = FolderScope::OPTIONS[index];
+                            draft.set_folder_scope(scope);
+                            if scope != FolderScope::SelectedFolders {
+                                draft.rules.clear(Rule::RemoteAllow, window, cx);
+                            }
+                            cx.notify();
+                        }
+                    }),
+                )
+                .focus(|style| style)
+                .focus_visible(move |style| style.border_color(theme.accent)),
+            ),
+        ];
+        if folders == FolderScope::SelectedFolders {
+            permissions.push(self.rule_list(
+                Rule::RemoteAllow,
+                &policy.allowed_remote_paths,
+                &[],
+                Some(&draft.rules),
                 theme,
-            ))
-            .when(!policy.scoped_rules.is_empty(), |body| {
-                let rows = policy.scoped_rules.iter().enumerate().map(|(index, rule)| {
-                    let label = rule.scope.strip_prefix("exact:")
-                        .and_then(|scope| serde_json::from_str::<(Vec<String>, Option<String>, Option<String>)>(scope).ok())
-                        .map_or_else(|| rule.scope.clone(), |(paths, command, parameter)| {
-                            command.unwrap_or_else(|| paths.into_iter().chain(parameter).collect::<Vec<_>>().join(" · "))
-                        });
-                    permission_row(
-                        rule.operation.clone(),
-                        Some(technical(label, theme)),
-                        small_button(("mcp-remove-scoped", index), "Quitar", Variant::Secondary, theme,
-                            cx.listener(move |this, _, _, cx| {
-                                if let Some(View::Server(draft)) = &mut this.mcp.dialog
-                                    && index < draft.policy.scoped_rules.len()
-                                {
-                                    draft.policy.scoped_rules.remove(index);
-                                    cx.notify();
-                                }
-                            })),
+                cx,
+            ));
+        }
+        if folders != FolderScope::EntireServer && !inherited_folders.is_empty() {
+            permissions.push(div().px_3().py_2().child(ellipsis(
+                "mcp-inherited-folders",
+                format!(
+                    "Carpetas heredadas del perfil · {}",
+                    inherited_folders.join(" · ")
+                ),
+                theme,
+            )));
+        } else if folders == FolderScope::Ask {
+            permissions.push(div().px_3().py_2().child(muted(
+                "Sin carpetas permitidas: toda operación pedirá aprobación.",
+                theme,
+            )));
+        }
+
+        let advanced_count = draft.advanced_count(cx);
+        let body = stack()
+            .gap_3()
+            .children(self.mcp_error(theme, cx))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .justify_between()
+                    .child(
+                        ellipsis(
+                            "mcp-endpoint",
+                            format!("{}@{}:{}", server.user, server.host, server.port),
+                            theme,
+                        )
+                        .font_family(crate::theme::monospace())
+                        .flex_1(),
                     )
-                }).collect();
-                body.child(permission_group(
-                    "Reglas guardadas en aprobaciones",
-                    Some("Cada regla se aplica a una operación y un destino concretos."),
-                    rows, theme,
-                ))
+                    .child(badge(profile_name.to_owned(), Tone::Neutral, theme).max_w(px(210.))),
+            )
+            .child(self.availability_rows(policy.availability, &server.auth, theme, cx))
+            .child(permission_group("Permisos", None, permissions, theme))
+            .child(
+                div()
+                    .id("mcp-advanced-toggle")
+                    .debug_selector(|| "mcp-advanced-toggle".to_owned())
+                    .role(gpui::Role::Button)
+                    .aria_expanded(draft.advanced)
+                    .tab_index(0)
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .h(px(28.))
+                    .px_1()
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(gpui::transparent_black())
+                    .text_size(px(13.))
+                    .text_color(theme.secondary_text)
+                    .cursor_pointer()
+                    .hover(move |style| style.text_color(theme.text).bg(theme.hover))
+                    .focus_visible(move |style| style.border_color(theme.accent))
+                    .child(
+                        icon(if draft.advanced {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .size(px(14.))
+                        .text_color(theme.secondary_text),
+                    )
+                    .child(heading("Ajustes avanzados"))
+                    .when(advanced_count > 0, |row| {
+                        row.child(badge(advanced_count.to_string(), Tone::Neutral, theme))
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(View::Server(draft)) = &mut this.mcp.dialog {
+                            draft.advanced = !draft.advanced;
+                            cx.notify();
+                        }
+                    })),
+            )
+            .when(draft.advanced, |body| {
+                body.child(self.server_advanced(draft, profile.as_ref(), config, theme, cx))
             });
         let hint = self.server_save_hint(draft, cx);
         (
@@ -516,6 +672,208 @@ impl Workspace {
             Some("Guardar"),
             hint.is_none(),
         )
+    }
+
+    fn server_advanced(
+        &self,
+        draft: &ServerDraft,
+        profile: Option<&PermissionProfile>,
+        config: &McpConfig,
+        theme: Theme,
+        cx: &Context<Self>,
+    ) -> Div {
+        let policy = &draft.policy;
+        let inherited_exec = profile.map(|profile| profile.exec_mode);
+        let mut commands = vec![
+            self.exec_control((policy.exec_mode, inherited_exec), false, false, theme, cx),
+            self.sudo_control(
+                (policy.sudo, profile.map(|profile| profile.sudo)),
+                false,
+                false,
+                theme,
+                cx,
+            ),
+        ];
+        if policy.exec_mode.or(inherited_exec).unwrap_or_default() != ExecMode::Disabled {
+            for (rule, own, inherited) in [
+                (
+                    Rule::CommandAllow,
+                    &policy.allowed_commands,
+                    profile.map(|profile| &profile.allowed_commands),
+                ),
+                (
+                    Rule::CommandDeny,
+                    &policy.denied_commands,
+                    profile.map(|profile| &profile.denied_commands),
+                ),
+            ] {
+                commands.push(
+                    self.rule_list(rule, own, &[], Some(&draft.rules), theme, cx)
+                        .when_some(inherited.filter(|rules| !rules.is_empty()), |row, rules| {
+                            row.child(ellipsis(
+                                format!("{}-inherited", rule.label()),
+                                format!("Del perfil · {}", rules.join(" · ")),
+                                theme,
+                            ))
+                        }),
+                );
+            }
+        }
+
+        let mut paths = vec![div().px_3().py_2().child(muted(
+            "Protegidas siempre: .env, .ssh, claves privadas y /etc/shadow.",
+            theme,
+        ))];
+        if let Some(profile) = profile {
+            let inherited = profile
+                .default_denied_remote_paths
+                .iter()
+                .filter(|path| !presets::CRITICAL_DENIED_PATHS.contains(&path.as_str()))
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            if !inherited.is_empty() {
+                paths.push(div().px_3().py_2().child(ellipsis(
+                    "mcp-inherited-denied-paths",
+                    format!("Prohibidas por el perfil · {}", inherited.join(" · ")),
+                    theme,
+                )));
+            }
+        }
+        paths.extend([
+            self.rule_list(
+                Rule::RemoteDeny,
+                &policy.denied_remote_paths,
+                &[],
+                Some(&draft.rules),
+                theme,
+                cx,
+            ),
+            self.rule_list(
+                Rule::LocalAllow,
+                &policy.allowed_local_paths,
+                &[],
+                Some(&draft.rules),
+                theme,
+                cx,
+            ),
+        ]);
+
+        stack()
+            .gap_3()
+            .child(permission_group("Comandos", None, commands, theme))
+            .child(permission_group(
+                "Rutas protegidas y locales",
+                None,
+                paths,
+                theme,
+            ))
+            .child(permission_group(
+                "Privacidad y notas",
+                None,
+                vec![
+                    permission_row(
+                        "Ocultar host y usuario",
+                        Some(muted(
+                            format!(
+                                "Ajuste global {}.",
+                                if config.hide_server_identity {
+                                    "activo"
+                                } else {
+                                    "inactivo"
+                                }
+                            ),
+                            theme,
+                        )),
+                        segmented(
+                            "mcp-server-hide",
+                            "Ocultar host y usuario",
+                            &[("Heredar", None), ("Sí", None), ("No", None)],
+                            match policy.hide_server_identity {
+                                None => 0,
+                                Some(true) => 1,
+                                Some(false) => 2,
+                            },
+                            theme,
+                            on_segment(cx, |this, index, _, cx| {
+                                if let Some(View::Server(draft)) = &mut this.mcp.dialog {
+                                    draft.policy.hide_server_identity =
+                                        [None, Some(true), Some(false)][index];
+                                    cx.notify();
+                                }
+                            }),
+                        )
+                        .focus(|style| style)
+                        .focus_visible(move |style| style.border_color(theme.accent)),
+                    ),
+                    permission_row(
+                        "Notas para el agente",
+                        Some(technical_sentence(
+                            "Contexto breve visible en",
+                            "list_servers",
+                            ".",
+                            theme,
+                        )),
+                        draft.notes.clone(),
+                    ),
+                ],
+                theme,
+            ))
+            .when(!policy.scoped_rules.is_empty(), |body| {
+                let rows = policy
+                    .scoped_rules
+                    .iter()
+                    .enumerate()
+                    .map(|(index, rule)| {
+                        let label = rule
+                            .scope
+                            .strip_prefix("exact:")
+                            .and_then(|scope| {
+                                serde_json::from_str::<(
+                                        Vec<String>,
+                                        Option<String>,
+                                        Option<String>,
+                                    )>(scope)
+                                    .ok()
+                            })
+                            .map_or_else(
+                                || rule.scope.clone(),
+                                |(paths, command, parameter)| {
+                                    command.unwrap_or_else(|| {
+                                        paths
+                                            .into_iter()
+                                            .chain(parameter)
+                                            .collect::<Vec<_>>()
+                                            .join(" · ")
+                                    })
+                                },
+                            );
+                        permission_row(
+                            rule.operation.clone(),
+                            Some(technical(label, theme)),
+                            small_button(
+                                ("mcp-remove-scoped", index),
+                                "Quitar",
+                                Variant::Secondary,
+                                theme,
+                                cx.listener(move |this, _, _, cx| {
+                                    if let Some(View::Server(draft)) = &mut this.mcp.dialog
+                                        && index < draft.policy.scoped_rules.len()
+                                    {
+                                        draft.policy.scoped_rules.remove(index);
+                                        cx.notify();
+                                    }
+                                }),
+                            ),
+                        )
+                    })
+                    .collect();
+                body.child(permission_group(
+                    "Reglas guardadas en aprobaciones",
+                    Some("Cada regla se aplica a una operación y un destino concretos."),
+                    rows,
+                    theme,
+                ))
+            })
     }
 
     fn availability_rows(
@@ -605,7 +963,7 @@ impl Workspace {
             .collect();
         stack()
             .gap_1()
-            .child(heading("Disponibilidad para agentes"))
+            .child(heading("Acceso"))
             .child(settings_group(theme, rows))
     }
 
@@ -773,11 +1131,6 @@ impl Workspace {
             .unwrap_or(0)
             .to_string();
         let effective = current.or(inherited);
-        let tone = effective.map_or(Tone::Neutral, |mode| match mode {
-            ExecMode::Disabled => Tone::Danger,
-            ExecMode::AskAll | ExecMode::AllowExceptDenylist => Tone::Warning,
-            ExecMode::Allowlist => Tone::Success,
-        });
         let value = if current.is_none() && inherited.is_some() {
             format!("Según perfil · {}", label(effective))
         } else {
@@ -798,10 +1151,15 @@ impl Workspace {
                 &key,
                 theme,
                 cx,
-                move |this, choice, _, _| {
+                move |this, choice, window, cx| {
                     let value = values[choice.parse::<usize>().expect("choice index")];
                     match &mut this.mcp.dialog {
-                        Some(View::Server(draft)) => draft.policy.exec_mode = value,
+                        Some(View::Server(draft)) => {
+                            draft.policy.exec_mode = value;
+                            if value.or(inherited).unwrap_or_default() == ExecMode::Disabled {
+                                draft.rules.clear_command_inputs(window, cx);
+                            }
+                        }
                         Some(View::Profile(draft)) => {
                             draft.profile.exec_mode = value.unwrap_or_default()
                         }
@@ -810,7 +1168,7 @@ impl Workspace {
                 },
             )
         };
-        permission_row("SSH exec", None, semantic_control(control, tone, theme))
+        permission_row("SSH exec", None, control)
     }
 
     fn sudo_control(
@@ -842,7 +1200,6 @@ impl Workspace {
             .unwrap_or(0)
             .to_string();
         let effective = current.or(inherited);
-        let tone = effective.map_or(Tone::Neutral, decision_tone);
         let value = if current.is_none() && inherited.is_some() {
             format!("Según perfil · {}", label(effective))
         } else {
@@ -875,11 +1232,7 @@ impl Workspace {
                 },
             )
         };
-        permission_row(
-            "Elevación (sudo)",
-            None,
-            semantic_control(control, tone, theme),
-        )
+        permission_row("Elevación (sudo)", None, control)
     }
 
     fn rule_list(
@@ -972,12 +1325,15 @@ impl Workspace {
                 .items_center()
                 .gap_2()
                 .child(div().flex_1().min_w_0().child(fields.fields[label].clone()))
-                .child(small(
-                    format!("{label}-add"),
-                    "Añadir",
-                    theme,
-                    cx.listener(move |this, _, window, cx| this.add_mcp_rule(rule, window, cx)),
-                )),
+                .child(
+                    small(
+                        format!("{label}-add"),
+                        "Añadir",
+                        theme,
+                        cx.listener(move |this, _, window, cx| this.add_mcp_rule(rule, window, cx)),
+                    )
+                    .debug_selector(move || format!("{label}-add")),
+                ),
         )
         .when_some(
             fields.error.filter(|(field, _)| *field == label),
@@ -1047,7 +1403,15 @@ fn permission_row(
                 .child(div().text_size(px(13.)).child(label.into()))
                 .children(description),
         )
-        .child(div().flex_1().min_w_0().child(control))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .justify_end()
+                .child(control),
+        )
 }
 
 fn permission_group(
@@ -1071,19 +1435,4 @@ fn permission_group(
                 .children(detail.map(|detail| muted(detail, theme))),
         )
         .child(settings_group(theme, rows))
-}
-
-fn semantic_control(control: Div, tone: Tone, theme: Theme) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .child(
-            div()
-                .size(px(7.))
-                .flex_none()
-                .rounded_full()
-                .bg(tone_color(tone, theme)),
-        )
-        .child(div().flex_1().min_w_0().child(control))
 }

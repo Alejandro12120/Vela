@@ -1,3 +1,7 @@
+#[path = "mcp_view/live.rs"]
+mod live;
+pub(super) use live::Live;
+
 #[path = "mcp_view/harnesses.rs"]
 mod harnesses;
 #[path = "mcp_view/permissions.rs"]
@@ -175,6 +179,7 @@ impl Workspace {
                 match result {
                     Ok(snapshot) => {
                         this.mcp.snapshot = Some(snapshot);
+                        this.sync_mcp_broker(window, cx);
                         this.mcp.simulator.get_or_insert_with(|| {
                             input(
                                 cx,
@@ -191,6 +196,7 @@ impl Workspace {
                     }
                     Err(error) => {
                         this.mcp.snapshot = None;
+                        this.sync_mcp_broker(window, cx);
                         this.mcp.config_error = Some(format!("No se pudo leer mcp.toml. {error}"));
                     }
                 }
@@ -210,6 +216,17 @@ impl Workspace {
         close_after: bool,
         change: impl FnOnce(&mut McpConfig),
     ) {
+        self.save_mcp_with_reply(window, cx, close_after, None, change);
+    }
+
+    fn save_mcp_with_reply(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        close_after: bool,
+        reply: Option<crate::mcp_broker::Reply<io::Result<()>>>,
+        change: impl FnOnce(&mut McpConfig),
+    ) {
         let (Some(dir), Some(snapshot)) = (self.dir.clone(), self.mcp.snapshot.clone()) else {
             return;
         };
@@ -219,6 +236,9 @@ impl Workspace {
         let mut config = snapshot.config.clone();
         change(&mut config);
         if config == snapshot.config {
+            if let Some(reply) = reply {
+                let _ = reply.send(Ok(()));
+            }
             if close_after {
                 self.finish_mcp(window, cx);
             }
@@ -236,11 +256,15 @@ impl Workspace {
                 match result {
                     Ok(snapshot) => {
                         this.mcp.snapshot = Some(snapshot);
+                        this.sync_mcp_broker(window, cx);
                         this.mcp.simulation = None;
                         if close_after {
                             this.finish_mcp(window, cx);
                         }
                         this.refresh_mcp_usage(window, cx);
+                        if let Some(reply) = reply {
+                            let _ = reply.send(Ok(()));
+                        }
                     }
                     Err(error) => {
                         this.mcp.conflict = error.kind() == io::ErrorKind::AlreadyExists;
@@ -249,6 +273,9 @@ impl Workspace {
                         } else {
                             format!("No se pudo guardar mcp.toml. {error}")
                         });
+                        if let Some(reply) = reply {
+                            let _ = reply.send(Err(error));
+                        }
                     }
                 }
                 cx.notify();

@@ -480,7 +480,34 @@ impl Workspace {
                     self.rule_list(Rule::LocalAllow, &policy.allowed_local_paths, &[], Some(&draft.rules), theme, cx),
                 ],
                 theme,
-            ));
+            ))
+            .when(!policy.scoped_rules.is_empty(), |body| {
+                let rows = policy.scoped_rules.iter().enumerate().map(|(index, rule)| {
+                    let label = rule.scope.strip_prefix("exact:")
+                        .and_then(|scope| serde_json::from_str::<(Vec<String>, Option<String>, Option<String>)>(scope).ok())
+                        .map_or_else(|| rule.scope.clone(), |(paths, command, parameter)| {
+                            command.unwrap_or_else(|| paths.into_iter().chain(parameter).collect::<Vec<_>>().join(" · "))
+                        });
+                    permission_row(
+                        rule.operation.clone(),
+                        Some(technical(label, theme)),
+                        small_button(("mcp-remove-scoped", index), "Quitar", Variant::Secondary, theme,
+                            cx.listener(move |this, _, _, cx| {
+                                if let Some(View::Server(draft)) = &mut this.mcp.dialog
+                                    && index < draft.policy.scoped_rules.len()
+                                {
+                                    draft.policy.scoped_rules.remove(index);
+                                    cx.notify();
+                                }
+                            })),
+                    )
+                }).collect();
+                body.child(permission_group(
+                    "Reglas guardadas en aprobaciones",
+                    Some("Cada regla se aplica a una operación y un destino concretos."),
+                    rows, theme,
+                ))
+            });
         let hint = self.server_save_hint(draft, cx);
         (
             title,
@@ -1001,7 +1028,11 @@ impl Workspace {
     }
 }
 
-fn permission_row(label: &'static str, description: Option<Div>, control: impl IntoElement) -> Div {
+fn permission_row(
+    label: impl Into<SharedString>,
+    description: Option<Div>,
+    control: impl IntoElement,
+) -> Div {
     div()
         .flex()
         .items_center()
@@ -1013,7 +1044,7 @@ fn permission_row(label: &'static str, description: Option<Div>, control: impl I
                 .w(gpui::relative(0.38))
                 .flex_none()
                 .gap_0()
-                .child(div().text_size(px(13.)).child(label))
+                .child(div().text_size(px(13.)).child(label.into()))
                 .children(description),
         )
         .child(div().flex_1().min_w_0().child(control))

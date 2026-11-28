@@ -451,6 +451,28 @@ impl PolicyEngine {
         (allowed.remote, denied.remote)
     }
 
+    pub(crate) fn allows_approved_scope(
+        &self,
+        preview: &crate::executor::ApprovalPreview,
+        now: SystemTime,
+    ) -> bool {
+        let Some(rule) = preview.scoped_rule() else {
+            return false;
+        };
+        self.config
+            .servers
+            .get(&preview.server_id)
+            .is_some_and(|policy| {
+                policy.scoped_rules.contains(&rule)
+                    || self.jit.has_scoped_allow(
+                        &preview.server_id,
+                        &rule.operation,
+                        &rule.scope,
+                        now,
+                    )
+            })
+    }
+
     /// Evalúa una acción completa del agente.
     pub fn evaluate(&self, action: &McpAction, ctx: &EvalContext) -> PolicyDecision {
         if !self.config.enabled {

@@ -43,6 +43,7 @@ pub enum IconName {
     Error,
     Key,
     Lock,
+    Shield,
     Plug,
     Unplug,
     Spinner,
@@ -99,6 +100,7 @@ impl IconName {
         IconName::Error,
         IconName::Key,
         IconName::Lock,
+        IconName::Shield,
         IconName::Plug,
         IconName::Unplug,
         IconName::Spinner,
@@ -153,6 +155,7 @@ impl IconName {
             Self::Error => "icons/circle-alert.svg",
             Self::Key => "icons/key-round.svg",
             Self::Lock => "icons/lock.svg",
+            Self::Shield => "icons/shield.svg",
             Self::Plug => "icons/plug.svg",
             Self::Unplug => "icons/unplug.svg",
             Self::Spinner => "icons/loader-circle.svg",
@@ -171,6 +174,10 @@ impl IconName {
 }
 
 const ICONS: &[(&str, &[u8])] = &[
+    (
+        "icons/shield.svg",
+        include_bytes!("../assets/icons/shield.svg"),
+    ),
     (
         "icons/search.svg",
         include_bytes!("../assets/icons/search.svg"),

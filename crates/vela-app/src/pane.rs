@@ -547,7 +547,7 @@ impl Pane {
         self.open(path, Navigation::Open, window, cx);
     }
 
-    fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let source = self.source.clone();
         let executor = cx.background_executor().clone();
         let expanded = self.tree.expanded.clone();

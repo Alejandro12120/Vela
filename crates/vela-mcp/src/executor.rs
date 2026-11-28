@@ -7,6 +7,7 @@
 //! que una denegación o un conflicto de ediciones sigue bloqueando la llamada.
 
 use std::{
+    borrow::Cow,
     collections::BTreeMap,
     io,
     path::{Path, PathBuf},
@@ -20,7 +21,7 @@ use vela_core::{ExecOptions, ExecOutput, Session};
 
 use crate::{
     McpAction, McpConfig, PolicyDecision, PolicyEngine, PolicyWarning, ServerIdentity,
-    config::Decision,
+    config::{Decision, ScopedRule},
     patch::{self, PatchError, TextEdit},
     path::{self, PathAccess, glob_match, normalize_lexical},
     rollback::RollbackStore,
@@ -87,6 +88,26 @@ pub struct ApprovalPreview {
     /// Motivo de la política, distinto del motivo del agente.
     pub reason: String,
     pub matched_rule: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_parameter: Option<String>,
+}
+
+impl ApprovalPreview {
+    /// Rutas canónicas y comando efectivo (incluido su cwd) tras evaluación.
+    pub fn scoped_rule(&self) -> Option<ScopedRule> {
+        if self.paths.is_empty() && self.command.is_none() {
+            return None;
+        }
+        Some(ScopedRule {
+            operation: self.operation.clone(),
+            // Tagged and structured to keep paths, commands and legacy JIT
+            // scopes distinct, even when they contain punctuation.
+            scope: format!(
+                "exact:{}",
+                serde_json::json!([self.paths, self.command, self.scope_parameter])
+            ),
+        })
+    }
 }
 
 /// Resultado común de cualquier herramienta.
@@ -135,6 +156,10 @@ pub trait McpBackend {
     fn home_dir(&self) -> Option<PathBuf> {
         std::env::var_os("HOME").map(PathBuf::from)
     }
+    /// GUI providers can re-read policy after resolving remote paths and diffs.
+    fn live_policy(&self) -> Option<PolicyEngine> {
+        None
+    }
     fn now(&self) -> SystemTime {
         SystemTime::now()
     }
@@ -145,6 +170,7 @@ pub struct Executor<B: McpBackend> {
     pub backend: B,
     pub policy: PolicyEngine,
     pub rollback: Arc<RollbackStore>,
+    approved: Option<ApprovalPreview>,
 }
 
 impl<B: McpBackend> Executor<B> {
@@ -157,7 +183,19 @@ impl<B: McpBackend> Executor<B> {
             backend,
             policy,
             rollback,
+            approved: None,
         }
+    }
+
+    pub fn with_approved_preview(mut self, preview: ApprovalPreview) -> Self {
+        self.approved = Some(preview);
+        self
+    }
+
+    fn policy(&self) -> Cow<'_, PolicyEngine> {
+        self.backend
+            .live_policy()
+            .map_or(Cow::Borrowed(&self.policy), Cow::Owned)
     }
 
     pub(crate) fn context(&self, server_id: &str, dirty: bool) -> crate::EvalContext {
@@ -190,7 +228,7 @@ impl<B: McpBackend> Executor<B> {
         mode: ApprovalMode,
         preview: ApprovalPreview,
     ) -> Result<Option<ToolOutcome<T>>, ExecutorError> {
-        let decision = self.policy.evaluate(action, ctx);
+        let decision = self.policy().evaluate(action, ctx);
         self.gate_decision(decision, mode, preview)
     }
 
@@ -215,7 +253,23 @@ impl<B: McpBackend> Executor<B> {
         if decision.outcome == Decision::Deny || edits_conflict {
             return Ok(Some(ToolOutcome::Denied(decision)));
         }
-        if decision.outcome == Decision::Ask && mode == ApprovalMode::Normal {
+        // Reconfirm if the actual target, diff or risk changed while the
+        // person was deciding, even if the current policy would auto-allow.
+        let changed = self.approved.as_ref().is_some_and(|approved| {
+            approved.operation != preview.operation
+                || approved.server_id != preview.server_id
+                || approved.paths != preview.paths
+                || approved.command != preview.command
+                || approved.unified_diff != preview.unified_diff
+                || approved.warnings != preview.warnings
+        });
+        if changed
+            || (decision.outcome == Decision::Ask
+                && mode == ApprovalMode::Normal
+                && !self
+                    .policy()
+                    .allows_approved_scope(&preview, self.backend.now()))
+        {
             return Ok(Some(ToolOutcome::NeedsApproval {
                 decision,
                 preview: Box::new(preview),
@@ -352,12 +406,10 @@ impl<B: McpBackend> Executor<B> {
         }
         let now = self.backend.now();
         let mut servers = Vec::new();
+        let policy = self.policy();
         for (id, identity) in self.backend.list_servers() {
             let connected = self.backend.session(&id).is_some();
-            if let Some(info) = self
-                .policy
-                .describe_server_for_agent(&id, &identity, connected, now)
-            {
+            if let Some(info) = policy.describe_server_for_agent(&id, &identity, connected, now) {
                 servers.push(info.into());
             }
         }
@@ -383,7 +435,8 @@ impl<B: McpBackend> Executor<B> {
         if let Some(outcome) = self.gate(&action, &ctx, mode, preview)? {
             return Ok(outcome);
         }
-        let config = self.policy.config();
+        let engine = self.policy();
+        let config = engine.config();
         let policy = config
             .servers
             .get(&input.server_id)
@@ -401,8 +454,7 @@ impl<B: McpBackend> Executor<B> {
                 user: String::new(),
             });
         let now = self.backend.now();
-        let info = self
-            .policy
+        let info = engine
             .describe_server_for_agent(
                 &input.server_id,
                 &identity,
@@ -527,7 +579,7 @@ impl<B: McpBackend> Executor<B> {
         let depth = input.depth.unwrap_or(1).clamp(1, MAX_DEPTH);
         let root = PathBuf::from(&canonical);
         let (allowed, denied) = self
-            .policy
+            .policy()
             .effective_remote_path_scopes(&input.server_id, ctx.now);
         let mut entries = Vec::new();
         collect_entries(
@@ -647,7 +699,7 @@ impl<B: McpBackend> Executor<B> {
             size: Some(input.content.len() as u64),
         };
         let ctx = self.context(&input.server_id, dirty);
-        let decision = self.policy.evaluate(&action, &ctx);
+        let decision = self.policy().evaluate(&action, &ctx);
         if decision.outcome == Decision::Deny {
             return Ok(ToolOutcome::Denied(decision));
         }
@@ -682,6 +734,10 @@ impl<B: McpBackend> Executor<B> {
         );
         preview.agent_reason = input.reason.clone();
         preview.unified_diff = Some(diff.clone());
+        let dirty = self.dirty_for(&input.server_id, std::slice::from_ref(&canonical));
+        let decision = self
+            .policy()
+            .evaluate(&action, &self.context(&input.server_id, dirty));
         if let Some(outcome) = self.gate_decision(decision, mode, preview)? {
             return Ok(outcome);
         }
@@ -733,7 +789,7 @@ impl<B: McpBackend> Executor<B> {
             canonical_path: Some(canonical.clone()),
             size: None,
         };
-        let first = self.policy.evaluate(&action, &ctx);
+        let first = self.policy().evaluate(&action, &ctx);
         let edits_conflict = first
             .warnings
             .iter()
@@ -760,7 +816,10 @@ impl<B: McpBackend> Executor<B> {
             canonical_path: Some(canonical.clone()),
             size: Some(result.updated.len() as u64),
         };
-        let decision = self.policy.evaluate(&action, &ctx);
+        let dirty = self.dirty_for(&input.server_id, std::slice::from_ref(&canonical));
+        let decision = self
+            .policy()
+            .evaluate(&action, &self.context(&input.server_id, dirty));
         let mut preview = Self::preview(
             "fs_patch",
             &input.server_id,
@@ -876,6 +935,7 @@ impl<B: McpBackend> Executor<B> {
             std::slice::from_ref(&canonical),
         );
         preview.agent_reason = input.reason.clone();
+        preview.scope_parameter = input.recursive.then(|| "recursivo".to_owned());
         if let Some(outcome) = self.gate(&action, &ctx, mode, preview)? {
             return Ok(outcome);
         }
@@ -1045,7 +1105,7 @@ impl<B: McpBackend> Executor<B> {
             server_id: input.server_id.clone(),
             command: input.command.clone(),
         };
-        let mut decision = self.policy.evaluate(&action, &ctx);
+        let mut decision = self.policy().evaluate(&action, &ctx);
         // Un comando denegado nunca puede rebajarse a `Ask` por un cwd fuera
         // del ámbito, ni siquiera con aprobación previa.
         if decision.outcome == Decision::Deny {
@@ -1061,6 +1121,11 @@ impl<B: McpBackend> Executor<B> {
             Some(cwd) => vela_core::exec_remote_command(&input.command, Some(cwd)),
             None => input.command.clone(),
         });
+        let policy = self.policy();
+        decision = policy.evaluate(&action, &ctx);
+        if decision.outcome == Decision::Deny {
+            return Ok(ToolOutcome::Denied(decision));
+        }
         if let (Some(cwd), Some(canonical)) = (&input.cwd, &canonical_cwd) {
             // El directorio de trabajo se valida igual que cualquier otra ruta remota.
             let path_action = McpAction::FsList {
@@ -1068,7 +1133,7 @@ impl<B: McpBackend> Executor<B> {
                 path: cwd.clone(),
                 canonical_path: Some(canonical.clone()),
             };
-            let path_decision = self.policy.evaluate(&path_action, &ctx);
+            let path_decision = policy.evaluate(&path_action, &ctx);
             preview.paths.push(canonical.clone());
             if path_decision.outcome == Decision::Deny {
                 return Ok(ToolOutcome::Denied(path_decision));

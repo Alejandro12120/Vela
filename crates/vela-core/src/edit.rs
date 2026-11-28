@@ -103,6 +103,20 @@ pub struct Edit {
     pub state: State,
 }
 
+impl Edit {
+    pub fn canonical_remote_path(&self) -> &Path {
+        &self.canonical_remote
+    }
+
+    /// Also detects a local save before the directory watch has processed it.
+    pub fn has_local_changes(&self) -> bool {
+        self.state != State::Synced
+            || fs::metadata(&self.local_path)
+                .and_then(|metadata| Stamp::local(&metadata))
+                .is_ok_and(|stamp| stamp != self.baseline.local)
+    }
+}
+
 #[derive(Default, Deserialize, Serialize)]
 struct Records {
     edits: Vec<Edit>,

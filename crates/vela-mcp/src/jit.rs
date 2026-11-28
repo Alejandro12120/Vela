@@ -87,6 +87,13 @@ impl JitGrants {
             .map(|grant| grant.profile_id.as_str())
     }
 
+    pub fn profile_expiry(&self, server_id: &str, now: SystemTime) -> Option<SystemTime> {
+        self.profiles
+            .get(server_id)
+            .filter(|grant| grant.expires_at > now)
+            .map(|grant| grant.expires_at)
+    }
+
     /// Comprueba una concesión efímera para una acción y un ámbito exactos.
     pub fn has_scoped_allow(
         &self,

@@ -79,6 +79,13 @@ impl Default for RollbackConfig {
     }
 }
 
+/// Excepción aprobada por la persona para una operación y su destino exacto.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ScopedRule {
+    pub operation: String,
+    pub scope: String,
+}
+
 /// Política MCP de un servidor, indexada por su `server_id`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ServerMcpPolicy {
@@ -106,6 +113,8 @@ pub struct ServerMcpPolicy {
     pub allowed_commands: Vec<String>,
     #[serde(default)]
     pub denied_commands: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scoped_rules: Vec<ScopedRule>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sudo: Option<Decision>,
 }
@@ -135,6 +144,7 @@ impl Default for ServerMcpPolicy {
             exec_mode: None,
             allowed_commands: Vec::new(),
             denied_commands: Vec::new(),
+            scoped_rules: Vec::new(),
             sudo: None,
         }
     }
@@ -330,8 +340,9 @@ fn patch_table(
             continue;
         }
         match target.get_mut(key) {
-            Some(current) => patch_item(current, before, value, inlined),
-            None => {
+            // Unlike profiles, scoped rules have no ID to merge array tables by.
+            Some(current) if key != "scoped_rules" => patch_item(current, before, value, inlined),
+            _ => {
                 let mut value = value.clone();
                 if inlined {
                     value.make_value();
@@ -594,12 +605,53 @@ mod tests {
                 exec_mode: Some(ExecMode::Allowlist),
                 allowed_commands: vec!["ls *".to_owned()],
                 denied_commands: vec!["rm *".to_owned()],
+                scoped_rules: Vec::new(),
                 sudo: Some(Decision::Deny),
             },
         );
         save(dir.path(), &config).unwrap();
         let loaded = load(dir.path()).unwrap();
         assert_eq!(loaded, config);
+    }
+
+    #[test]
+    fn scoped_rules_can_be_appended_and_removed_from_the_snapshot() {
+        let dir = temp_dir();
+        let initial = ConfigSnapshot::load(dir.path()).unwrap();
+        let mut config = initial.config.clone();
+        let first = ScopedRule {
+            operation: "fs_write".into(),
+            scope: "first".into(),
+        };
+        let second = ScopedRule {
+            operation: "fs_patch".into(),
+            scope: "second".into(),
+        };
+        config
+            .servers
+            .entry("prod".into())
+            .or_default()
+            .scoped_rules
+            .push(first);
+        let saved = initial.save(dir.path(), &config).unwrap();
+        config
+            .servers
+            .get_mut("prod")
+            .unwrap()
+            .scoped_rules
+            .push(second.clone());
+        let saved = saved.save(dir.path(), &config).unwrap();
+        config
+            .servers
+            .get_mut("prod")
+            .unwrap()
+            .scoped_rules
+            .remove(0);
+        saved.save(dir.path(), &config).unwrap();
+        assert_eq!(
+            load(dir.path()).unwrap().servers["prod"].scoped_rules,
+            [second]
+        );
     }
 
     #[test]

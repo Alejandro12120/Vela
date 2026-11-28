@@ -67,7 +67,7 @@ allowed_remote_paths = ["/srv/proyecto/**"]
 
 El runtime solo abre sesiones propias para servidores `headless` que usan autenticación por agente. El socket del agente se toma del servidor, del ajuste global en `settings.toml` o del primer socket de Bitwarden detectado, en ese orden. OpenSSH conserva su resolución habitual si ninguno está configurado. El modo headless rechaza los prompts de SSH, incluida la confirmación de una clave de host desconocida. Los sockets de control viven en directorios privados por conexión, bajo un directorio temporal del proceso que se elimina al cerrar stdin. Las copias de rollback se guardan en `mcp-rollback/` dentro de la configuración.
 
-Si un servidor IPC responde al inicio, las llamadas se envían por el puente. Con `headless_ask = "open_vela"`, una aprobación pendiente o el acceso a un servidor `on_demand_ask` o `connected_only` pueden iniciar Vela. El runtime espera hasta cinco segundos a que aparezca el IPC. Una vez conectado, cierra sus sesiones SSH propias, reenvía la llamada para una nueva evaluación y mantiene el puente para las siguientes. La fase M3 proporciona el servidor IPC. M6 conectará el servidor IPC a la ventana y a la cola de aprobaciones.
+Si un servidor IPC responde al inicio, las llamadas se envían por el puente. Con `headless_ask = "open_vela"`, una aprobación pendiente o el acceso a un servidor `on_demand_ask` o `connected_only` pueden iniciar Vela. El runtime espera hasta cinco segundos a que aparezca el IPC. Una vez conectado, cierra sus sesiones SSH propias, reenvía la llamada para una nueva evaluación y mantiene el puente para las siguientes. Cuando MCP está habilitado, la ventana de Vela mantiene un broker IPC y usa sus sesiones SSH abiertas. Puede abrir una sesión bajo demanda tras una aprobación específica de conexión y volver a evaluar la operación con el servidor conectado.
 
 ## Integración del anfitrión
 
@@ -88,8 +88,8 @@ Si un servidor IPC responde al inicio, las llamadas se envían por el puente. Co
 | Ruta personalizada del harness | Sin soporte en M4 | Pendiente |
 | Con Vela cerrada | `headless_ask` | Existe |
 | Ocultar dirección y usuario globalmente | `hide_server_identity` | Existe |
-| Compartir carpeta abierta | `share_ui_context`, herramienta `get_ui_context` | Existe; la carpeta de la ventana requiere el puente gráfico de M6 |
-| Espera máxima | `approval_timeout_secs` | Existe; la espera de aprobación en la ventana corresponde a M6 |
+| Compartir carpeta abierta | `share_ui_context`, herramienta `get_ui_context` | Disponible con el puente gráfico |
+| Espera máxima | `approval_timeout_secs` | Disponible con el puente gráfico |
 | Perfiles de fábrica y propios | `presets` y `profiles` | Existe |
 | Duplicación, resumen y protección de perfiles en uso | Operaciones del editor sobre `profiles` y `servers` | Añadido |
 | Selector y simulador | `PolicyEngine` | Existe |
@@ -103,7 +103,7 @@ Si un servidor IPC responde al inicio, las llamadas se envían por el puente. Co
 | Validación de entradas, guardado con comentarios y recarga | Editor de `mcp.toml` | Añadido |
 
 
-En **Ajustes → Agentes (MCP)**, el interruptor local aplica a las llamadas de herramientas. Con MCP apagado, `vela mcp` devuelve una denegación con la regla `mcp_disabled`, incluida `list_servers`. La negociación de stdio sigue disponible. Los demás ajustes se pueden editar con el interruptor apagado. **Con Vela cerrada** elige entre denegar una acción pendiente de aprobación e intentar abrir Vela. El runtime headless falla de forma segura si el puente no aparece. La espera que configura la sección (1, 3 o 5 minutos) corresponde a la aprobación en la ventana, que se incorpora en M6. **Compartir carpeta abierta** controla si `get_ui_context` puede compartir el servidor y la carpeta remota activos a través del puente de M6. Los interruptores y selectores de Ajustes se desactivan mientras se carga o guarda la configuración, o cuando hace falta recargarla tras un conflicto.
+En **Ajustes → Agentes (MCP)**, el interruptor local aplica a las llamadas de herramientas. Con MCP apagado, `vela mcp` devuelve una denegación con la regla `mcp_disabled`, incluida `list_servers`. La negociación de stdio sigue disponible. Los demás ajustes se pueden editar con el interruptor apagado. **Con Vela cerrada** elige entre denegar una acción pendiente de aprobación e intentar abrir Vela. El runtime headless falla de forma segura si el puente no aparece. La espera de aprobación se ajusta a 1, 3 o 5 minutos y el valor inicial es 3. **Compartir carpeta abierta** controla si `get_ui_context` comparte el servidor y la carpeta remota activos. Los servidores desactivados quedan excluidos. Los interruptores y selectores de Ajustes se desactivan mientras se carga o guarda la configuración, o cuando hace falta recargarla tras un conflicto.
 
 **Conectar agentes…** enumera los cinco clientes. Configurado permite quitar la entrada, Detectado añadirla y Desactualizado actualizar el ejecutable. Ocupado exige confirmar el reemplazo. No encontrado, Archivo inválido y Sin acceso informan del estado. Manual muestra el motivo y el fragmento que se puede copiar. Al marcar una fila aparece la operación pendiente junto al estado detectado. **Ver cambios** muestra un resumen y un diff en seco con colores para las líneas añadidas y quitadas. **Aplicar** ejecuta las operaciones marcadas en segundo plano, mantiene la lista visible con los controles desactivados y vuelve a detectar antes de mostrar el resultado y la ruta de la copia `.vela.bak` cuando existe. Si no se detecta ningún cliente, el instalador indica dónde encontrar el JSON de configuración manual. Cancelar, Escape y el fondo cierran el instalador sin aplicar los cambios marcados.
 
@@ -115,4 +115,19 @@ En **Ajustes → Agentes (MCP)**, el interruptor local aplica a las llamadas de 
 
 La configuración sigue en el formato v1. Los archivos antiguos conservan sus valores por defecto. Los ajustes globales guardan cada opción al cambiarla. Las hojas y editores guardan al pulsar **Guardar**. Vela edita el TOML con `toml_edit`, conserva el orden y los comentarios de las entradas editadas y valida el documento antes de publicarlo por renombrado atómico desde un temporal con permisos `0600`. Si el archivo cambió desde la lectura, la ventana informa del conflicto y ofrece **Recargar**.
 
-El proceso `vela mcp` en marcha relee `mcp.toml` al comienzo de cada llamada de herramienta en modo headless. Un cambio publicado rige desde la siguiente llamada, sin reiniciar ni esperar un intervalo de sondeo. La relectura falla de forma cerrada ante un archivo inválido. En modo puente el cliente también comprueba el interruptor global antes de reenviar. La evaluación de permisos sobre las sesiones de la ventana, las aprobaciones, su actividad, el acceso temporal, el corte de agentes y la reversión desde el registro quedan para M6.
+El proceso `vela mcp` en marcha relee `mcp.toml` al comienzo de cada llamada de herramienta en modo headless. Un cambio publicado rige desde la siguiente llamada, sin reiniciar ni esperar un intervalo de sondeo. La relectura falla de forma cerrada ante un archivo inválido. En modo puente, el cliente también comprueba el interruptor global antes de reenviar. Los guardados en **Ajustes → Agentes (MCP)** y **Acceso MCP…** actualizan al broker en vivo. Desactivar MCP o cerrar Vela cierra el listener y cancela las solicitudes en espera.
+
+### Aprobaciones
+
+El panel de aprobación aparece en la esquina inferior derecha sin cambiar el foco. Muestra la operación, el destino, el motivo del agente, los avisos, la vista previa y el tiempo restante. Cuando Vela está en segundo plano, el aviso nativo incluye solo el nombre del agente, la operación y el servidor. Los clientes que solicitan progreso reciben actualizaciones mientras esperan. Al cancelar la llamada, desconectarse o vencer el plazo, la aprobación se retira y se registra.
+
+- **Permitir esta vez** vuelve a evaluar la solicitud y aplica la decisión a esa llamada. Si el destino, el diff, el comando o el riesgo cambian, Vela vuelve a solicitar aprobación.
+- **Sesión (15 min)** además concede una excepción temporal para la misma operación y el mismo destino.
+- **Guardar regla** guarda la excepción tras completar la operación. Se puede quitar desde **Acceso MCP… → Reglas guardadas en aprobaciones**. La regla se limita a la operación y el destino canónico, incluido el directorio de trabajo de un comando si se especificó. Los bloqueos de política y de Ediciones prevalecen.
+- **Denegar** admite un motivo opcional que se devuelve al agente.
+
+### Actividad, JIT y rollback
+
+**Agentes** abre el registro de las últimas 200 operaciones en memoria y muestra quién está conectado. Los filtros limitan la lista por estado o por disponibilidad de rollback. **Revertir** restaura una copia vigente en la sesión activa del servidor y actualiza la vista remota. Una operación bloqueada por cambios locales pendientes en Ediciones queda registrada y muestra un aviso en el workspace.
+
+La **Ventana JIT** eleva el servidor activo a **Desarrollo** durante 15 minutos, 30 minutos o una hora. El perfil base vuelve al vencer el plazo o al pulsar **Revocar ahora**. **Cortar agentes** cancela las aprobaciones pendientes, desconecta los clientes IPC actuales y revoca las concesiones temporales. Los clientes pueden establecer una nueva conexión con el broker mientras MCP siga habilitado. Las operaciones enviadas a SSH antes del corte pueden haber producido cambios.

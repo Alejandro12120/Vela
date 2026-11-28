@@ -172,6 +172,11 @@ impl ToolResponse {
 /// Punto de integración de stdio e IPC. Cancelar una llamada descarta su
 /// futuro; una aprobación debe mantener su inscripción ligada a ese futuro.
 pub trait ToolHandler: Send + Sync + 'static {
+    /// The transport holds this guard until the client and its calls are closed.
+    fn client_connected(&self, _client: &ClientInfo) -> Box<dyn Send> {
+        Box::new(())
+    }
+
     fn call(
         &self,
         context: CallContext,

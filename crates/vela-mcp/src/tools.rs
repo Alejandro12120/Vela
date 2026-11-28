@@ -187,7 +187,7 @@ fn edit_schema() -> Value {
 impl ToolCall {
     /// Servidor que necesita una sesión SSH para esta llamada. Los metadatos
     /// locales nunca conectan por SSH ni abren la interfaz.
-    pub(crate) fn session_server(&self) -> Option<&str> {
+    pub fn session_server(&self) -> Option<&str> {
         Some(match self {
             Self::ListServers(_) | Self::DescribePermissions(_) | Self::GetUiContext(_) => {
                 return None;

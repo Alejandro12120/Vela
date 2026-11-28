@@ -162,6 +162,7 @@ pub struct Workspace {
     settings_error: Option<String>,
     settings_page: settings_view::SettingsPage,
     mcp: mcp_view::McpView,
+    mcp_live: mcp_view::Live,
     window_background: Option<WindowBackgroundAppearance>,
     loading: bool,
     sidebar_visible: Rc<Cell<bool>>,
@@ -508,6 +509,7 @@ impl Workspace {
             settings_error,
             settings_page: settings_view::SettingsPage::new(cx),
             mcp: mcp_view::McpView::new(cx),
+            mcp_live: mcp_view::Live::default(),
             window_background: None,
             loading: true,
             sidebar_visible: Rc::new(Cell::new(!dev::hide_sidebar())),
@@ -534,6 +536,7 @@ impl Workspace {
 
     fn shutdown(&mut self, cx: &mut Context<Self>) -> impl Future<Output = ()> + use<> {
         let executor = cx.background_executor().clone();
+        let mcp = self.mcp_live.stop();
         self.dialog = None;
         self.prompt_task.take();
         self.prompts.clear();
@@ -550,6 +553,7 @@ impl Workspace {
         let client = self.client.clone();
         let index = self.edits.shutdown();
         async move {
+            mcp.await;
             for cleanup in terminal_cleanup {
                 cleanup.await;
             }
@@ -2054,6 +2058,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_1()
+                    .children(self.mcp_agent_header(theme, cx))
                     .child(self.mcp_header(&id, theme, cx))
                     .child(self.edit_header(&id, theme, cx)),
                 self.edit_status(&id, theme, cx),
@@ -2095,17 +2100,20 @@ impl Workspace {
             } else {
                 "Connect to a server to get started"
             };
-            return panel.when(self.config_error.is_none(), |panel| {
-                panel.child(
-                    div()
-                        .size_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_color(theme.secondary_text)
-                        .child(hint),
-                )
-            });
+            return panel.children(self.mcp_agent_header(theme, cx)).when(
+                self.config_error.is_none(),
+                |panel| {
+                    panel.child(
+                        div()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(theme.secondary_text)
+                            .child(hint),
+                    )
+                },
+            );
         };
         let id = &server.id;
         let header = div()
@@ -2140,6 +2148,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_1()
+                    .children(self.mcp_agent_header(theme, cx))
                     .child(self.mcp_header(id, theme, cx))
                     .child(self.edit_header(id, theme, cx)),
             );
@@ -2710,6 +2719,7 @@ impl Render for Workspace {
                 }
                 this.dismiss_row_menu(window, cx);
                 this.edits.popover = false;
+                this.dismiss_mcp_activity(cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &modal::Confirm, window, cx| {
@@ -2759,6 +2769,7 @@ impl Render for Workspace {
                             .top(titlebar_height)
                             .children(transfer_overlay)
                             .children(self.edit_popover(theme, titlebar_height, window, cx))
+                            .children(self.mcp_live_overlay(theme, window, cx))
                             .children(self.render_dialog(theme, cx))
                             .children(self.render_mcp_dialog(theme, cx))
                             .children(self.row_menu.as_ref().and_then(|menu| {

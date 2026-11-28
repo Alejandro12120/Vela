@@ -259,14 +259,35 @@ impl IpcServer {
         handler: impl ToolHandler,
         shutdown: impl Future<Output = ()>,
     ) -> io::Result<()> {
+        let (_, resets) = watch::channel(());
+        self.run_with_client_reset(handler, shutdown, resets).await
+    }
+
+    /// Drops current clients on reset while retaining the listener and socket.
+    pub async fn run_with_client_reset(
+        self,
+        handler: impl ToolHandler,
+        shutdown: impl Future<Output = ()>,
+        mut resets: watch::Receiver<()>,
+    ) -> io::Result<()> {
         let handler = Arc::new(handler);
-        let (stop, stopping) = watch::channel(());
+        let mut can_reset = true;
+        let (mut stop, mut stopping) = watch::channel(());
         let mut clients = JoinSet::new();
         tokio::pin!(shutdown);
         let result = loop {
             tokio::select! {
                 biased;
                 _ = &mut shutdown => break Ok(()),
+                reset = resets.changed(), if can_reset => {
+                    can_reset = reset.is_ok();
+                    if can_reset {
+                        let (next_stop, next_stopping) = watch::channel(());
+                        drop(std::mem::replace(&mut stop, next_stop));
+                        stopping = next_stopping;
+                        while clients.join_next().await.is_some() {}
+                    }
+                }
                 _ = clients.join_next(), if !clients.is_empty() => {}
                 accepted = self.listener.accept(), if clients.len() < MAX_CLIENTS => {
                     let (stream, _) = match accepted {
@@ -321,6 +342,7 @@ async fn serve_client(
     )
     .await?;
 
+    let _connected = handler.client_connected(&client);
     let mut tasks = CallTasks::new();
     let mut pending: HashMap<Id, (u64, AbortHandle)> = HashMap::new();
     let (progress_tx, mut progress_rx) = mpsc::channel(64);

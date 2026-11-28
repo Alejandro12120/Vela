@@ -484,6 +484,7 @@ fn body(
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
+                .on_scroll(cx.listener(|this, _, window, cx| this.dismiss_row_menu(window, cx)))
                 .on_drop(cx.listener(|this, _: &ServerDrag, _, cx| this.drop_reorder(cx)))
                 .child(content),
         )
@@ -594,6 +595,9 @@ fn update_button(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -
     match &workspace.update_state {
         UpdateState::Idle => base
             .tab_index(0)
+            .border_1()
+            .border_color(gpui::transparent_black())
+            .focus_visible(move |style| style.border_color(theme.accent))
             .bg(theme.panel)
             .cursor_pointer()
             .hover(move |style| style.bg(theme.hover))
@@ -612,6 +616,9 @@ fn update_button(workspace: &Workspace, theme: Theme, cx: &Context<Workspace>) -
         )),
         UpdateState::Available { .. } => base
             .tab_index(0)
+            .border_1()
+            .border_color(gpui::transparent_black())
+            .focus_visible(move |style| style.border_color(theme.accent))
             .bg(theme.panel)
             .cursor_pointer()
             .hover(move |style| style.bg(theme.hover))

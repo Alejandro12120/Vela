@@ -3137,6 +3137,31 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn scrolling_the_server_list_dismisses_its_row_menu(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (workspace, cx) = open_many(dir.path(), cx);
+        let row = cx.debug_bounds("server-row-b1").unwrap().center();
+        let position = cx.debug_bounds("server-row-a1").unwrap().center();
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_row_menu("b1", row, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(workspace.read_with(cx, |workspace, _| workspace.row_menu.is_some()));
+
+        cx.simulate_event(gpui::ScrollEvent {
+            position,
+            delta: gpui::ScrollDelta::Lines(point(0., -3.)),
+            ..Default::default()
+        });
+
+        workspace.update_in(cx, |workspace, window, _| {
+            assert!(workspace.row_menu.is_none());
+            assert!(workspace.focus.is_focused(window));
+        });
+    }
+
+    #[gpui::test]
     async fn a_click_selects_without_starting_a_drag(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let (workspace, cx) = open(dir.path(), cx);
@@ -3641,6 +3666,52 @@ mod tests {
         cx.simulate_keystrokes("tab");
         cx.run_until_parked();
         cx.update(|window, _| assert!(window.last_input_was_keyboard()));
+    }
+
+    #[gpui::test]
+    async fn updater_button_paints_a_focus_ring_on_tab(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (workspace, cx) = open(dir.path(), cx);
+        cx.update(|_, cx| bind_keys(cx));
+
+        for state in [
+            UpdateState::Idle,
+            UpdateState::Available {
+                release: test_release(),
+                error: None,
+            },
+        ] {
+            workspace.update(cx, |this, cx| {
+                this.set_update_state(state);
+                cx.notify();
+            });
+            let row = cx.debug_bounds("server-row-id-bravo").unwrap();
+            cx.simulate_click(row.center(), Modifiers::none());
+            cx.run_until_parked();
+
+            let bounds = cx.debug_bounds("update-button").unwrap();
+            assert_eq!(bounds.size, gpui::size(px(26.), px(26.)));
+            let has_ring = |window: &mut Window, cx: &mut gpui::App| {
+                let accent: gpui::Hsla = Theme::current(window, cx).accent.into();
+                let bounds = bounds.scale(window.scale_factor());
+                window
+                    .painted_quads()
+                    .iter()
+                    .any(|quad| quad.bounds == bounds && quad.border_color == accent)
+            };
+            assert!(!cx.update(has_ring));
+
+            let mut focused = false;
+            for _ in 0..20 {
+                cx.simulate_keystrokes("tab");
+                cx.run_until_parked();
+                if cx.update(has_ring) {
+                    focused = true;
+                    break;
+                }
+            }
+            assert!(focused, "Tab should reveal the updater focus ring");
+        }
     }
 
     #[gpui::test]

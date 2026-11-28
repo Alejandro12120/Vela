@@ -6,17 +6,17 @@ use thiserror::Error;
 
 use crate::presets::CRITICAL_DENIED_PATHS;
 
-pub const EMPTY_REMOTE_SCOPE_REASON: &str = "no hay rutas permitidas configuradas";
-pub const EMPTY_LOCAL_SCOPE_REASON: &str = "no hay rutas locales permitidas configuradas";
+pub const EMPTY_REMOTE_SCOPE_REASON: &str = "No allowed paths are configured.";
+pub const EMPTY_LOCAL_SCOPE_REASON: &str = "No allowed local paths are configured.";
 
 /// Error al normalizar una ruta solicitada.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum PathError {
-    #[error("la ruta contiene un byte NUL")]
+    #[error("The path contains a null byte.")]
     NulByte,
-    #[error("la ruta debe ser absoluta: {0}")]
+    #[error("The path must be absolute: {0}")]
     NotAbsolute(String),
-    #[error("la ruta intenta escapar de la raíz: {0}")]
+    #[error("The path goes above the root folder: {0}")]
     Traversal(String),
 }
 
@@ -231,7 +231,7 @@ fn access_for(
     }
     let Some(matched_rule) = matched_rule else {
         return PathAccess::OutsideScope {
-            reason: format!("{requested_norm} está fuera del ámbito permitido"),
+            reason: format!("{requested_norm} is outside the allowed paths."),
         };
     };
     if let Some(canonical) = canonical_norm.as_ref() {
@@ -241,7 +241,7 @@ fn access_for(
             .any(|expanded| glob_match(&expanded, canonical));
         if !canonical_allowed {
             return PathAccess::OutsideScope {
-                reason: format!("{canonical} está fuera del ámbito permitido"),
+                reason: format!("{canonical} is outside the allowed paths."),
             };
         }
     }

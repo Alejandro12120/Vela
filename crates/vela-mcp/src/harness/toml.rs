@@ -12,8 +12,8 @@ impl<'a> Config<'a> {
     pub fn parse(source: &'a str) -> Result<Self, Problem> {
         let doc = Document::parse(source).map_err(|error| {
             Problem::Malformed(error.span().map_or_else(
-                || "TOML inválido.".into(),
-                |span| format!("TOML inválido cerca del byte {}.", span.start),
+                || "Invalid TOML.".into(),
+                |span| format!("Invalid TOML near byte {}.", span.start),
             ))
         })?;
 
@@ -108,13 +108,11 @@ fn standard_table(item: &Item) -> Result<&Table, Problem> {
         Ok(table)
     } else if item.is_inline_table() || item.is_table() {
         Err(Problem::Manual(
-            "La configuración MCP usa una tabla inline o claves punteadas.".into(),
+            "The MCP configuration uses an inline table or dotted keys.".into(),
             false,
         ))
     } else {
-        Err(Problem::Malformed(
-            "Se esperaba una tabla MCP de Codex.".into(),
-        ))
+        Err(Problem::Malformed("Expected a Codex MCP table.".into()))
     }
 }
 

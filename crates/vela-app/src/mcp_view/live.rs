@@ -108,7 +108,7 @@ impl Workspace {
         let worker = match Worker::start(broker.clone(), path, ui) {
             Ok(worker) => worker,
             Err(error) => {
-                self.mcp.config_error = Some(format!("No se pudo iniciar el broker MCP. {error}"));
+                self.mcp.config_error = Some(format!("Couldn’t start the MCP server. {error}"));
                 return;
             }
         };
@@ -351,7 +351,7 @@ impl Workspace {
         cx.spawn_in(window, async move |this, cx| {
             let result = task
                 .await
-                .unwrap_or_else(|_| Err("Se cerró el broker MCP.".into()));
+                .unwrap_or_else(|_| Err("The MCP server closed.".into()));
             let refresh = result.is_ok();
             broker.restored(activity.clone(), result);
             let _ = this.update_in(cx, |this, window, cx| {
@@ -383,7 +383,7 @@ impl Workspace {
             icon_text_button(
                 "mcp-agents",
                 IconName::Shield,
-                "Agentes",
+                "Agents",
                 if self.mcp_live.popover {
                     Variant::Selected
                 } else {
@@ -503,7 +503,7 @@ impl Workspace {
             .join(" · ");
         let width = window.viewport_size().width.min(px(500.)) - px(24.);
         let can_grant = (!preview.paths.is_empty() || preview.command.is_some())
-            && !preview.operation.starts_with("Conectar por SSH");
+            && !preview.operation.starts_with("Connect via SSH");
         let decision = |label, action, variant| {
             let confirm = cx.listener(move |this, _, window, cx| {
                 this.mcp_live.broker.answer(
@@ -526,8 +526,8 @@ impl Workspace {
             let input = cx.new(|cx| {
                 TextInput::new(
                     "",
-                    "Motivo opcional para el agente",
-                    "Motivo opcional para el agente",
+                    "Optional reason for the agent",
+                    "Optional reason for the agent",
                     false,
                     cx,
                 )
@@ -537,22 +537,22 @@ impl Workspace {
             this.mcp_live.denial = Some((id, input, previous));
             cx.notify();
         });
-        let note = if preview.operation.starts_with("Conectar por SSH") {
-            "La conexión abre una sesión en Vela"
+        let note = if preview.operation.starts_with("Connect via SSH") {
+            "This opens an SSH connection in Vela."
         } else if !matches!(
             preview.operation.as_str(),
             "fs_patch" | "fs_write" | "fs_delete"
         ) {
-            "Esta operación no genera copia de rollback"
+            "This operation doesn’t create a backup."
         } else if !item.rollback
             || preview
                 .warnings
                 .iter()
                 .any(|warning| warning.starts_with("FileExceedsRollbackLimit"))
         {
-            "Sin copia de rollback"
+            "No backup will be created."
         } else {
-            "Copia de rollback si existe el archivo y cabe en el límite"
+            "Vela backs up the existing file if it’s within the size limit."
         };
         let code = preview
             .unified_diff
@@ -578,14 +578,14 @@ impl Workspace {
                     .min_w_0()
                     .truncate()
                     .text_color(theme.secondary_text)
-                    .child(format!("en {}", short(&item.server, 60))),
+                    .child(format!("on {}", short(&item.server, 60))),
             )
             .when(count > 1, |header| {
                 header.child(
                     div().flex().items_center().gap_1().children(
                         [
-                            ((index + count - 1) % count, "Anterior", IconName::ArrowLeft),
-                            ((index + 1) % count, "Siguiente", IconName::ArrowRight),
+                            ((index + count - 1) % count, "Previous", IconName::ArrowLeft),
+                            ((index + 1) % count, "Next", IconName::ArrowRight),
                         ]
                         .map(|(position, label, icon)| {
                             let target = queue[position].id;
@@ -651,7 +651,7 @@ impl Workspace {
                 panel.child(
                     div()
                         .text_color(theme.secondary_text)
-                        .child(format!("«{}»", short(reason, 200))),
+                        .child(format!("“{}”", short(reason, 200))),
                 )
             })
             .when(
@@ -664,7 +664,7 @@ impl Workspace {
                         div()
                             .text_color(theme.warning)
                             .text_size(px(12.))
-                            .child("Vista previa limitada a 160 líneas"),
+                            .child("Showing the first 160 lines."),
                     )
                 },
             )
@@ -685,7 +685,7 @@ impl Workspace {
                             .flex_none()
                             .font_family(crate::theme::monospace())
                             .child(format!(
-                                "Caduca en {}",
+                                "Expires in {}",
                                 countdown(item.deadline.saturating_duration_since(Instant::now()))
                             )),
                     ),
@@ -696,17 +696,17 @@ impl Workspace {
                     .flex_wrap()
                     .items_center()
                     .gap_1()
-                    .child(decision("Permitir esta vez", "mcp-once", Variant::Primary))
+                    .child(decision("Allow Once", "mcp-once", Variant::Primary))
                     .when(can_grant, |actions| {
                         actions
                             .child(decision(
-                                "Sesión (15 min)",
+                                "Allow for 15 Min",
                                 "mcp-session",
                                 Variant::Secondary,
                             ))
-                            .child(decision("Guardar regla", "mcp-save", Variant::Secondary))
+                            .child(decision("Save Rule", "mcp-save", Variant::Secondary))
                     })
-                    .child(danger_button("mcp-deny", "Denegar", theme, deny_open).ml_auto()),
+                    .child(danger_button("mcp-deny", "Deny", theme, deny_open).ml_auto()),
             )
             .when_some(
                 self.mcp_live
@@ -722,7 +722,7 @@ impl Workspace {
                             .child(div().flex_1().min_w_0().child(input.clone()))
                             .child(danger_button(
                                 "mcp-deny-send",
-                                "Enviar",
+                                "Send",
                                 theme,
                                 cx.listener(move |this, _, window, cx| {
                                     let Some((current, input, _)) = &this.mcp_live.denial else {
@@ -776,9 +776,9 @@ impl Workspace {
             .collect::<Vec<_>>();
         agents.sort();
         let summary = if agents.is_empty() {
-            "Ningún agente conectado".into()
+            "No agents connected".into()
         } else {
-            format!("{} conectados · {}", agents.len(), agents.join(", "))
+            format!("{} connected · {}", agents.len(), agents.join(", "))
         };
         let width = (window.viewport_size().width - px(24.)).min(px(620.));
         let heading = div()
@@ -794,7 +794,7 @@ impl Workspace {
                     .child(
                         div()
                             .font_weight(FontWeight::MEDIUM)
-                            .child("Actividad de agentes"),
+                            .child("Agent Activity"),
                     )
                     .child(
                         div()
@@ -806,7 +806,7 @@ impl Workspace {
             )
             .child(danger_button(
                 "mcp-kill",
-                "Cortar agentes",
+                "Disconnect Agents",
                 theme,
                 cx.listener(|this, _, window, cx| {
                     this.mcp_live.broker.kill();
@@ -816,10 +816,10 @@ impl Workspace {
             ));
         let filters = div().flex().gap_1().px_3().py_2().children(
             [
-                (Filter::All, "Todos"),
-                (Filter::Approved, "Aprobados"),
-                (Filter::Blocked, "Bloqueados"),
-                (Filter::Rollback, "Con rollback"),
+                (Filter::All, "All"),
+                (Filter::Approved, "Approved"),
+                (Filter::Blocked, "Blocked"),
+                (Filter::Rollback, "With Backups"),
             ]
             .map(|(filter, label)| {
                 small_button(
@@ -855,7 +855,7 @@ impl Workspace {
                     div()
                         .p_3()
                         .text_color(theme.secondary_text)
-                        .child("Sin actividad para este filtro"),
+                        .child("No matching activity"),
                 )
             })
             .children(
@@ -904,13 +904,13 @@ impl Workspace {
             .unwrap_or_else(|| policy.profile_id.clone());
         let (title, detail) = match expiry {
             Some(_) => (
-                "Ventana JIT · Desarrollo",
-                format!("{} volverá a «{profile}»", server.display_name()),
+                "Temporary Access · Development",
+                format!("{} will return to “{profile}”", server.display_name()),
             ),
             None => (
-                "Ventana JIT",
+                "Temporary Access",
                 format!(
-                    "Eleva {} a «Desarrollo» temporalmente",
+                    "Temporarily apply the Development profile to {}",
                     server.display_name()
                 ),
             ),
@@ -959,7 +959,7 @@ impl Workspace {
                     .child(
                         small_button(
                             "mcp-jit-revoke",
-                            "Revocar ahora",
+                            "Revoke Now",
                             Variant::Secondary,
                             theme,
                             cx.listener(move |this, _, _, cx| {
@@ -998,13 +998,13 @@ impl Workspace {
         let id = row.id;
         let (status, tone, bg) = match row.status {
             Status::Auto => ("Auto", theme.success, theme.hover),
-            Status::Approved => ("Aprobado", theme.success, theme.hover),
-            Status::Blocked => ("Bloqueado", theme.warning, theme.warning_bg),
-            Status::Denied => ("Denegado", theme.danger, theme.hover),
-            Status::Expired => ("Caducado", theme.secondary_text, theme.hover),
-            Status::Cancelled => ("Cancelado", theme.secondary_text, theme.hover),
+            Status::Approved => ("Approved", theme.success, theme.hover),
+            Status::Blocked => ("Blocked", theme.warning, theme.warning_bg),
+            Status::Denied => ("Denied", theme.danger, theme.hover),
+            Status::Expired => ("Expired", theme.secondary_text, theme.hover),
+            Status::Cancelled => ("Canceled", theme.secondary_text, theme.hover),
             Status::Error => ("Error", theme.danger, theme.hover),
-            Status::Reverted => ("Revertido", theme.success, theme.hover),
+            Status::Reverted => ("Restored", theme.success, theme.hover),
         };
         let operation = if row.target.is_empty() {
             row.operation.clone()
@@ -1073,18 +1073,14 @@ impl Workspace {
                             .text_center()
                             .text_size(px(12.))
                             .text_color(theme.secondary_text)
-                            .child(if restored {
-                                "Revertido"
-                            } else {
-                                "Revirtiendo…"
-                            }),
+                            .child(if restored { "Restored" } else { "Restoring…" }),
                     )
                 } else {
                     row_element.child(
                         small_icon_text_button(
                             ("mcp-revert", id),
                             IconName::RotateCcw,
-                            "Revertir",
+                            "Restore",
                             Variant::Secondary,
                             theme,
                             cx.listener(move |this, _, window, cx| {
@@ -1199,22 +1195,20 @@ fn warning_label(warning: &str) -> String {
             .rsplit_once(r#", reason: ""#)
             .and_then(|(_, reason)| reason.strip_suffix(r#"" }"#));
         match reason {
-            Some(vela_mcp::path::EMPTY_REMOTE_SCOPE_REASON) => {
-                "Sin carpetas permitidas en este servidor"
-            }
-            Some(vela_mcp::path::EMPTY_LOCAL_SCOPE_REASON) => "Sin carpetas locales permitidas",
-            _ => "Ruta fuera del ámbito",
+            Some(vela_mcp::path::EMPTY_REMOTE_SCOPE_REASON) => "No allowed folders on this server",
+            Some(vela_mcp::path::EMPTY_LOCAL_SCOPE_REASON) => "No allowed local folders",
+            _ => "Path outside allowed folders",
         }
     } else if warning.contains("ContainsSudo") {
-        "Contiene sudo"
+        "Uses sudo"
     } else if warning.contains("ShellChaining") {
-        "Encadenamiento de shell"
+        "Chains shell commands"
     } else if warning.contains("Redirection") {
-        "Redirección"
+        "Redirects input or output"
     } else if warning.contains("Subshell") {
         "Subshell"
     } else if warning.starts_with("FileExceedsRollbackLimit") {
-        "Supera el límite de rollback"
+        "Exceeds the backup limit"
     } else {
         warning
     };
@@ -1240,11 +1234,11 @@ fn out_of_scope_warning_explains_an_empty_folder_scope() {
     };
     assert_eq!(
         warning_label(&warning(check_remote_path(path, None, &[], &[]))),
-        "Sin carpetas permitidas en este servidor"
+        "No allowed folders on this server"
     );
     assert_eq!(
         warning_label(&warning(check_local_path(path, None, None, None, &[]))),
-        "Sin carpetas locales permitidas"
+        "No allowed local folders"
     );
     assert_eq!(
         warning_label(&warning(check_remote_path(
@@ -1253,7 +1247,7 @@ fn out_of_scope_warning_explains_an_empty_folder_scope() {
             &["/srv/**".into()],
             &[]
         ))),
-        "Ruta fuera del ámbito"
+        "Path outside allowed folders"
     );
 }
 
@@ -1303,7 +1297,7 @@ fn short(value: &str, max: usize) -> String {
 fn notify_approval(item: &Approval) {
     // Keep command text, paths, diffs and reasons in Vela.
     let body = format!(
-        "{} solicita {} en {}",
+        "{} requests {} on {}",
         short(&item.agent, 50),
         short(&item.preview.operation, 40),
         short(&item.server, 50)
@@ -1314,7 +1308,7 @@ fn notify_approval(item: &Approval) {
         .replace('<', "&lt;")
         .replace('>', "&gt;");
     let _ = notify_rust::Notification::new()
-        .summary("Vela · Aprobación MCP")
+        .summary("Vela · MCP Approval")
         .body(&body)
         .show();
 }
@@ -1364,7 +1358,7 @@ impl Workspace {
                     operation: "fs_patch".into(),
                     server_id: id.clone(),
                     paths: vec!["/etc/nginx/sites-available/api.conf".into()],
-                    agent_reason: Some("Aumentar proxy_read_timeout a 60 s para evitar errores 504.".into()),
+                    agent_reason: Some("Increase proxy_read_timeout to 60 seconds to prevent 504 errors.".into()),
                     unified_diff: Some("@@ -1,3 +1,3 @@\n location /api/ {\n-    proxy_read_timeout 15s;\n+    proxy_read_timeout 60s;\n }\n".into()),
                     ..Default::default()
                 }),
@@ -1373,7 +1367,7 @@ impl Workspace {
                     server_id: id.clone(),
                     paths: vec!["/etc/nginx".into()],
                     command: Some("sudo nginx -t && sudo systemctl reload nginx".into()),
-                    agent_reason: Some("Validar la configuración y recargar Nginx.".into()),
+                    agent_reason: Some("Validate the configuration and reload Nginx.".into()),
                     warnings: vec!["ContainsSudo".into(), "ShellChaining".into()],
                     ..Default::default()
                 }),
@@ -1384,7 +1378,7 @@ impl Workspace {
                 pending.push(receive);
                 if mode == "exec" && agent == "Codex" {
                     live.selected = Some(request);
-                    let input = cx.new(|cx| TextInput::new("Valida primero la sintaxis", "Motivo opcional para el agente", "", false, cx).compact());
+                    let input = cx.new(|cx| TextInput::new("Validate the syntax first", "Optional reason for the agent", "", false, cx).compact());
                     live.denial = Some((request, input, window.focused(cx)));
                 }
             }
@@ -1403,7 +1397,7 @@ impl Workspace {
                     "exec_command",
                     "nginx -t",
                     Status::Auto,
-                    "Código de salida 0",
+                    "Exit code 0",
                     None,
                 ),
                 (
@@ -1412,7 +1406,7 @@ impl Workspace {
                     "fs_write",
                     "/srv/api/config.toml",
                     Status::Blocked,
-                    "Hay ediciones abiertas sin sincronizar.",
+                    "Some edits haven’t been uploaded.",
                     None,
                 ),
                 (
@@ -1421,7 +1415,7 @@ impl Workspace {
                     "fs_patch",
                     "/etc/nginx/sites-available/api.conf",
                     Status::Approved,
-                    "Copia de rollback de 4,2 KB",
+                    "4.2 KB backup",
                     Some("preview"),
                 ),
             ] {
@@ -1591,7 +1585,7 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("mcp-approval").is_some());
         cx.update(|window, _| assert!(focus.is_focused(window)));
-        click("Siguiente", cx);
+        click("Next", cx);
         let second_id = broker.state().pending()[1].id;
         workspace.read_with(cx, |this, _| {
             assert_eq!(this.mcp_live.selected, Some(second_id))
@@ -1605,7 +1599,7 @@ mod tests {
         let mut saved = preview(&broker, "/tmp/save");
         workspace.update(cx, |_, cx| cx.notify());
         cx.run_until_parked();
-        click("Siguiente", cx);
+        click("Next", cx);
         click("mcp-save", cx);
         assert!(matches!(saved.try_recv(), Ok(Answer::Save)));
         click("mcp-deny", cx);
@@ -1616,12 +1610,12 @@ mod tests {
                 .unwrap()
                 .1
                 .update(cx, |input, cx| {
-                    input.set_value("Espera a mantenimiento", window, cx);
+                    input.set_value("Wait for maintenance", window, cx);
                 });
         });
         click("mcp-deny-send", cx);
         assert!(
-            matches!(denied.try_recv(), Ok(Answer::Deny(reason)) if reason == "Espera a mantenimiento")
+            matches!(denied.try_recv(), Ok(Answer::Deny(reason)) if reason == "Wait for maintenance")
         );
         assert!(broker.state().pending().is_empty());
     }
@@ -1686,12 +1680,12 @@ mod tests {
         let mut third = preview(&broker, "/tmp/c");
         let queue = broker.state().pending();
         cx.run_until_parked();
-        click("Siguiente", cx);
+        click("Next", cx);
         click("mcp-deny", cx);
         let input = workspace.update_in(cx, |this, window, cx| {
             let (id, input, _) = this.mcp_live.denial.as_ref().unwrap();
             assert_eq!(*id, queue[1].id);
-            input.update(cx, |input, cx| input.set_value("Esperar", window, cx));
+            input.update(cx, |input, cx| input.set_value("Wait", window, cx));
             input.clone()
         });
 
@@ -1699,10 +1693,10 @@ mod tests {
         cx.run_until_parked();
         workspace.read_with(cx, |this, cx| {
             assert_eq!(this.mcp_live.selected, Some(queue[1].id));
-            assert_eq!(input.read(cx).value(), "Esperar");
+            assert_eq!(input.read(cx).value(), "Wait");
         });
         click("mcp-deny-send", cx);
-        assert!(matches!(second.try_recv(), Ok(Answer::Deny(reason)) if reason == "Esperar"));
+        assert!(matches!(second.try_recv(), Ok(Answer::Deny(reason)) if reason == "Wait"));
         assert!(matches!(
             third.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
@@ -1734,7 +1728,7 @@ mod tests {
                 operation: "fs_patch".into(),
                 target: "/tmp/file".into(),
                 status: Status::Blocked,
-                detail: "Hay ediciones abiertas sin sincronizar.".into(),
+                detail: "Some edits haven’t been uploaded.".into(),
                 backup_id: None,
                 restoring: false,
             });
@@ -1744,7 +1738,7 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("mcp-activity").is_some());
-        click("Bloqueados", cx);
+        click("Blocked", cx);
         workspace.read_with(cx, |this, _| {
             assert!(this.mcp_live.filter == Filter::Blocked)
         });
@@ -1776,7 +1770,7 @@ mod tests {
                 .state()
                 .history
                 .iter()
-                .any(|row| row.operation == "Cortar agentes")
+                .any(|row| row.operation == "Disconnect Agents")
         );
     }
 }

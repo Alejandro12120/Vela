@@ -66,6 +66,8 @@ pub(super) struct McpView {
     choices: Vec<FocusHandle>,
     select_trigger: Option<FocusHandle>,
     simulator: Option<Entity<TextInput>>,
+    simulator_expanded: bool,
+    advanced_expanded: bool,
     simulate_target: Target,
     simulation: Option<Result<vela_mcp::PolicyDecision, String>>,
 }
@@ -144,6 +146,8 @@ impl McpView {
             choices: Vec::new(),
             select_trigger: None,
             simulator: None,
+            simulator_expanded: false,
+            advanced_expanded: false,
             simulate_target: Target::Profile("readonly".into()),
             simulation: None,
         }
@@ -183,13 +187,7 @@ impl Workspace {
                         this.mcp.snapshot = Some(snapshot);
                         this.sync_mcp_broker(window, cx);
                         this.mcp.simulator.get_or_insert_with(|| {
-                            input(
-                                cx,
-                                "Simulador de reglas",
-                                "",
-                                "Prueba: fs_read /var/log/nginx/error.log o exec sudo nginx -t",
-                                true,
-                            )
+                            input(cx, "Test a Rule", "", "Example: fs_read /srv/app.log", true)
                         });
                         if let Some(View::Server(draft)) = &this.mcp.dialog {
                             let id = draft.id.clone();
@@ -199,7 +197,7 @@ impl Workspace {
                     Err(error) => {
                         this.mcp.snapshot = None;
                         this.sync_mcp_broker(window, cx);
-                        this.mcp.config_error = Some(format!("No se pudo leer mcp.toml. {error}"));
+                        this.mcp.config_error = Some(format!("Couldn’t read mcp.toml. {error}"));
                     }
                 }
                 this.refresh_mcp_usage(window, cx);
@@ -271,9 +269,9 @@ impl Workspace {
                     Err(error) => {
                         this.mcp.conflict = error.kind() == io::ErrorKind::AlreadyExists;
                         this.mcp.config_error = Some(if this.mcp.conflict {
-                            "La configuración cambió fuera de esta ventana".into()
+                            "The configuration changed outside Vela.".into()
                         } else {
-                            format!("No se pudo guardar mcp.toml. {error}")
+                            format!("Couldn’t save mcp.toml. {error}")
                         });
                         if let Some(reply) = reply {
                             let _ = reply.send(Err(error));
@@ -411,7 +409,7 @@ impl Workspace {
                     .flatten()
                     .map(|profile| profile.name)
             })
-            .unwrap_or_else(|| "Desactivado".into());
+            .unwrap_or_else(|| "Off".into());
         let id = id.to_owned();
         div()
             .flex()
@@ -421,7 +419,7 @@ impl Workspace {
             .child(
                 small_icon_button(
                     "open-server-mcp",
-                    "Acceso MCP…",
+                    "MCP Access…",
                     IconName::Plug,
                     Variant::Secondary,
                     theme,
@@ -440,27 +438,27 @@ impl Workspace {
         {
             let (title, message, action) = match confirmation {
                 Confirmation::Replace(id) => (
-                    "¿Reemplazar la entrada vela?",
+                    "Replace the Vela entry?",
                     format!(
-                        "La entrada actual de {} se sustituirá al pulsar Aplicar. Vela guardará una copia del archivo.",
+                        "Apply replaces the existing Vela entry for {} and saves a backup of the configuration file.",
                         id.display_name()
                     ),
-                    "Marcar reemplazo",
+                    "Mark for Replacement",
                 ),
                 Confirmation::Discard => (
-                    "¿Descartar los cambios?",
-                    "Se perderán los cambios de esta ventana.".into(),
-                    "Descartar",
+                    "Discard changes?",
+                    "Your unsaved changes will be lost.".into(),
+                    "Discard",
                 ),
                 Confirmation::DeleteProfile(_) => (
-                    "¿Borrar este perfil?",
-                    "El perfil se eliminará de mcp.toml.".into(),
-                    "Borrar",
+                    "Delete this profile?",
+                    "This removes the profile from mcp.toml.".into(),
+                    "Delete",
                 ),
                 Confirmation::Clear => (
-                    "¿Vaciar las copias de rollback?",
-                    "Las copias guardadas se borrarán de forma permanente.".into(),
-                    "Vaciar",
+                    "Clear rollback backups?",
+                    "Saved backups will be permanently deleted.".into(),
+                    "Clear",
                 ),
             };
             (
@@ -475,19 +473,19 @@ impl Workspace {
                 View::Harnesses => {
                     let count = self.mcp.pending.len();
                     let hint = if self.mcp.applying {
-                        "Aplicando…".into()
+                        "Applying changes…".into()
                     } else if count == 0 {
-                        "Sin cambios pendientes.".into()
+                        "No pending changes.".into()
                     } else if count == 1 {
-                        "1 cambio pendiente".into()
+                        "1 pending change".into()
                     } else {
-                        format!("{count} cambios pendientes")
+                        format!("{count} pending changes")
                     };
                     (
-                        "Conectar agentes".into(),
+                        "Connect Agents".into(),
                         self.harnesses_body(theme, cx).into_any_element(),
                         hint,
-                        Some("Aplicar"),
+                        Some("Apply"),
                         self.mcp
                             .pending
                             .can_apply(self.mcp.scanning || self.mcp.applying),
@@ -495,7 +493,7 @@ impl Workspace {
                 }
                 View::Server(draft) => self.server_dialog(draft, theme, cx),
                 View::ChoosePreset => (
-                    "Nuevo perfil".into(),
+                    "New Profile".into(),
                     self.preset_choices(theme, cx).into_any_element(),
                     String::new(),
                     None,
@@ -507,11 +505,7 @@ impl Workspace {
         };
         let cancel = button(
             "mcp-cancel",
-            if action.is_none() {
-                "Cerrar"
-            } else {
-                "Cancelar"
-            },
+            if action.is_none() { "Close" } else { "Cancel" },
             Variant::Secondary,
             theme,
             cx.listener(|this, _, window, cx| this.cancel_mcp(window, cx)),
@@ -610,7 +604,7 @@ impl Workspace {
                 )
                 .child(small_button(
                     "reload-mcp",
-                    "Recargar",
+                    "Reload",
                     Variant::Secondary,
                     theme,
                     cx.listener(|this, _, window, cx| this.reload_mcp_draft(window, cx)),
@@ -885,7 +879,7 @@ fn disabled_button(label: &'static str, theme: Theme) -> Stateful<Div> {
     div()
         .id(label)
         .role(gpui::Role::Button)
-        .aria_description("No disponible")
+        .aria_description("Unavailable")
         .flex_none()
         .flex()
         .items_center()
@@ -1056,7 +1050,7 @@ mod tests {
         assert!(cx.debug_bounds("mcp-exec").is_none());
         cx.simulate_click(toggle.center(), Modifiers::none());
         assert!(cx.debug_bounds("mcp-exec").is_some());
-        assert!(cx.debug_bounds("Comandos permitidos-add").is_none());
+        assert!(cx.debug_bounds("Allowed Commands-add").is_none());
         let privacy = cx.debug_bounds("mcp-server-hide").unwrap();
         assert!(privacy.size.width < scope.size.width);
         press(cx, "space");
@@ -1066,7 +1060,7 @@ mod tests {
         let select_at = |x, scope: gpui::Bounds<_>, cx: &mut VisualTestContext| {
             cx.simulate_click(point(x, scope.center().y), Modifiers::none());
         };
-        assert!(cx.debug_bounds("Permitidas-add").is_none());
+        assert!(cx.debug_bounds("Allowed Folders-add").is_none());
         select_at(scope.left() + px(8.), scope, cx);
         view.update(cx, |this, _| {
             let Some(View::Server(draft)) = &this.mcp.dialog else {
@@ -1076,10 +1070,10 @@ mod tests {
         });
         let scope = cx.debug_bounds("mcp-folder-scope").unwrap();
         select_at(scope.center().x, scope, cx);
-        assert!(cx.debug_bounds("Permitidas-add").is_some());
+        assert!(cx.debug_bounds("Allowed Folders-add").is_some());
         view.update(cx, |this, cx| assert!(!this.mcp_has_draft_changes(cx)));
         let scope = cx.debug_bounds("mcp-folder-scope").unwrap();
         select_at(scope.right() - px(8.), scope, cx);
-        assert!(cx.debug_bounds("Permitidas-add").is_none());
+        assert!(cx.debug_bounds("Allowed Folders-add").is_none());
     }
 }

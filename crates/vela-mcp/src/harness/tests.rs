@@ -359,7 +359,7 @@ fn conflict_descriptions_only_show_the_program_or_remote_host() {
     assert_eq!(
         f.state(id),
         EntryState::Conflict {
-            found: "(sin comando)".into()
+            found: "(no command)".into()
         }
     );
     f.put(
@@ -375,7 +375,7 @@ fn conflict_descriptions_only_show_the_program_or_remote_host() {
     assert_eq!(
         f.state(id),
         EntryState::Conflict {
-            found: "url: (sin host)".into()
+            found: "url: (no host)".into()
         }
     );
     let program = format!("other\n{}", "é".repeat(250));

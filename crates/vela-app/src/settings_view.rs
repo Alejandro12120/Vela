@@ -2760,6 +2760,39 @@ mod tests {
     }
 
     #[gpui::test]
+    fn mcp_settings_disclosures_toggle_independently(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        crate::dev::TEST_CONFIG.with(|config| *config.borrow_mut() = Some(dir.path().to_owned()));
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::new(None, None, None, window, cx));
+        cx.run_until_parked();
+        workspace.update_in(cx, |this, window, cx| this.open_settings(window, cx));
+        cx.run_until_parked();
+        workspace.update_in(cx, |this, window, _| {
+            this.settings_page.scroll.scroll_to_top_of_item(6);
+            window.refresh();
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("mcp-sim-input").is_none());
+        assert!(cx.debug_bounds("mcp-socket").is_none());
+        let test_rule = cx.debug_bounds("mcp-test-rule").unwrap();
+        cx.simulate_click(test_rule.center(), gpui::Modifiers::none());
+        assert!(cx.debug_bounds("mcp-sim-input").is_some());
+        assert!(cx.debug_bounds("mcp-socket").is_none());
+        press(cx, "space");
+        assert!(cx.debug_bounds("mcp-sim-input").is_none());
+
+        let advanced = cx.debug_bounds("mcp-advanced-storage").unwrap();
+        cx.simulate_click(advanced.center(), gpui::Modifiers::none());
+        assert!(cx.debug_bounds("mcp-socket").is_some());
+        assert!(cx.debug_bounds("mcp-sim-input").is_none());
+        press(cx, "enter");
+        assert!(cx.debug_bounds("mcp-socket").is_none());
+    }
+
+    #[gpui::test]
     fn toggling_prereleases_saves_the_setting_and_starts_a_check(cx: &mut gpui::TestAppContext) {
         use super::super::UpdateState;
 

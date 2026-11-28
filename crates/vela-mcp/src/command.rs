@@ -420,7 +420,7 @@ pub fn evaluate_command(
                 outcome: Decision::Deny,
                 warnings,
                 matched_rule: "unclosed_quote".to_owned(),
-                reason: "El comando tiene comillas o escapes sin cerrar.".to_owned(),
+                reason: "Close any open quotes or escape sequences in the command.".to_owned(),
             };
         }
     };
@@ -430,7 +430,7 @@ pub fn evaluate_command(
             outcome: Decision::Deny,
             warnings,
             matched_rule: "empty_command".to_owned(),
-            reason: "El comando está vacío.".to_owned(),
+            reason: "The command is empty.".to_owned(),
         };
     }
 
@@ -462,7 +462,7 @@ pub fn evaluate_command(
             outcome: Decision::Deny,
             warnings,
             matched_rule: format!("hard_denylist:{pattern}"),
-            reason: "Comando peligroso bloqueado de forma permanente.".to_owned(),
+            reason: "Vela always blocks this command.".to_owned(),
         };
     }
 
@@ -479,7 +479,7 @@ pub fn evaluate_command(
             outcome: Decision::Deny,
             warnings,
             matched_rule: pattern,
-            reason: "El comando está en la denylist del servidor.".to_owned(),
+            reason: "The server’s policy blocks this command.".to_owned(),
         };
     }
 
@@ -490,7 +490,7 @@ pub fn evaluate_command(
                     outcome: Decision::Deny,
                     warnings,
                     matched_rule: "sudo_denied".to_owned(),
-                    reason: "La elevación de privilegios está denegada.".to_owned(),
+                    reason: "The policy denies elevated privileges.".to_owned(),
                 };
             }
             Decision::Ask => true,
@@ -505,7 +505,7 @@ pub fn evaluate_command(
         ExecMode::Disabled => (
             Decision::Deny,
             "exec_disabled".to_owned(),
-            "La ejecución de comandos está desactivada.".to_owned(),
+            "SSH commands are disabled.".to_owned(),
         ),
         ExecMode::AskAll => (
             Decision::Ask,
@@ -514,20 +514,20 @@ pub fn evaluate_command(
             } else {
                 "ask_all".to_owned()
             },
-            "Los comandos requieren aprobación.".to_owned(),
+            "Commands require approval.".to_owned(),
         ),
         ExecMode::AllowExceptDenylist => {
             if sudo_ask {
                 (
                     Decision::Ask,
                     "sudo_requires_approval".to_owned(),
-                    "La elevación de privilegios requiere aprobación.".to_owned(),
+                    "Elevated privileges require approval.".to_owned(),
                 )
             } else {
                 (
                     Decision::Allow,
                     "allow_except_denylist".to_owned(),
-                    "El comando no está en la denylist.".to_owned(),
+                    "The command is outside the blocked list.".to_owned(),
                 )
             }
         }
@@ -536,27 +536,27 @@ pub fn evaluate_command(
                 (
                     Decision::Ask,
                     "shell_operator".to_owned(),
-                    "Los operadores shell requieren aprobación.".to_owned(),
+                    "Shell operators require approval.".to_owned(),
                 )
             } else if let Some(pattern) = any_match(&plain, allowed) {
                 if sudo_ask {
                     (
                         Decision::Ask,
                         "sudo_requires_approval".to_owned(),
-                        "La elevación de privilegios requiere aprobación.".to_owned(),
+                        "Elevated privileges require approval.".to_owned(),
                     )
                 } else {
                     (
                         Decision::Allow,
                         pattern,
-                        "El comando está en la allowlist.".to_owned(),
+                        "The allowed list includes this command.".to_owned(),
                     )
                 }
             } else {
                 (
                     Decision::Ask,
                     "not_allowlisted".to_owned(),
-                    "El comando no está en la allowlist.".to_owned(),
+                    "The command is outside the allowed list.".to_owned(),
                 )
             }
         }

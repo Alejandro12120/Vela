@@ -73,9 +73,8 @@ impl Workspace {
             Ok(scan) => self.mcp.scan = Some(scan),
             Err(error) => {
                 self.mcp.scan = None;
-                self.mcp.scan_error = Some(format!(
-                    "No se pudo detectar la configuración de los agentes. {error}"
-                ));
+                self.mcp.scan_error =
+                    Some(format!("Couldn’t check the agents’ configuration. {error}"));
             }
         }
     }
@@ -133,7 +132,7 @@ impl Workspace {
                 |error| harness_error(&error),
                 |report| {
                     if report.diff.is_empty() {
-                        "El archivo ya refleja este cambio.".into()
+                        "The configuration already includes this change.".into()
                     } else {
                         report.diff
                     }
@@ -234,12 +233,33 @@ impl Workspace {
 
     pub(super) fn harnesses_body(&self, theme: Theme, cx: &Context<Self>) -> Div {
         let busy = self.mcp.scanning || self.mcp.applying;
-        let header = div().flex().items_start().gap_3().justify_between()
-            .child(muted("Detecta los harnesses instalados y añade vela mcp sin tocar el resto de tus servidores MCP.", theme))
+        let header = div()
+            .flex()
+            .items_start()
+            .gap_3()
+            .justify_between()
+            .child(muted(
+                "Connect installed agents to Vela alongside their existing MCP servers.",
+                theme,
+            ))
             .child(if busy {
-                disabled_button(if self.mcp.applying { "Aplicando…" } else { "Detectando…" }, theme).into_any_element()
+                disabled_button(
+                    if self.mcp.applying {
+                        "Applying changes…"
+                    } else {
+                        "Checking for agents…"
+                    },
+                    theme,
+                )
+                .into_any_element()
             } else {
-                small("detect-mcp", "Detectar", theme, cx.listener(|this, _, window, cx| this.scan_mcp_harnesses(window, cx))).into_any_element()
+                small(
+                    "detect-mcp",
+                    "Check Again",
+                    theme,
+                    cx.listener(|this, _, window, cx| this.scan_mcp_harnesses(window, cx)),
+                )
+                .into_any_element()
             });
         let mut body = stack().child(header);
         if let Some(error) = &self.mcp.scan_error {
@@ -250,15 +270,12 @@ impl Workspace {
         };
         body = body.when(scan.detected_count() == 0, |body| {
             body.child(
-                muted(
-                    "No se detectó ningún agente. Usa la configuración manual de abajo.",
-                    theme,
-                )
-                .px_3()
-                .py_2()
-                .rounded(px(6.))
-                .bg(theme.warning_bg)
-                .text_color(theme.warning),
+                muted("No agents found. Use the manual setup below.", theme)
+                    .px_3()
+                    .py_2()
+                    .rounded(px(6.))
+                    .bg(theme.warning_bg)
+                    .text_color(theme.warning),
             )
         });
         body = body.child(super::super::settings_view::settings_group(
@@ -309,7 +326,7 @@ impl Workspace {
                         .gap_1()
                         .children(row.action.map(|action| {
                             let label = if pending.is_some() {
-                                "Desmarcar"
+                                "Unmark"
                             } else {
                                 action.label()
                             };
@@ -328,11 +345,7 @@ impl Workspace {
                         }))
                         .when(pending.is_some(), |actions| {
                             let open = self.mcp.diff.as_ref().is_some_and(|(open, _)| *open == id);
-                            let label = if open {
-                                "Ocultar cambios"
-                            } else {
-                                "Ver cambios"
-                            };
+                            let label = if open { "Hide Changes" } else { "View Changes" };
                             if busy {
                                 return actions.child(disabled_button(label, theme));
                             }
@@ -356,9 +369,9 @@ impl Workspace {
                     if let Some(snippet) = row.snippet {
                         let expanded = self.mcp.manual_preview == Some(id);
                         let label = if expanded {
-                            "Ocultar configuración"
+                            "Hide Configuration"
                         } else {
-                            "Ver configuración"
+                            "View Configuration"
                         };
                         element = element.child(
                             div()
@@ -381,7 +394,7 @@ impl Workspace {
                                 })
                                 .child(self.copy_mcp_button(
                                     index as u64 + 1,
-                                    "Copiar configuración",
+                                    "Copy Configuration",
                                     snippet.to_owned(),
                                     theme,
                                     cx,
@@ -406,7 +419,7 @@ impl Workspace {
                                 .child(muted(change.summary(&scan.display_path(path)), theme))
                                 .child(code_box(
                                     ("harness-diff", index),
-                                    text.as_deref().unwrap_or("Calculando cambios…").to_owned(),
+                                    text.as_deref().unwrap_or("Preparing changes…").to_owned(),
                                     Some(&self.mcp.diff_scroll),
                                     theme,
                                 )),
@@ -417,13 +430,37 @@ impl Workspace {
                 .collect(),
         ));
         let snippet = harness::snippet(HarnessId::Cursor, &scan.command);
-        body.child(ellipsis("harness-program", format!("Ejecutable: {}", scan.command.program().display()), theme).font_family(crate::theme::monospace()))
-            .when(scan.development_program, |body| body.child(muted("Esta ruta es de una compilación de desarrollo; los agentes dejarán de encontrarla si la borras.", theme)
-                .text_color(theme.warning)))
-            .child(stack().gap_1().child(div().flex().items_center().justify_between().gap_2()
-                .child(muted("Configuración manual para otros clientes", theme))
-                .child(self.copy_mcp_button(0, "Copiar JSON", snippet.clone(), theme, cx)))
-                .child(code_box("harness-manual-json", snippet, None, theme)))
+        body.child(
+            ellipsis(
+                "harness-program",
+                format!("Ejecutable: {}", scan.command.program().display()),
+                theme,
+            )
+            .font_family(crate::theme::monospace()),
+        )
+        .when(scan.development_program, |body| {
+            body.child(
+                muted(
+                    "Deleting this development build will disconnect agents that use it.",
+                    theme,
+                )
+                .text_color(theme.warning),
+            )
+        })
+        .child(
+            stack()
+                .gap_1()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(muted("Manual Setup for Other Agents", theme))
+                        .child(self.copy_mcp_button(0, "Copy JSON", snippet.clone(), theme, cx)),
+                )
+                .child(code_box("harness-manual-json", snippet, None, theme)),
+        )
     }
 
     fn copy_mcp_button(
@@ -440,7 +477,7 @@ impl Workspace {
         small(
             ("copy-mcp", key as usize),
             if self.mcp.copied == Some(key) {
-                "Copiado"
+                "Copied"
             } else {
                 label
             },

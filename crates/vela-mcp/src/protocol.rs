@@ -145,15 +145,15 @@ impl ToolResponse {
 
     pub(crate) fn execution_error(error: &ExecutorError) -> Self {
         let message = match error {
-            ExecutorError::UnknownServer(_) => "Servidor desconocido.",
-            ExecutorError::NoSession(_) => "El servidor no tiene una sesión conectada.",
-            ExecutorError::InvalidPath(_) => "Ruta no válida.",
-            ExecutorError::NotFound(_) => "El recurso solicitado no está disponible.",
-            ExecutorError::BinaryFile(_) => "El archivo no es texto UTF-8.",
-            ExecutorError::FileTooLarge(_) => "El archivo supera el límite de tamaño.",
-            ExecutorError::Patch(_) => "No se pudo aplicar la edición al archivo.",
-            ExecutorError::SnapshotNotFound(_) => "La copia de seguridad no existe.",
-            ExecutorError::Io(_) | ExecutorError::Core(_) => "Falló la operación de E/S o SSH.",
+            ExecutorError::UnknownServer(_) => "Unknown server.",
+            ExecutorError::NoSession(_) => "The server has no active connection.",
+            ExecutorError::InvalidPath(_) => "Invalid path.",
+            ExecutorError::NotFound(_) => "The requested item is unavailable.",
+            ExecutorError::BinaryFile(_) => "The file is not UTF-8 text.",
+            ExecutorError::FileTooLarge(_) => "The file exceeds the size limit.",
+            ExecutorError::Patch(_) => "Couldn’t apply the edit to the file.",
+            ExecutorError::SnapshotNotFound(_) => "The backup no longer exists.",
+            ExecutorError::Io(_) | ExecutorError::Core(_) => "The file or SSH operation failed.",
         };
         Self::error(message)
     }
@@ -866,6 +866,6 @@ mod tests {
             "/tmp/vm-secret/socket credentials",
         ))));
         assert!(result.is_error);
-        assert_eq!(result.content[0].text, "Falló la operación de E/S o SSH.");
+        assert_eq!(result.content[0].text, "The file or SSH operation failed.");
     }
 }

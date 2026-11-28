@@ -29,7 +29,7 @@ impl<'a> Config<'a> {
         {
             let (stripped, commas) = strip_jsonc(source)
                 .filter(|(stripped, _)| stripped.len() == source.len())
-                .ok_or_else(|| Problem::Malformed("JSONC inválido.".into()))?;
+                .ok_or_else(|| Problem::Malformed("Invalid JSONC.".into()))?;
             (Cow::Owned(stripped), commas)
         } else {
             (Cow::Borrowed(source), Vec::new())
@@ -73,7 +73,7 @@ impl<'a> Config<'a> {
                 && child.find("vela")?.is_some()
             {
                 return Err(Problem::Manual(
-                    "Hay una entrada vela de OpenCode v1 junto a mcp.servers.".into(),
+                    "An OpenCode v1 Vela entry exists alongside mcp.servers.".into(),
                     false,
                 ));
             }
@@ -351,7 +351,7 @@ impl Object {
         let bytes = source.as_bytes();
         if bytes.get(start) != Some(&b'{') {
             return Err(Problem::Malformed(
-                "Se esperaba un objeto JSON para la configuración MCP.".into(),
+                "The MCP configuration must be a JSON object.".into(),
             ));
         }
         let mut members = Vec::new();
@@ -385,7 +385,7 @@ impl Object {
         let found = matches.next();
         if matches.next().is_some() {
             return Err(Problem::Malformed(
-                "Hay claves duplicadas en la ruta MCP de Vela.".into(),
+                "The Vela MCP entry has duplicate keys.".into(),
             ));
         }
         Ok(found)
@@ -475,7 +475,7 @@ impl<'a> Format<'a> {
 
 fn malformed(error: serde_json::Error) -> Problem {
     Problem::Malformed(format!(
-        "JSON inválido en la línea {}, columna {}.",
+        "Invalid JSON at line {}, column {}.",
         error.line(),
         error.column()
     ))

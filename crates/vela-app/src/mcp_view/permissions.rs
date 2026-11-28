@@ -22,9 +22,9 @@ enum FolderScope {
 impl FolderScope {
     const OPTIONS: [Self; 3] = [Self::EntireServer, Self::SelectedFolders, Self::Ask];
     const LABELS: [(&str, Option<&str>); 3] = [
-        ("Todo el servidor", None),
-        ("Solo carpetas", None),
-        ("Preguntar", None),
+        ("Entire Server", None),
+        ("Selected Folders", None),
+        ("Ask", None),
     ];
 }
 
@@ -88,11 +88,11 @@ impl Rule {
 
     fn label(self) -> &'static str {
         match self {
-            Self::RemoteAllow => "Permitidas",
-            Self::RemoteDeny => "Prohibidas siempre",
-            Self::LocalAllow => "Rutas locales para transferencias",
-            Self::CommandAllow => "Comandos permitidos",
-            Self::CommandDeny => "Comandos prohibidos",
+            Self::RemoteAllow => "Allowed Folders",
+            Self::RemoteDeny => "Blocked Paths",
+            Self::LocalAllow => "Local Transfer Paths",
+            Self::CommandAllow => "Allowed Commands",
+            Self::CommandDeny => "Blocked Commands",
         }
     }
 
@@ -119,12 +119,14 @@ impl Rule {
         } else {
             Err(match self {
                 Self::LocalAllow => {
-                    "Usa una ruta absoluta, ~/ o un patrón **/ sin segmentos . ni ..."
+                    "Enter an absolute path or a pattern starting with ~/ or **/. Omit . and .. path segments."
                 }
                 Self::CommandAllow | Self::CommandDeny => {
-                    "Escribe un patrón de comando con las comillas cerradas."
+                    "Close any open quotes in the command pattern."
                 }
-                _ => "Usa una ruta absoluta o un patrón **/ sin segmentos . ni ...",
+                _ => {
+                    "Enter an absolute path or a pattern starting with **/. Omit . and .. path segments."
+                }
             })
         }
     }
@@ -235,9 +237,9 @@ impl Workspace {
             .unwrap_or_default();
         let notes = input(
             cx,
-            "Notas para el agente",
+            "Notes for Agents",
             policy.notes.as_deref().unwrap_or(""),
-            "Escribe una nota",
+            "Enter a note",
             false,
         );
         self.mcp.dialog = Some(View::Server(Box::new(ServerDraft {
@@ -279,13 +281,13 @@ impl Workspace {
                 }
                 index += 1;
             }
-            profile.name.push_str(" · copia");
+            profile.name.push_str(" Copy");
             profile.builtin = false;
             None
         } else {
             Some(profile.clone())
         };
-        let name = input(cx, "Nombre del perfil", &profile.name, "Nombre", false);
+        let name = input(cx, "Profile Name", &profile.name, "Name", false);
         self.clear_mcp_select();
         self.mcp.dialog = Some(View::Profile(Box::new(ProfileDraft {
             readonly,
@@ -360,13 +362,13 @@ impl Workspace {
 
     fn permissions_busy_hint(&self) -> Option<&'static str> {
         if self.mcp.conflict {
-            Some("Recarga la configuración para poder guardar.")
+            Some("Reload the configuration to save changes.")
         } else if self.mcp.saving {
-            Some("Guardando cambios…")
+            Some("Saving changes…")
         } else if self.mcp.loading {
-            Some("Cargando mcp.toml…")
+            Some("Loading mcp.toml…")
         } else if self.mcp.busy() {
-            Some("Hay una operación MCP en curso.")
+            Some("An MCP operation is in progress.")
         } else {
             None
         }
@@ -375,7 +377,7 @@ impl Workspace {
     fn server_save_hint(&self, draft: &ServerDraft, cx: &App) -> Option<&'static str> {
         let blocked = self.permissions_busy_hint().or_else(|| {
             let Some(config) = self.mcp.config() else {
-                return Some("La configuración MCP no está disponible.");
+                return Some("The MCP configuration is unavailable.");
             };
             let auth = self
                 .servers
@@ -401,9 +403,9 @@ impl Workspace {
         let name = draft.name.read(cx).value();
         let blocked = self.permissions_busy_hint().or_else(|| {
             if self.mcp.config().is_none() {
-                Some("La configuración MCP no está disponible.")
+                Some("The MCP configuration is unavailable.")
             } else if draft.readonly {
-                Some("Este perfil es predefinido.")
+                Some("This is a built-in profile.")
             } else if draft.initial.is_some()
                 && self.mcp.config().is_some_and(|config| {
                     !config
@@ -412,9 +414,9 @@ impl Workspace {
                         .any(|profile| profile.id == draft.profile.id)
                 })
             {
-                Some("El perfil ya no existe.")
+                Some("This profile no longer exists.")
             } else if name.trim().is_empty() || !valid_notes(name) {
-                Some("Escribe un nombre para el perfil sin caracteres de control.")
+                Some("Enter a profile name without control characters.")
             } else {
                 None
             }
@@ -446,7 +448,7 @@ impl Workspace {
     pub(super) fn preset_choices(&self, theme: Theme, cx: &Context<Self>) -> Div {
         stack()
             .child(muted(
-                "Elige un perfil de fábrica para copiar sus reglas.",
+                "Choose a built-in profile to use as a starting point.",
                 theme,
             ))
             .children(presets::builtin_profiles().into_iter().map(|profile| {
@@ -470,23 +472,23 @@ impl Workspace {
     ) -> DialogContent {
         let name = self.servers.iter().find(|server| server.id == draft.id);
         let title = format!(
-            "{} · Acceso MCP",
-            name.map_or("Servidor", |server| server.display_name())
+            "{} · MCP Access",
+            name.map_or("Server", |server| server.display_name())
         )
         .into();
         let (Some(server), Some(config)) = (name, self.mcp.config()) else {
             let body = stack()
                 .children(self.mcp_error(theme, cx))
                 .when(self.mcp.loading, |body| {
-                    body.child(muted("Cargando mcp.toml…", theme))
+                    body.child(muted("Loading mcp.toml…", theme))
                 });
             return (
                 title,
                 body.into_any_element(),
                 self.server_save_hint(draft, cx)
-                    .unwrap_or("Guardado en mcp.toml")
+                    .unwrap_or("Saved in mcp.toml")
                     .into(),
-                Some("Guardar"),
+                Some("Save"),
                 false,
             );
         };
@@ -494,14 +496,14 @@ impl Workspace {
         let profile = presets::resolve_profile(config, &policy.profile_id);
         let profile_name = profile
             .as_ref()
-            .map_or("Perfil no encontrado", |profile| profile.name.as_str());
+            .map_or("Profile not found", |profile| profile.name.as_str());
         let folders = draft.folder_scope();
         let inherited_folders = profile.as_ref().map_or(&[][..], |profile| {
             profile.default_allowed_remote_paths.as_slice()
         });
         let mut permissions = vec![
             permission_row(
-                "Perfil",
+                "Profile",
                 None,
                 self.mcp_select(
                     "mcp-server-profile",
@@ -546,11 +548,11 @@ impl Workspace {
                 },
             ),
             permission_row(
-                "Ámbito de carpetas",
+                "Folder Access",
                 None,
                 segmented(
                     "mcp-folder-scope",
-                    "Ámbito de carpetas",
+                    "Folder Access",
                     &FolderScope::LABELS,
                     FolderScope::OPTIONS
                         .iter()
@@ -586,14 +588,14 @@ impl Workspace {
             permissions.push(div().px_3().py_2().child(ellipsis(
                 "mcp-inherited-folders",
                 format!(
-                    "Carpetas heredadas del perfil · {}",
+                    "Folders from the profile · {}",
                     inherited_folders.join(" · ")
                 ),
                 theme,
             )));
         } else if folders == FolderScope::Ask {
             permissions.push(div().px_3().py_2().child(muted(
-                "Sin carpetas permitidas: toda operación pedirá aprobación.",
+                "With no allowed folders, operations require approval.",
                 theme,
             )));
         }
@@ -620,7 +622,7 @@ impl Workspace {
                     .child(badge(profile_name.to_owned(), Tone::Neutral, theme).max_w(px(210.))),
             )
             .child(self.availability_rows(policy.availability, &server.auth, theme, cx))
-            .child(permission_group("Permisos", None, permissions, theme))
+            .child(permission_group("Permissions", None, permissions, theme))
             .child(
                 div()
                     .id("mcp-advanced-toggle")
@@ -650,7 +652,7 @@ impl Workspace {
                         .size(px(14.))
                         .text_color(theme.secondary_text),
                     )
-                    .child(heading("Ajustes avanzados"))
+                    .child(heading("Advanced Settings"))
                     .when(advanced_count > 0, |row| {
                         row.child(badge(advanced_count.to_string(), Tone::Neutral, theme))
                     })
@@ -668,8 +670,8 @@ impl Workspace {
         (
             title,
             body.into_any_element(),
-            hint.unwrap_or("Guardado en mcp.toml").into(),
-            Some("Guardar"),
+            hint.unwrap_or("Saved in mcp.toml").into(),
+            Some("Save"),
             hint.is_none(),
         )
     }
@@ -712,7 +714,7 @@ impl Workspace {
                         .when_some(inherited.filter(|rules| !rules.is_empty()), |row, rules| {
                             row.child(ellipsis(
                                 format!("{}-inherited", rule.label()),
-                                format!("Del perfil · {}", rules.join(" · ")),
+                                format!("From the profile · {}", rules.join(" · ")),
                                 theme,
                             ))
                         }),
@@ -721,7 +723,7 @@ impl Workspace {
         }
 
         let mut paths = vec![div().px_3().py_2().child(muted(
-            "Protegidas siempre: .env, .ssh, claves privadas y /etc/shadow.",
+            "Vela always protects .env, .ssh, private keys, and /etc/shadow.",
             theme,
         ))];
         if let Some(profile) = profile {
@@ -734,7 +736,7 @@ impl Workspace {
             if !inherited.is_empty() {
                 paths.push(div().px_3().py_2().child(ellipsis(
                     "mcp-inherited-denied-paths",
-                    format!("Prohibidas por el perfil · {}", inherited.join(" · ")),
+                    format!("Blocked by the profile · {}", inherited.join(" · ")),
                     theme,
                 )));
             }
@@ -760,34 +762,34 @@ impl Workspace {
 
         stack()
             .gap_3()
-            .child(permission_group("Comandos", None, commands, theme))
+            .child(permission_group("Commands", None, commands, theme))
             .child(permission_group(
-                "Rutas protegidas y locales",
+                "Protected and Local Paths",
                 None,
                 paths,
                 theme,
             ))
             .child(permission_group(
-                "Privacidad y notas",
+                "Privacy and Notes",
                 None,
                 vec![
                     permission_row(
-                        "Ocultar host y usuario",
+                        "Hide Server Address",
                         Some(muted(
                             format!(
-                                "Ajuste global {}.",
+                                "Global setting is {}.",
                                 if config.hide_server_identity {
-                                    "activo"
+                                    "on"
                                 } else {
-                                    "inactivo"
+                                    "off"
                                 }
                             ),
                             theme,
                         )),
                         segmented(
                             "mcp-server-hide",
-                            "Ocultar host y usuario",
-                            &[("Heredar", None), ("Sí", None), ("No", None)],
+                            "Hide Server Address",
+                            &[("Inherit", None), ("Yes", None), ("No", None)],
                             match policy.hide_server_identity {
                                 None => 0,
                                 Some(true) => 1,
@@ -806,9 +808,9 @@ impl Workspace {
                         .focus_visible(move |style| style.border_color(theme.accent)),
                     ),
                     permission_row(
-                        "Notas para el agente",
+                        "Notes for Agents",
                         Some(technical_sentence(
-                            "Contexto breve visible en",
+                            "Share a short note with agents through",
                             "list_servers",
                             ".",
                             theme,
@@ -852,7 +854,7 @@ impl Workspace {
                             Some(technical(label, theme)),
                             small_button(
                                 ("mcp-remove-scoped", index),
-                                "Quitar",
+                                "Remove",
                                 Variant::Secondary,
                                 theme,
                                 cx.listener(move |this, _, _, cx| {
@@ -868,8 +870,8 @@ impl Workspace {
                     })
                     .collect();
                 body.child(permission_group(
-                    "Reglas guardadas en aprobaciones",
-                    Some("Cada regla se aplica a una operación y un destino concretos."),
+                    "Saved Approval Rules",
+                    Some("Each rule applies to a specific operation and destination."),
                     rows,
                     theme,
                 ))
@@ -885,21 +887,21 @@ impl Workspace {
     ) -> Div {
         use ServerAvailability::*;
         let options = [
-            (Disabled, "Desactivado", "No aparece en"),
+            (Disabled, "Off", "Hide this server from"),
             (
                 ConnectedOnly,
-                "Solo si ya está conectado",
-                "Limita el acceso a una sesión abierta en Vela.",
+                "When Connected",
+                "Use an existing connection in Vela.",
             ),
             (
                 OnDemandAsk,
-                "Bajo demanda con aprobación",
-                "Solicita aprobación para conectar.",
+                "On Demand with Approval",
+                "Ask before opening a connection.",
             ),
             (
                 Headless,
-                "Desatendido (headless)",
-                "Conecta con clave SSH, sin elevación desatendida.",
+                "Unattended",
+                "Connect with an SSH key. Elevated privileges require approval.",
             ),
         ];
         let rows = options
@@ -912,7 +914,7 @@ impl Workspace {
                     .role(gpui::Role::RadioButton)
                     .aria_label(label)
                     .aria_selected(selected == mode)
-                    .when(!enabled, |row| row.aria_description("No disponible"))
+                    .when(!enabled, |row| row.aria_description("Unavailable"))
                     .border_1()
                     .border_color(gpui::transparent_black())
                     .flex()
@@ -924,7 +926,7 @@ impl Workspace {
                     .child(radio_dot(selected == mode, theme))
                     .child(stack().min_w_0().flex_1().gap_0().child(heading(label)).child(if !enabled {
                         muted(
-                            "Requiere autenticación con clave SSH. Este servidor usa contraseña.",
+                            "Unattended access requires an SSH key. This server uses a password.",
                             theme,
                         )
                     } else if mode == Disabled {
@@ -963,7 +965,7 @@ impl Workspace {
             .collect();
         stack()
             .gap_1()
-            .child(heading("Acceso"))
+            .child(heading("Access"))
             .child(settings_group(theme, rows))
     }
 
@@ -979,9 +981,9 @@ impl Workspace {
         let title = if readonly {
             profile.name.clone()
         } else if draft.initial.is_none() {
-            "Nuevo perfil".into()
+            "New Profile".into()
         } else {
-            "Editar perfil".into()
+            "Edit Profile".into()
         };
         let count = self
             .mcp
@@ -1008,34 +1010,53 @@ impl Workspace {
             ),
         ];
         commands.extend(render_operations!(self, profile, readonly, theme, cx;
-            transfer_upload => "Subir archivos", transfer_download => "Descargar archivos"
+            transfer_upload => "Upload Files", transfer_download => "Download Files"
         ));
         let body = stack()
             .gap_3()
             .children(self.mcp_error(theme, cx))
             .when(readonly, |body| {
-                body.child(badge("Predefinido", Tone::Neutral, theme).self_start())
+                let id = profile.id.clone();
+                body.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(badge("Built-in", Tone::Neutral, theme))
+                        .child(small(
+                            "mcp-duplicate-profile",
+                            "Duplicate…",
+                            theme,
+                            cx.listener(move |this, _, window, cx| {
+                                this.open_mcp_profile(id.clone(), true, window, cx);
+                            }),
+                        )),
+                )
             })
             .when(!readonly, |body| {
                 body.child(
                     stack()
                         .gap_1()
-                        .child(heading("Nombre del perfil"))
+                        .child(heading("Profile Name"))
                         .child(draft.name.clone()),
                 )
             })
+            .when(!profile.description.is_empty(), |body| {
+                body.child(muted(profile.description.clone(), theme))
+            })
             .child(permission_group(
-                "Operaciones de archivos",
+                "File Operations",
                 None,
                 render_operations!(self, profile, readonly, theme, cx;
-                    fs_list => "Listar", fs_stat => "Ver atributos", fs_read => "Leer",
-                    fs_write => "Escribir", fs_patch => "Editar", fs_mkdir => "Crear carpetas",
-                    fs_move => "Mover", fs_delete => "Borrar", fs_chmod => "Cambiar permisos"
+                    fs_list => "List Files", fs_stat => "View Attributes", fs_read => "Read",
+                    fs_write => "Write", fs_patch => "Edit", fs_mkdir => "Create Folders",
+                    fs_move => "Move", fs_delete => "Delete", fs_chmod => "Change Permissions"
                 ),
                 theme,
             ))
             .child(permission_group(
-                "Rutas remotas",
+                "Remote Paths",
                 None,
                 vec![
                     self.rule_list(
@@ -1058,7 +1079,7 @@ impl Workspace {
                 theme,
             ))
             .child(permission_group(
-                "Comandos y transferencias",
+                "Commands and Transfers",
                 None,
                 commands,
                 theme,
@@ -1073,7 +1094,7 @@ impl Workspace {
                         .child(if count == 0 && !self.mcp.conflict {
                             small(
                                 "delete-profile",
-                                "Borrar perfil…",
+                                "Delete Profile…",
                                 theme,
                                 cx.listener(move |this, _, window, cx| {
                                     this.mcp.confirmation =
@@ -1084,10 +1105,13 @@ impl Workspace {
                             .text_color(theme.danger)
                             .into_any_element()
                         } else {
-                            disabled_button("Borrar perfil…", theme).into_any_element()
+                            disabled_button("Delete Profile…", theme).into_any_element()
                         })
                         .when(count > 0, |row| {
-                            row.child(muted("Este perfil se usa en al menos un servidor.", theme))
+                            row.child(muted(
+                                "This profile is in use by one or more servers.",
+                                theme,
+                            ))
                         }),
                 )
             });
@@ -1098,9 +1122,9 @@ impl Workspace {
             if readonly {
                 String::new()
             } else {
-                hint.unwrap_or("Guardado en mcp.toml").into()
+                hint.unwrap_or("Saved in mcp.toml").into()
             },
-            (!readonly).then_some("Guardar"),
+            (!readonly).then_some("Save"),
             hint.is_none(),
         )
     }
@@ -1124,7 +1148,7 @@ impl Workspace {
         } else {
             std::iter::once(None).chain(modes).collect()
         };
-        let label = |mode: Option<ExecMode>| mode.map_or("Según perfil", exec_label);
+        let label = |mode: Option<ExecMode>| mode.map_or("Use Profile", exec_label);
         let key = values
             .iter()
             .position(|mode| *mode == current)
@@ -1132,7 +1156,7 @@ impl Workspace {
             .to_string();
         let effective = current.or(inherited);
         let value = if current.is_none() && inherited.is_some() {
-            format!("Según perfil · {}", label(effective))
+            format!("Use Profile · {}", label(effective))
         } else {
             label(current).to_owned()
         };
@@ -1168,7 +1192,7 @@ impl Workspace {
                 },
             )
         };
-        permission_row("SSH exec", None, control)
+        permission_row("SSH Commands", None, control)
     }
 
     fn sudo_control(
@@ -1189,10 +1213,10 @@ impl Workspace {
             .chain((current == Some(Decision::Allow)).then_some(Some(Decision::Allow)))
             .collect::<Vec<_>>();
         let label = |decision| match decision {
-            None => "Según perfil",
-            Some(Decision::Ask) => "Preguntar",
-            Some(Decision::Deny) => "Denegar",
-            Some(Decision::Allow) => "Permitir (configuración existente)",
+            None => "Use Profile",
+            Some(Decision::Ask) => "Ask",
+            Some(Decision::Deny) => "Deny",
+            Some(Decision::Allow) => "Allow (Existing Setting)",
         };
         let key = values
             .iter()
@@ -1201,7 +1225,7 @@ impl Workspace {
             .to_string();
         let effective = current.or(inherited);
         let value = if current.is_none() && inherited.is_some() {
-            format!("Según perfil · {}", label(effective))
+            format!("Use Profile · {}", label(effective))
         } else {
             label(current).to_owned()
         };
@@ -1232,7 +1256,7 @@ impl Workspace {
                 },
             )
         };
-        permission_row("Elevación (sudo)", None, control)
+        permission_row("Elevated Privileges (sudo)", None, control)
     }
 
     fn rule_list(
@@ -1273,7 +1297,9 @@ impl Workspace {
                             .child(
                                 ellipsis((label, index), value.clone(), theme)
                                     .font_family(crate::theme::monospace())
-                                    .aria_description("Regla heredada; no se puede quitar aquí."),
+                                    .aria_description(
+                                        "Edit the profile to remove this inherited rule.",
+                                    ),
                             )
                     }))
                     .children(own.iter().enumerate().map(|(index, value)| {
@@ -1297,7 +1323,7 @@ impl Workspace {
                                 chip.child(
                                     small_icon_button(
                                         format!("{label}-remove-{index}"),
-                                        format!("Quitar {value}"),
+                                        format!("Remove {value}"),
                                         IconName::Close,
                                         Variant::Secondary,
                                         theme,
@@ -1328,7 +1354,7 @@ impl Workspace {
                 .child(
                     small(
                         format!("{label}-add"),
-                        "Añadir",
+                        "Add",
                         theme,
                         cx.listener(move |this, _, window, cx| this.add_mcp_rule(rule, window, cx)),
                     )

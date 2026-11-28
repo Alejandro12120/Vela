@@ -166,8 +166,12 @@ impl HarnessEnv {
 }
 
 fn absolute_home(home: Option<PathBuf>) -> io::Result<PathBuf> {
-    home.filter(|path| path.is_absolute())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Se requiere un HOME absoluto."))
+    home.filter(|path| path.is_absolute()).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "The home directory must be an absolute path.",
+        )
+    })
 }
 
 fn present(path: &Path) -> bool {

@@ -77,7 +77,7 @@ impl VelaCommand {
             .map_err(|_| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "La ruta de Vela debe ser UTF-8.",
+                    "The Vela executable path must be valid UTF-8.",
                 )
             })?;
         Ok(Self { program })
@@ -111,7 +111,7 @@ impl VelaCommand {
         let found = match (url, program.filter(|program| !program.trim().is_empty())) {
             (Some(url), _) => display_url(url),
             (None, Some(program)) => display_program(program),
-            (None, None) => "(sin comando)".into(),
+            (None, None) => "(no command)".into(),
         };
         EntryState::Conflict { found }
     }
@@ -134,7 +134,7 @@ fn display_program(program: &str) -> String {
 }
 
 fn display_url(url: &str) -> String {
-    let host = url_host(url).unwrap_or("(sin host)");
+    let host = url_host(url).unwrap_or("(no host)");
     format!("url: {host}")
 }
 
@@ -235,23 +235,23 @@ pub enum Action {
 
 #[derive(Debug, Error)]
 pub enum HarnessError {
-    #[error("Error de E/S en {} ({source}).", .config_path.display())]
+    #[error("Couldn’t access {} ({source}).", .config_path.display())]
     Io {
         config_path: PathBuf,
         #[source]
         source: io::Error,
     },
-    #[error("Configuración inválida en {}: {error}", .config_path.display())]
+    #[error("Invalid configuration in {}: {error}", .config_path.display())]
     Malformed { config_path: PathBuf, error: String },
-    #[error("La entrada vela de {} ya está ocupada. Usa --force para modificarla.", .config_path.display())]
+    #[error("A different Vela entry exists in {}. Confirm replacement to change it.", .config_path.display())]
     Conflict { config_path: PathBuf },
-    #[error("Se requiere edición manual en {}: {reason}", .config_path.display())]
+    #[error("Edit {} manually: {reason}", .config_path.display())]
     ManualRequired {
         config_path: PathBuf,
         reason: String,
         snippet: String,
     },
-    #[error("La configuración de {} cambió durante la operación.", .config_path.display())]
+    #[error("The configuration in {} changed during the operation.", .config_path.display())]
     ConcurrentModification { config_path: PathBuf },
 }
 
@@ -294,7 +294,7 @@ impl<'a> Document<'a> {
         snapshot: Option<&'a fsx::Snapshot>,
     ) -> Result<Self, Problem> {
         let source = std::str::from_utf8(snapshot.map_or(&[], |s| &s.bytes))
-            .map_err(|_| Problem::Malformed("El archivo no es UTF-8.".into()))?;
+            .map_err(|_| Problem::Malformed("The file is not valid UTF-8.".into()))?;
         if id == HarnessId::Codex {
             toml::Config::parse(source).map(Self::Toml)
         } else {
@@ -515,7 +515,7 @@ fn document<'a>(
             Ok(Document::Json(config)) if config.is_legacy()
         );
         return Err(Problem::Manual(
-            "Coexisten opencode.json y opencode.jsonc. Revisa ambos archivos.".into(),
+            "Both opencode.json and opencode.jsonc exist. Review both files.".into(),
             legacy,
         )
         .at(id, path, cmd));

@@ -115,7 +115,7 @@ fn private_parent(path: &Path, create: bool) -> io::Result<PathBuf> {
     if !path.is_absolute() || path.file_name().is_none() || path.as_os_str().len() >= 104 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "Ruta de socket Unix no válida.",
+            "Invalid Unix socket path.",
         ));
     }
     let parent = path.parent().expect("absolute socket path");
@@ -129,7 +129,7 @@ fn private_parent(path: &Path, create: bool) -> io::Result<PathBuf> {
     let metadata = fs::symlink_metadata(parent)?;
     if !metadata.is_dir() || metadata.uid() != uid() || metadata.mode() & 0o7777 != 0o700 {
         return Err(permission_denied(
-            "El directorio del socket MCP debe ser privado (0700).",
+            "The MCP socket folder must be private (0700).",
         ));
     }
     Ok(parent.to_path_buf())
@@ -139,7 +139,7 @@ fn socket_metadata(path: &Path) -> io::Result<fs::Metadata> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.file_type().is_socket() || metadata.uid() != uid() {
         return Err(permission_denied(
-            "La ruta MCP debe ser un socket Unix del usuario.",
+            "The MCP path must be a Unix socket owned by the current user.",
         ));
     }
     Ok(metadata)
@@ -149,7 +149,9 @@ fn verify_peer(stream: &UnixStream) -> io::Result<()> {
     if stream.peer_cred()?.uid() == uid() {
         Ok(())
     } else {
-        Err(permission_denied("El UID del peer MCP no coincide."))
+        Err(permission_denied(
+            "The MCP connection is owned by a different user.",
+        ))
     }
 }
 
@@ -446,7 +448,9 @@ impl IpcClient {
     pub async fn connect(path: &Path, client: &ClientInfo) -> io::Result<Self> {
         private_parent(path, false)?;
         if socket_metadata(path)?.mode() & 0o7777 != 0o600 {
-            return Err(permission_denied("El socket MCP debe tener permisos 0600."));
+            return Err(permission_denied(
+                "The MCP socket must have permissions 0600.",
+            ));
         }
         timeout(IO_TIMEOUT, async {
             let stream = UnixStream::connect(path).await?;
@@ -519,7 +523,7 @@ impl IpcClient {
 }
 
 fn disconnected() -> ToolResponse {
-    ToolResponse::error("Se perdió la conexión IPC con Vela.")
+    ToolResponse::error("The connection to Vela was lost.")
 }
 
 async fn bridge(

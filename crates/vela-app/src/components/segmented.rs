@@ -35,7 +35,7 @@ pub fn segmented(
         .border_color(theme.control_border)
         .bg(theme.panel)
         .focus(move |style| style.border_color(theme.accent))
-        .when(!available, |group| group.aria_description("No disponible"))
+        .when(!available, |group| group.aria_description("Unavailable"))
         .when(available, |group| {
             group
                 .tab_index(0)

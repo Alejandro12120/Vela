@@ -249,9 +249,9 @@ impl Broker {
     pub fn kill(&self) {
         self.cut(&mut self.state());
         self.system_event(
-            "Cortar agentes",
+            "Disconnect Agents",
             Status::Cancelled,
-            "Clientes desconectados y concesiones revocadas",
+            "Disconnected agents and revoked temporary access.",
         );
     }
 
@@ -278,12 +278,12 @@ impl Broker {
         activity.detail = activity.detail.chars().take(500).collect();
         let mut state = self.state();
         if activity.status == Status::Blocked
-            && activity.detail == "Hay ediciones abiertas sin sincronizar."
+            && activity.detail == "Some edits haven’t been uploaded."
         {
             state.conflict = Some((
                 Instant::now() + Duration::from_secs(8),
                 format!(
-                    "{} intentó modificar {}. Hay cambios sin subir en Ediciones.",
+                    "{} tried to modify {}. Upload your changes from Edits first.",
                     activity.agent, activity.target
                 ),
             ));
@@ -297,15 +297,15 @@ impl Broker {
     pub async fn restore(&self, activity: &Activity, backend: Backend) -> Result<(), String> {
         let Some((id, backup)) = activity.server_id.as_ref().zip(activity.backup_id.as_ref())
         else {
-            return Err("La actividad no tiene copia de rollback.".into());
+            return Err("There’s no backup for this operation.".into());
         };
         let session = backend
             .session(id)
-            .ok_or("Conecta el servidor para revertir.")?;
+            .ok_or("Connect to the server to restore the backup.")?;
         if !backend.servers.iter().any(|(server_id, identity)| {
             server_id == id && Some(identity) == activity.identity.as_ref()
         }) {
-            return Err("La identidad del servidor ha cambiado.".into());
+            return Err("The server’s identity has changed.".into());
         }
         let limits = self.state().config.rollback.clone();
         let store = RollbackStore::new(backend.dir.join(ROLLBACK_DIR_NAME), limits)
@@ -314,18 +314,17 @@ impl Broker {
         let (entry, _) = store
             .get_snapshot(backup, now)
             .map_err(|e| e.to_string())?
-            .ok_or("La copia de rollback ha caducado o se ha eliminado.")?;
+            .ok_or("The backup expired or was deleted.")?;
         if entry.server_id != *id || backend.edits_dirty(id, &entry.remote_path) {
             return Err(
-                "Hay ediciones abiertas sin sincronizar o la copia pertenece a otro servidor."
-                    .into(),
+                "Some edits haven’t been uploaded, or the backup belongs to another server.".into(),
             );
         }
         let path = PathBuf::from(&entry.remote_path);
         // The original canonical destination may have been replaced with a symlink.
         let parent = path
             .parent()
-            .ok_or("La ruta de rollback no tiene directorio padre.")?;
+            .ok_or("The backup destination has no parent folder.")?;
         let canonical_parent = session
             .realpath(parent.to_owned())
             .await
@@ -336,7 +335,7 @@ impl Broker {
                 .await
                 .is_ok_and(|entry| entry.kind == vela_core::EntryKind::Symlink)
         {
-            return Err("El destino de rollback apunta a otra ruta.".into());
+            return Err("The backup destination now points to a different path.".into());
         }
         restore_snapshot(session, &store, backup, now)
             .await
@@ -365,7 +364,7 @@ impl Broker {
             agent: "Vela".into(),
             operation: "Rollback".into(),
             status,
-            detail: result.err().unwrap_or_else(|| "Copia restaurada".into()),
+            detail: result.err().unwrap_or_else(|| "Backup restored.".into()),
             backup_id: None,
             ..activity
         });
@@ -448,7 +447,7 @@ impl Handler {
             };
             if let Err(error) = result {
                 self.broker
-                    .system_event("Broker IPC", Status::Error, &error.to_string());
+                    .system_event("MCP Server", Status::Error, &error.to_string());
                 if enabled.changed().await.is_err() {
                     return;
                 }
@@ -461,7 +460,7 @@ impl Handler {
         let _ = self.ui.send(request(reply));
         receive
             .await
-            .map_err(|_| ToolResponse::error("El espacio de trabajo se ha cerrado."))
+            .map_err(|_| ToolResponse::error("The workspace closed."))
     }
 
     async fn ask(
@@ -474,15 +473,12 @@ impl Handler {
         let item = {
             let mut state = self.broker.state();
             if !state.config.enabled || state.epoch != call.epoch {
-                return Err((
-                    Status::Cancelled,
-                    ToolResponse::error("Solicitud cancelada."),
-                ));
+                return Err((Status::Cancelled, ToolResponse::error("Request canceled.")));
             }
             if state.pending.len() >= MAX_PENDING {
                 return Err((
                     Status::Error,
-                    ToolResponse::error("La cola de aprobaciones está llena."),
+                    ToolResponse::error("The approval queue is full."),
                 ));
             }
             let id = state.next_id();
@@ -502,18 +498,18 @@ impl Handler {
         let _ = self.ui.send(UiRequest::Approval(item.clone()));
         let answer = tokio::select! {
             biased;
-            answer = progress.wait("Esperando aprobación en Vela.", &mut receive) => {
-                answer.map_err(|_| (Status::Cancelled, ToolResponse::error("Solicitud cancelada.")))?
+            answer = progress.wait("Waiting for approval in Vela.", &mut receive) => {
+                answer.map_err(|_| (Status::Cancelled, ToolResponse::error("Request canceled.")))?
             }
             _ = tokio::time::sleep_until(item.deadline.into()) => {
-                return Err((Status::Expired, ToolResponse::error("La solicitud de aprobación ha caducado.")));
+                return Err((Status::Expired, ToolResponse::error("The approval request expired.")));
             }
         };
         if let Answer::Deny(reason) = answer {
             let message = if reason.trim().is_empty() {
-                "La persona denegó la operación.".into()
+                "The user denied the operation.".into()
             } else {
-                format!("La persona denegó la operación. {}", reason.trim())
+                format!("The user denied the operation. {}", reason.trim())
             };
             Err((Status::Denied, ToolResponse::error(message)))
         } else {
@@ -536,7 +532,7 @@ impl Handler {
             if !policy.config().enabled {
                 return Err((
                     Status::Cancelled,
-                    ToolResponse::error("MCP está desactivado o se cortaron los agentes."),
+                    ToolResponse::error("The MCP server is off or the agents were disconnected."),
                 ));
             }
             if let Some(id) = tool.session_server() {
@@ -550,7 +546,7 @@ impl Handler {
                 {
                     return Err((
                         Status::Blocked,
-                        ToolResponse::error("La identidad del servidor ha cambiado."),
+                        ToolResponse::error("The server’s identity has changed."),
                     ));
                 }
                 call.row_mut().identity = identity;
@@ -558,7 +554,7 @@ impl Handler {
                     .labels
                     .get(id)
                     .cloned()
-                    .ok_or_else(|| error(ToolResponse::error("Servidor desconocido.")))?;
+                    .ok_or_else(|| error(ToolResponse::error("Unknown server.")))?;
                 if backend.session(id).is_none() {
                     let decision = policy.evaluate(
                         &McpAction::ConnectOnDemand {
@@ -576,17 +572,17 @@ impl Handler {
                         .map(|item| item.availability);
                     if availability != Some(ServerAvailability::OnDemandAsk) || approved.is_some() {
                         return Err(error(ToolResponse::error(
-                            "El servidor no tiene una sesión conectada.",
+                            "The server has no active connection.",
                         )));
                     }
                     self.ask(
                         call,
                         ApprovalPreview {
-                            operation: format!("Conectar por SSH · {}", tool.name()),
+                            operation: format!("Connect via SSH · {}", tool.name()),
                             server_id: id.into(),
                             paths: vec![display_target(&tool)],
                             agent_reason: tool.arguments()["reason"].as_str().map(str::to_owned),
-                            reason: "La operación requiere una conexión SSH bajo demanda.".into(),
+                            reason: "This operation requires opening an SSH connection.".into(),
                             ..ApprovalPreview::default()
                         },
                         &mut progress,
@@ -600,20 +596,18 @@ impl Handler {
                     {
                         return Err((
                             Status::Blocked,
-                            ToolResponse::error("La política de conexión ha cambiado."),
+                            ToolResponse::error("The connection policy has changed."),
                         ));
                     }
                     let session = progress
                         .wait(
-                            "Conectando por SSH.",
+                            "Opening an SSH connection.",
                             self.ui(|reply| UiRequest::Connect(id.into(), reply)),
                         )
                         .await
                         .map_err(error)?;
                     if session.is_none() {
-                        return Err(error(ToolResponse::error(
-                            "No se pudo establecer la sesión SSH.",
-                        )));
+                        return Err(error(ToolResponse::error("Couldn’t connect via SSH.")));
                     }
                     call.row_mut().status = Status::Approved;
                     continue;
@@ -625,7 +619,7 @@ impl Handler {
             )
             .map_err(|_| {
                 error(ToolResponse::error(
-                    "No se pudo abrir el almacén de rollback.",
+                    "Couldn’t open the rollback backup store.",
                 ))
             })?;
             let mut executor = Executor::with_policy(backend, policy, Arc::new(store));
@@ -654,7 +648,7 @@ impl Handler {
                         call.row_mut().target = path.into();
                     }
                     if let Some(exit) = value["exit_code"].as_i64() {
-                        call.row_mut().detail = format!("Código de salida {exit}");
+                        call.row_mut().detail = format!("Exit code {exit}");
                     }
                     if let Some((preview, answer)) = approved {
                         call.row_mut().status = Status::Approved;
@@ -683,7 +677,7 @@ impl Handler {
                                         .is_ok_and(|result| result.is_ok());
                                     if !saved {
                                         call.row_mut().detail =
-                                            "Operación ejecutada. No se pudo guardar la regla."
+                                            "The operation completed. Vela couldn’t save the rule."
                                                 .into();
                                     }
                                 }
@@ -784,7 +778,7 @@ impl Drop for Call {
     fn drop(&mut self) {
         if let Some(mut row) = self.activity.take() {
             row.status = Status::Cancelled;
-            row.detail = "El cliente cerró o canceló la solicitud.".into();
+            row.detail = "The agent closed or canceled the request.".into();
             self.broker.record(row);
         }
     }

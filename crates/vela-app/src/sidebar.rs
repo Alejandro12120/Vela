@@ -961,7 +961,7 @@ pub fn row_menu(
             false,
         ),
         (RowAction::Edit, IconName::Pencil, "Edit…", !working, false),
-        (RowAction::Mcp, IconName::Plug, "Acceso MCP…", true, false),
+        (RowAction::Mcp, IconName::Plug, "MCP Access…", true, false),
         (
             RowAction::Duplicate,
             IconName::Copy,

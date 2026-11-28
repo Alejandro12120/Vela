@@ -295,7 +295,7 @@ impl ConfigSnapshot {
         );
         let text = document.to_string();
         if parse(&text)? != config {
-            return Err(invalid_data("No se pudo validar la edición de mcp.toml."));
+            return Err(invalid_data("Couldn’t validate the changes to mcp.toml."));
         }
 
         fs::create_dir_all(dir)?;
@@ -313,7 +313,7 @@ impl ConfigSnapshot {
         if read(dir)? != self.source {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
-                "La configuración cambió fuera de esta ventana.",
+                "The configuration changed outside Vela.",
             ));
         }
         temp.persist(dir.join(CONFIG_FILE_NAME))?;

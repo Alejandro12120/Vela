@@ -249,7 +249,7 @@ async fn stdio_ipc_approval_progress_rollback_rules_and_kill_switch() {
     stdio.write(3, &target, false).await;
     broker.answer(
         queued(&broker).await.id,
-        Answer::Deny("Valida primero".into()),
+        Answer::Deny("Validate first".into()),
     );
     let denied = stdio.receive().await;
     assert_eq!(denied["result"]["isError"], true);
@@ -257,7 +257,7 @@ async fn stdio_ipc_approval_progress_rollback_rules_and_kill_switch() {
         denied["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
-            .contains("Valida primero")
+            .contains("Validate first")
     );
     assert!(audit(&broker, Status::Denied).is_some());
 
@@ -335,7 +335,7 @@ async fn stdio_ipc_approval_progress_rollback_rules_and_kill_switch() {
     broker.configure(on_demand);
     stdio.write(13, &target, false).await;
     let connect = queued(&broker).await;
-    assert!(connect.preview.operation.starts_with("Conectar por SSH"));
+    assert!(connect.preview.operation.starts_with("Connect via SSH"));
     assert!(live.lock().unwrap().sessions.is_empty());
     broker.answer(connect.id, Answer::Once);
     let write = queued(&broker).await;
@@ -365,7 +365,7 @@ async fn stdio_ipc_approval_progress_rollback_rules_and_kill_switch() {
             .state()
             .history
             .iter()
-            .any(|row| row.operation == "Cortar agentes")
+            .any(|row| row.operation == "Disconnect Agents")
     );
     assert!(
         path.exists(),

@@ -73,7 +73,7 @@ pub(super) fn read(path: &Path) -> io::Result<ReadResult> {
     if !metadata.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "Se esperaba un archivo regular.",
+            "Expected a regular file.",
         ));
     }
     let stamp = Stamp::new(metadata)?;

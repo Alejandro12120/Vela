@@ -306,15 +306,15 @@ fn profile_decision(profile: &PermissionProfile, action: &McpAction) -> (Decisio
             base,
             action.operation_name().to_owned(),
             match base {
-                Decision::Allow => "El perfil permite esta operación.".to_owned(),
-                Decision::Ask => "Esta operación requiere aprobación.".to_owned(),
-                Decision::Deny => "El perfil deniega esta operación.".to_owned(),
+                Decision::Allow => "The profile allows this operation.".to_owned(),
+                Decision::Ask => "This operation requires approval.".to_owned(),
+                Decision::Deny => "The profile denies this operation.".to_owned(),
             },
         ),
         None => (
             Decision::Deny,
             "unsupported_action".to_owned(),
-            "Esta acción no está disponible en v1.".to_owned(),
+            "This version doesn’t support the action.".to_owned(),
         ),
     }
 }
@@ -472,7 +472,7 @@ impl PolicyEngine {
             return PolicyDecision::new(
                 Decision::Deny,
                 "mcp_disabled",
-                "El sistema MCP está desactivado.",
+                "The local MCP server is off.",
             );
         }
 
@@ -487,20 +487,20 @@ impl PolicyEngine {
                 return PolicyDecision::new(
                     Decision::Deny,
                     "ui_context_disabled",
-                    "El contexto de la interfaz no está compartido.",
+                    "Vela isn’t sharing the active folder.",
                 );
             }
             if policy.availability == ServerAvailability::Disabled {
                 return PolicyDecision::new(
                     Decision::Deny,
                     "server_disabled",
-                    "Este servidor no está disponible para el agente.",
+                    "The server is unavailable to this agent.",
                 );
             }
             return PolicyDecision::new(
                 Decision::Allow,
                 "ui_context_allowed",
-                "El contexto de la interfaz está disponible.",
+                "The active folder is available to agents.",
             );
         }
 
@@ -508,7 +508,7 @@ impl PolicyEngine {
             let mut decision = PolicyDecision::new(
                 Decision::Deny,
                 "edits_conflict",
-                "Hay ediciones abiertas sin sincronizar.",
+                "Some edits haven’t been uploaded.",
             );
             decision.warnings.push(PolicyWarning::EditsConflict);
             return decision;
@@ -524,7 +524,7 @@ impl PolicyEngine {
             return PolicyDecision::new(
                 Decision::Deny,
                 "server_disabled",
-                "Este servidor no está disponible para el agente.",
+                "The server is unavailable to this agent.",
             );
         }
         if has_server
@@ -535,7 +535,7 @@ impl PolicyEngine {
             return PolicyDecision::new(
                 Decision::Deny,
                 "server_disconnected",
-                "El servidor no está conectado.",
+                "The server isn’t connected.",
             );
         }
         let availability_ask = has_server
@@ -559,7 +559,7 @@ impl PolicyEngine {
                 return PolicyDecision::new(
                     Decision::Deny,
                     "unknown_profile",
-                    format!("El perfil '{profile_id}' no existe."),
+                    format!("The profile “{profile_id}” doesn’t exist."),
                 );
             }
         };
@@ -567,11 +567,11 @@ impl PolicyEngine {
         match action {
             McpAction::ListServers | McpAction::DescribePermissions { .. } => {
                 matched_rule = "info_allowed".to_owned();
-                reason = "La información se puede compartir con el agente.".to_owned();
+                reason = "The agent can access this information.".to_owned();
             }
             McpAction::ConnectOnDemand { .. } => {
                 matched_rule = "connect_on_demand".to_owned();
-                reason = "La conexión bajo demanda está permitida.".to_owned();
+                reason = "The agent can open an on-demand connection.".to_owned();
             }
             McpAction::ExecCommand { command, .. } => {
                 let mode = policy.exec_mode.unwrap_or(profile.exec_mode);
@@ -610,7 +610,7 @@ impl PolicyEngine {
         if availability_ask && decision == Decision::Allow {
             decision = Decision::Ask;
             matched_rule = "on_demand_ask".to_owned();
-            reason = "El servidor se conectará bajo demanda tras aprobación.".to_owned();
+            reason = "Vela will connect to the server after approval.".to_owned();
         }
 
         if decision != Decision::Deny {
@@ -637,7 +637,7 @@ impl PolicyEngine {
                     PathAccess::Denied { matched_rule: rule } => {
                         decision = Decision::Deny;
                         matched_rule = rule;
-                        reason = "Una de las rutas está denegada por la denylist.".to_owned();
+                        reason = "The policy blocks one of the paths.".to_owned();
                         break;
                     }
                     PathAccess::OutsideScope { reason: why } => {
@@ -656,7 +656,7 @@ impl PolicyEngine {
                             if decision == Decision::Allow {
                                 decision = Decision::Ask;
                                 matched_rule = "out_of_scope_path".to_owned();
-                                reason = "La ruta está fuera del ámbito permitido.".to_owned();
+                                reason = "The path is outside the allowed folders.".to_owned();
                             }
                         }
                     }
@@ -687,7 +687,7 @@ impl PolicyEngine {
             if granted {
                 decision = Decision::Allow;
                 matched_rule = "jit_scoped_allow".to_owned();
-                reason = "Una concesión efímera permite esta operación.".to_owned();
+                reason = "Temporary access allows this operation.".to_owned();
             }
         }
 
@@ -721,7 +721,7 @@ impl PolicyEngine {
             if policy.scoped_rules.contains(&rule) {
                 result.outcome = Decision::Allow;
                 result.matched_rule = "saved_scoped_allow".to_owned();
-                result.reason = "Una regla guardada permite esta operación.".to_owned();
+                result.reason = "A saved rule allows this operation.".to_owned();
             } else if self.jit.has_scoped_allow(
                 &preview.server_id,
                 &rule.operation,
@@ -730,7 +730,7 @@ impl PolicyEngine {
             ) {
                 result.outcome = Decision::Allow;
                 result.matched_rule = "jit_scoped_allow".to_owned();
-                result.reason = "Una concesión efímera permite esta operación.".to_owned();
+                result.reason = "Temporary access allows this operation.".to_owned();
             }
         }
         if result.outcome == Decision::Ask && !ctx.vela_gui_open {
@@ -738,8 +738,7 @@ impl PolicyEngine {
                 HeadlessAskBehavior::Deny => {
                     result.outcome = Decision::Deny;
                     result.matched_rule = "headless_fail_closed".to_owned();
-                    result.reason =
-                        "Se requiere aprobación pero no hay interfaz disponible.".to_owned();
+                    result.reason = "This operation requires approval in Vela.".to_owned();
                 }
                 HeadlessAskBehavior::OpenVela => {
                     result.requires_launch_vela = true;
@@ -835,7 +834,7 @@ impl PolicyEngine {
                 return PolicyDecision::new(
                     Decision::Deny,
                     "unknown_simulated_input",
-                    "No reconozco esa entrada del simulador.",
+                    "Enter a supported tool and its arguments.",
                 );
             }
         };

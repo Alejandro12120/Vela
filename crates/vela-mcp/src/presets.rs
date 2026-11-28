@@ -172,8 +172,8 @@ pub fn readonly_profile() -> PermissionProfile {
         transfer_download: Decision::Allow,
         ..base(
             "readonly",
-            "Solo lectura",
-            "Explorar y descargar sin modificar el servidor.",
+            "Read-only",
+            "Browse and download. Edits need approval.",
         )
     }
 }
@@ -202,8 +202,8 @@ pub fn diagnostics_profile() -> PermissionProfile {
         ],
         ..base(
             "diagnostics",
-            "Diagnóstico",
-            "Inspeccionar el servidor con comandos seguros de lectura.",
+            "Diagnostics",
+            "Inspect the server with read-only commands.",
         )
     }
 }
@@ -225,8 +225,8 @@ pub fn development_profile() -> PermissionProfile {
         sudo: Decision::Ask,
         ..base(
             "development",
-            "Desarrollo",
-            "Editar ficheros y ejecutar comandos con aprobación.",
+            "Development",
+            "Edit files. Commands require approval.",
         )
     }
 }
@@ -239,8 +239,8 @@ pub fn production_protected_profile() -> PermissionProfile {
         exec_mode: ExecMode::AskAll,
         ..base(
             "production_protected",
-            "Producción protegido",
-            "Lectura libre; cualquier cambio requiere aprobación explícita.",
+            "Production Protected",
+            "Read files. Approve changes and commands.",
         )
     }
 }
@@ -250,7 +250,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn four_builtin_profiles_with_expected_ids() {
+    fn four_builtin_profiles_with_expected_ids_and_labels() {
         let profiles = builtin_profiles();
         assert_eq!(profiles.len(), 4);
         assert_eq!(
@@ -260,6 +260,15 @@ mod tests {
                 "diagnostics",
                 "development",
                 "production_protected"
+            ]
+        );
+        assert_eq!(
+            profiles.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            [
+                "Read-only",
+                "Diagnostics",
+                "Development",
+                "Production Protected"
             ]
         );
         assert!(profiles.iter().all(|profile| profile.builtin));

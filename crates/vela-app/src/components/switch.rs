@@ -51,7 +51,7 @@ pub fn switch_with_state(
                 .bg(thumb_color(checked, theme)),
         )
         .when(on_click.is_none(), |track| {
-            track.opacity(0.55).aria_description("No disponible")
+            track.opacity(0.55).aria_description("Unavailable")
         })
         .when_some(on_click, |track, on_click| {
             track.tab_index(0).cursor_pointer().on_click(on_click)

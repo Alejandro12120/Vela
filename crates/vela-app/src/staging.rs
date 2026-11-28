@@ -43,6 +43,10 @@ impl Directory {
 
 impl Drop for Directory {
     fn drop(&mut self) {
+        // Unlock explicitly so a child forked by another thread cannot hold the lock until execve.
+        unsafe {
+            libc::flock(self._lock.as_raw_fd(), libc::LOCK_UN);
+        }
         self.temp.disable_cleanup(self.keep.get());
     }
 }

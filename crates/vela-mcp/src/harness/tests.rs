@@ -185,7 +185,7 @@ fn preserves_other_servers_order_bytes_permissions_and_mtime() {
         fs::set_permissions(&f.path, fs::Permissions::from_mode(0o644)).unwrap();
         let first = f.install(id, &DEFAULT).unwrap();
         assert_eq!(mode(&f.path), 0o644);
-        let copy = backup(&f.path);
+        let copy = backup(&fs::canonicalize(&f.path).unwrap());
         assert_eq!(first.backup.as_deref(), Some(copy.as_path()));
         assert_eq!(mode(&copy), 0o600);
         assert_eq!(fs::read_to_string(&copy).unwrap(), initial);

@@ -6,6 +6,7 @@ mod element;
 #[cfg(test)]
 pub(crate) use element::benchmark_prepaint;
 pub(crate) mod font_size;
+pub(crate) mod imported;
 mod keys;
 pub(crate) mod kitty;
 mod mouse;
@@ -35,7 +36,7 @@ use alacritty_terminal::{
 
 use self::{
     colors::{Palette, to_rgb},
-    kitty::Kitty,
+    imported::ImportedConfig,
     pty::Process,
 };
 
@@ -200,7 +201,7 @@ struct Terminal {
 }
 
 impl Terminal {
-    fn new(settings: &Kitty, size: GridSize) -> Self {
+    fn new(settings: &ImportedConfig, size: GridSize) -> Self {
         let listener = Listener {
             redraw: Arc::default(),
             io: Arc::new(Mutex::new(PtyReplies {
@@ -232,7 +233,7 @@ impl Terminal {
     fn spawn(
         program: &str,
         args: Vec<OsString>,
-        settings: &Kitty,
+        settings: &ImportedConfig,
         size: GridSize,
     ) -> io::Result<Self> {
         let mut terminal = Self::new(settings, size);
@@ -246,7 +247,7 @@ impl Terminal {
         Ok(terminal)
     }
 
-    fn config(settings: &Kitty) -> Config {
+    fn config(settings: &ImportedConfig) -> Config {
         Config {
             scrolling_history: settings.history,
             default_cursor_style: CursorStyle {
@@ -257,7 +258,7 @@ impl Terminal {
         }
     }
 
-    fn reconfigure(&self, settings: &Kitty) {
+    fn reconfigure(&self, settings: &ImportedConfig) {
         self.grid.lock().set_options(Self::config(settings));
     }
 
@@ -346,7 +347,7 @@ mod tests {
         let mut terminal = Terminal::spawn(
             "/bin/sh",
             vec!["-c".into(), "printf 'hola\\n'; sleep 0.2".into()],
-            &Kitty::default(),
+            &ImportedConfig::default(),
             GridSize::INITIAL,
         )
         .unwrap();
@@ -376,9 +377,9 @@ mod tests {
 
     #[test]
     fn pty_retains_capped_history_after_exit() {
-        let settings = Kitty {
+        let settings = ImportedConfig {
             history: 1000,
-            ..Kitty::default()
+            ..ImportedConfig::default()
         };
         let terminal = Terminal::spawn(
             "/bin/sh",
@@ -408,7 +409,7 @@ mod tests {
                 "-c".into(),
                 "trap '' HUP; printf 'ready\\n'; read line".into(),
             ],
-            &Kitty::default(),
+            &ImportedConfig::default(),
             GridSize::INITIAL,
         )
         .unwrap();

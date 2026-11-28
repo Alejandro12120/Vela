@@ -102,14 +102,15 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let kitty = self
-            .editor_kitty(cx)
-            .map_or_else(Palette::default, |kitty| kitty.palette)
+        let colors = cx
+            .try_global::<ImportedConfig>()
+            .filter(|config| config.has_palette())
+            .map_or_else(Palette::default, |config| config.palette)
             .as_theme();
         let Some(editor) = self.settings_page.editor.as_mut() else {
             return;
         };
-        let fallback = fallback_color(token, &kitty);
+        let fallback = fallback_color(token, &colors);
         let stored = token.get(editor.colors());
         let color = stored.unwrap_or(fallback);
         let hex = color_input(token, &stored.map(hex).unwrap_or_default(), cx);

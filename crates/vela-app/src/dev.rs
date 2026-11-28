@@ -449,11 +449,19 @@ pub fn terminal_input() -> Option<String> {
     })
 }
 
-pub fn kitty_conf() -> Option<PathBuf> {
-    value("VELA_DEV_KITTY_CONF").map(PathBuf::from)
+pub fn terminal_root() -> Option<PathBuf> {
+    value("VELA_DEV_TERMINAL_ROOT").map(PathBuf::from)
 }
 
-/// Initial terminal font size in points, for captures without physical keys.
+pub fn terminal_conf() -> Option<(String, PathBuf)> {
+    if let Some(value) = value("VELA_DEV_TERMINAL_CONF")
+        && let Some((id, path)) = value.split_once(':')
+    {
+        return Some((id.to_owned(), PathBuf::from(path)));
+    }
+    value("VELA_DEV_KITTY_CONF").map(|path| ("kitty".into(), PathBuf::from(path)))
+}
+
 pub fn terminal_font_size() -> Option<f32> {
     value("VELA_DEV_TERMINAL_FONT_SIZE")
         .and_then(|value| value.parse::<f32>().ok())
@@ -507,32 +515,7 @@ pub fn open_default(path: &std::path::Path) -> io::Result<()> {
     }
 }
 
-/// Starts a new Kitty running `ssh` with `args`.
-pub fn open_kitty_ssh(args: &[std::ffi::OsString]) -> io::Result<()> {
-    if launches_suppressed() {
-        return Ok(());
-    }
-    #[cfg(target_os = "macos")]
-    {
-        run(
-            std::process::Command::new("/usr/bin/open")
-                .args(["-na", "kitty", "--args", "/usr/bin/ssh"])
-                .args(args),
-            "Couldn't open Kitty",
-        )
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        run(
-            std::process::Command::new("kitty")
-                .args(["--detach", "/usr/bin/ssh"])
-                .args(args),
-            "Couldn't open Kitty",
-        )
-    }
-}
-
-fn launches_suppressed() -> bool {
+pub fn launches_suppressed() -> bool {
     value("VELA_DEV_EDITOR").as_deref() == Some("none")
 }
 

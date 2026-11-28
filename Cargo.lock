@@ -6107,6 +6107,7 @@ name = "vela-app"
 version = "0.1.4"
 dependencies = [
  "alacritty_terminal",
+ "async-process",
  "gpui-pre",
  "gpui-pre-platform",
  "libc",
@@ -6114,6 +6115,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "tempfile",
+ "toml 1.2.1+spec-1.1.0",
  "unicode-segmentation",
  "vela-core",
 ]

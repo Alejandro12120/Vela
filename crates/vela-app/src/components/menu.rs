@@ -9,7 +9,7 @@ use crate::{
 /// Callers add the id, role, focus handling and click handler.
 pub fn menu_item(
     name: IconName,
-    label: &'static str,
+    label: impl Into<gpui::SharedString>,
     shortcut: &'static str,
     enabled: bool,
     danger: bool,
@@ -36,7 +36,7 @@ pub fn menu_item(
                 .truncate()
                 .text_size(px(13.))
                 .font_weight(FontWeight::MEDIUM)
-                .child(label),
+                .child(label.into()),
         )
         .when(!shortcut.is_empty(), |row| {
             row.child(

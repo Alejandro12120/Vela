@@ -6,82 +6,21 @@ use std::{
 
 use alacritty_terminal::vte::ansi::CursorShape;
 
-use super::colors::Palette;
+use super::imported::{ImportedConfig, OptionAsAlt};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum OptionAsAlt {
-    #[default]
-    No,
-    Left,
-    Right,
-    Both,
-}
-
-#[derive(Clone)]
-pub struct Kitty {
-    pub path: Option<PathBuf>,
-    pub family: String,
-    pub variants: [Option<String>; 3],
-    pub size: f32,
-    pub palette: Palette,
-    pub cursor: CursorShape,
-    pub history: usize,
-    pub option_as_alt: OptionAsAlt,
-    pub copy_on_select: bool,
-}
-
-impl Default for Kitty {
-    fn default() -> Self {
-        // https://github.com/kovidgoyal/kitty/blob/master/kitty/options/definition.py
-        // On macOS, kitty resolves its default “monospace” family to Menlo.
-        // https://github.com/kovidgoyal/kitty/blob/master/kitty/fonts/core_text.py
-        // On Linux the family comes from fontconfig.
-        Self {
-            path: None,
-            family: crate::theme::monospace().into(),
-            variants: Default::default(),
-            size: 11.,
-            palette: Palette::default(),
-            cursor: CursorShape::Block,
-            history: 5000,
-            option_as_alt: OptionAsAlt::No,
-            copy_on_select: false,
-        }
-    }
-}
-
-impl Kitty {
-    pub fn resolve_family(&mut self, names: &[String]) {
-        let fallback = crate::theme::monospace();
-        let key = crate::theme::family_key(&self.family);
-        if key != crate::theme::family_key(fallback)
-            && !names
-                .iter()
-                .any(|name| crate::theme::family_key(name) == key)
-        {
-            crate::dev::log(format!(
-                "Terminal: font {} isn't installed. Using {fallback}.",
-                self.family
-            ));
-            self.family = fallback.into();
-        }
-    }
-
-    pub fn load() -> Self {
-        let path = crate::dev::kitty_conf()
-            .or_else(|| {
-                env::var_os("KITTY_CONFIG_DIRECTORY")
-                    .map(|dir| PathBuf::from(dir).join("kitty.conf"))
-            })
+impl ImportedConfig {
+    pub(super) fn load_kitty() -> Self {
+        let path = env::var_os("KITTY_CONFIG_DIRECTORY")
+            .map(|dir| PathBuf::from(dir).join("kitty.conf"))
             .or_else(|| {
                 env::var_os("XDG_CONFIG_HOME")
                     .map(|dir| PathBuf::from(dir).join("kitty/kitty.conf"))
             })
             .or_else(|| env::home_dir().map(|home| home.join(".config/kitty/kitty.conf")));
-        path.as_deref().map(Self::read).unwrap_or_default()
+        path.as_deref().map(Self::read_kitty).unwrap_or_default()
     }
 
-    fn read(path: &Path) -> Self {
+    pub(super) fn read_kitty(path: &Path) -> Self {
         let mut settings = Self::default();
         if settings.import(path, 0, &mut HashSet::new()) {
             settings.path = Some(path.to_owned());
@@ -232,7 +171,7 @@ mod tests {
             "font_size 13.5\nscrollback_lines 20000\nmacos_option_as_alt left",
         )
         .unwrap();
-        let settings = Kitty::read(&path);
+        let settings = ImportedConfig::read_kitty(&path);
         assert_eq!(settings.size, 13.5);
         assert_eq!(settings.history, 10000);
         assert_eq!(settings.option_as_alt, OptionAsAlt::Left);
@@ -257,7 +196,7 @@ mod tests {
         fs::write(root.join("sub/theme-a.conf"), "color0 #123\nfont_size 20").unwrap();
         fs::write(root.join("sub/theme-b.conf"), "color0 #234\nfont_size 21").unwrap();
 
-        let settings = Kitty::read(&root.join("kitty.conf"));
+        let settings = ImportedConfig::read_kitty(&root.join("kitty.conf"));
         assert_eq!(settings.family, "JetBrains Mono");
         assert_eq!(settings.palette.foreground, 0xaabbcc);
         assert_eq!(settings.palette.background, 0x123456);
@@ -278,7 +217,7 @@ mod tests {
         .unwrap();
         fs::write(root.join("kitty/theme.conf"), "foreground #abc\n").unwrap();
 
-        let mut settings = Kitty::read(&root.join("kitty/kitty.conf"));
+        let mut settings = ImportedConfig::read_kitty(&root.join("kitty/kitty.conf"));
         assert_eq!(settings.family, "Caskaydia Cove Nerd Font Mono");
         settings.resolve_family(&["CaskaydiaCove Nerd Font Mono".to_owned()]);
         assert_eq!(settings.family, "Caskaydia Cove Nerd Font Mono");
@@ -294,16 +233,16 @@ mod tests {
         let path = dir.path().join("kitty.conf");
         for (value, expected) in [("clipboard", true), ("no", false), ("a1", false)] {
             fs::write(&path, format!("copy_on_select {value}\n")).unwrap();
-            assert_eq!(Kitty::read(&path).copy_on_select, expected);
+            assert_eq!(ImportedConfig::read_kitty(&path).copy_on_select, expected);
         }
-        let settings = Kitty::read(&dir.path().join("missing.conf"));
+        let settings = ImportedConfig::read_kitty(&dir.path().join("missing.conf"));
         assert!(!settings.copy_on_select);
     }
 
     #[test]
     fn absent_config_uses_defaults() {
         let dir = tempfile::tempdir().unwrap();
-        let settings = Kitty::read(&dir.path().join("kitty.conf"));
+        let settings = ImportedConfig::read_kitty(&dir.path().join("kitty.conf"));
         assert!(settings.path.is_none());
         assert_eq!(settings.family, crate::theme::monospace());
         assert_eq!(settings.size, 11.);

@@ -15,8 +15,8 @@ pub struct Palette {
     pub ansi: [u32; 16],
 }
 
-pub fn effective_source(source: TerminalColorSource, kitty_found: bool) -> TerminalColorSource {
-    if kitty_found {
+pub fn effective_source(source: TerminalColorSource, config_found: bool) -> TerminalColorSource {
+    if config_found {
         source
     } else {
         TerminalColorSource::Theme
@@ -25,13 +25,13 @@ pub fn effective_source(source: TerminalColorSource, kitty_found: bool) -> Termi
 
 pub fn terminal_palette(
     source: TerminalColorSource,
-    kitty_found: bool,
-    kitty_palette: Palette,
+    config_found: bool,
+    imported_palette: Palette,
     theme_colors: TerminalColors,
 ) -> Palette {
-    match effective_source(source, kitty_found) {
-        TerminalColorSource::Theme => kitty_palette.with_theme(theme_colors),
-        TerminalColorSource::Kitty => kitty_palette,
+    match effective_source(source, config_found) {
+        TerminalColorSource::Theme => imported_palette.with_theme(theme_colors),
+        TerminalColorSource::Imported => imported_palette,
     }
 }
 
@@ -198,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn kitty_palette_requires_a_configuration_file() {
+    fn imported_palette_requires_a_configuration_file() {
         let kitty = Palette::default();
         let theme = TerminalColors {
             background: Some(0x9988_77ff),
@@ -207,7 +207,7 @@ mod tests {
         let merged = kitty.with_theme(theme);
 
         assert_eq!(
-            terminal_palette(TerminalColorSource::Kitty, true, kitty, theme),
+            terminal_palette(TerminalColorSource::Imported, true, kitty, theme),
             kitty
         );
         assert_eq!(
@@ -215,7 +215,7 @@ mod tests {
             merged
         );
         assert_eq!(
-            terminal_palette(TerminalColorSource::Kitty, false, kitty, theme),
+            terminal_palette(TerminalColorSource::Imported, false, kitty, theme),
             merged
         );
         assert_eq!(

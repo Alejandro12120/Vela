@@ -327,18 +327,23 @@ impl Workspace {
         self.update_preview(cx);
     }
 
-    fn import_kitty(&mut self, use_kitty: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let palette = self
-            .editor_kitty(cx)
-            .filter(|kitty| kitty.path.is_some())
-            .map(|kitty| kitty.palette);
+    fn apply_config_colors(
+        &mut self,
+        copy_colors: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let palette = cx
+            .try_global::<ImportedConfig>()
+            .filter(|config| config.has_palette())
+            .map(|config| config.palette);
         let Some(editor) = self.settings_page.editor.as_mut() else {
             return;
         };
-        if use_kitty && palette.is_none() {
+        if copy_colors && palette.is_none() {
             return;
         }
-        editor.colors_mut().terminal = if use_kitty {
+        editor.colors_mut().terminal = if copy_colors {
             palette.unwrap_or_default().as_theme()
         } else {
             Default::default()
@@ -347,12 +352,6 @@ impl Workspace {
         let first_terminal = TOKENS.iter().position(|token| token.terminal()).unwrap();
         Self::sync_inputs(editor, &TOKENS[first_terminal..], window, cx);
         self.update_preview(cx);
-    }
-
-    fn editor_kitty<'a>(&'a self, cx: &'a App) -> Option<&'a crate::terminal::kitty::Kitty> {
-        self.kitty_settings
-            .as_ref()
-            .or_else(|| self.active_terminal_settings(cx))
     }
 
     fn save_theme_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -432,8 +431,10 @@ impl Workspace {
         let name_error = editor.name_error(cx.global::<Appearance>(), cx);
         let valid = name_error.is_none() && !self.settings_page.busy;
         let filter = search_key(editor.filter.read(cx).value().trim());
-        let kitty = self.editor_kitty(cx);
-        let palette = kitty.map_or_else(Palette::default, |kitty| kitty.palette);
+        let config = cx
+            .try_global::<ImportedConfig>()
+            .filter(|config| config.has_palette());
+        let palette = config.map_or_else(Palette::default, |config| config.palette);
         let defaults = palette.with_theme(editor.colors().terminal).as_theme();
         let mut group = "";
         let mut color_list: Vec<AnyElement> = Vec::new();
@@ -457,8 +458,10 @@ impl Workspace {
                 );
                 if token.terminal() {
                     color_list.push(
-                        self.kitty_actions(
-                            kitty.is_some_and(|kitty| kitty.path.is_some()),
+                        self.config_color_actions(
+                            config
+                                .and_then(|config| config.path.as_deref())
+                                .and_then(Path::file_name),
                             theme,
                             cx,
                         )
@@ -783,31 +786,41 @@ impl Workspace {
         )
     }
 
-    fn kitty_actions(&self, found: bool, theme: Theme, cx: &Context<Self>) -> Div {
+    fn config_color_actions(
+        &self,
+        file: Option<&std::ffi::OsStr>,
+        theme: Theme,
+        cx: &Context<Self>,
+    ) -> Div {
+        let found = file.is_some();
+        let label = file.map_or_else(
+            || "Import Configuration Colors".into(),
+            |file| format!("Import from {}", file.to_string_lossy()),
+        );
         div()
             .flex()
             .flex_wrap()
             .gap_1()
             .child(
                 button(
-                    "clear-kitty",
-                    "Use Colors from kitty.conf",
+                    "clear-terminal-colors",
+                    "Clear Terminal Color Overrides",
                     Variant::Secondary,
                     theme,
-                    cx.listener(|this, _, window, cx| this.import_kitty(false, window, cx)),
+                    cx.listener(|this, _, window, cx| this.apply_config_colors(false, window, cx)),
                 )
                 .h(px(24.))
                 .text_size(px(12.)),
             )
             .child(
                 button(
-                    "import-kitty",
-                    "Import from kitty.conf",
+                    "import-terminal-colors",
+                    label,
                     Variant::Secondary,
                     theme,
                     cx.listener(move |this, _, window, cx| {
                         if found {
-                            this.import_kitty(true, window, cx)
+                            this.apply_config_colors(true, window, cx)
                         }
                     }),
                 )
@@ -820,7 +833,7 @@ impl Workspace {
                     div()
                         .text_size(px(12.))
                         .text_color(theme.secondary_text)
-                        .child("kitty.conf not found"),
+                        .child("Imported colors unavailable"),
                 )
             })
     }
@@ -932,7 +945,11 @@ fn color_input(token: Token, value: &str, cx: &mut Context<Workspace>) -> Entity
         TextInput::new(
             value,
             token.label(),
-            if token.terminal() { "kitty" } else { "#rrggbb" },
+            if token.terminal() {
+                "Default"
+            } else {
+                "#rrggbb"
+            },
             false,
             cx,
         )

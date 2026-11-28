@@ -4,6 +4,7 @@ mod components;
 mod context_menu;
 mod dev;
 mod drop_target;
+mod external_terminal;
 mod file_metadata;
 mod file_workspace;
 mod form;

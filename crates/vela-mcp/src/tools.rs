@@ -142,11 +142,11 @@ tools! {
     { reason: approval_reason() };
     FsMkdir(FsMkdirInput) => fs_mkdir async, "Crea un directorio remoto.",
     { server_id: server_id(), path: remote_path() }, { reason: approval_reason() };
-    FsMove(FsMoveInput) => fs_move async, "Mueve o renombra una ruta remota.",
-    { server_id: server_id(), from: string("Ruta remota de origen."), to: string("Ruta remota de destino.") }, { reason: approval_reason() };
-    FsDelete(FsDeleteInput) => fs_delete async, "Elimina un archivo o directorio remoto.",
+    FsMove(FsMoveInput) => fs_move async, "Mueve o renombra un archivo o directorio remoto. El destino debe estar libre y su directorio padre debe existir.",
+    { server_id: server_id(), from: string("Ruta remota absoluta del origen."), to: string("Ruta remota absoluta con el nombre final. Para mover dentro de un directorio existente, incluye el nombre del archivo o directorio de origen.") }, { reason: approval_reason() };
+    FsDelete(FsDeleteInput) => fs_delete async, "Elimina un archivo o directorio vacío de forma predeterminada. Usa recursive: true para borrar un directorio con contenido.",
     { server_id: server_id(), path: remote_path() },
-    { recursive: json!({"type": "boolean", "default": false, "description": "Permite borrar un árbol de directorios."}), reason: approval_reason() };
+    { recursive: json!({"type": "boolean", "default": false, "description": "Con false solo se permite borrar un archivo o directorio vacío. Con true se elimina todo el árbol."}), reason: approval_reason() };
     FsChmod(FsChmodInput) => fs_chmod async, "Cambia los permisos de una ruta remota.",
     { server_id: server_id(), path: remote_path(), mode: file_mode() }, { reason: approval_reason() };
     TransferUpload(TransferUploadInput) => transfer_upload async, "Sube un archivo local a una ruta remota permitida.",

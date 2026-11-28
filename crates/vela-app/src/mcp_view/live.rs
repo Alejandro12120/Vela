@@ -541,7 +541,8 @@ impl Workspace {
         } else if !matches!(
             preview.operation.as_str(),
             "fs_patch" | "fs_write" | "fs_delete"
-        ) {
+        ) || (preview.operation == "fs_delete" && preview.scope_parameter.is_some())
+        {
             "This operation doesn’t create a backup."
         } else if !item.rollback
             || preview

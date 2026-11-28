@@ -71,6 +71,10 @@ pub struct Fixture {
 
 impl Fixture {
     pub fn start() -> Self {
+        Self::start_with_sftp_args("")
+    }
+
+    pub fn start_with_sftp_args(args: &str) -> Self {
         let temp = tempfile::Builder::new()
             .prefix("vela-mcp-sshd-")
             .permissions(fs::Permissions::from_mode(0o700))
@@ -122,7 +126,7 @@ impl Fixture {
             port,
             user,
         };
-        fixture.start_server();
+        fixture.start_server(args);
         fixture
     }
 
@@ -134,7 +138,7 @@ impl Fixture {
         self.root.clone()
     }
 
-    fn start_server(&mut self) {
+    fn start_server(&mut self, args: &str) {
         let cfg = self.path("sshd_config");
         let base = self.root.display();
         fs::write(
@@ -143,7 +147,7 @@ impl Fixture {
                 "ListenAddress 127.0.0.1\nPort {}\nHostKey {base}/host\nPidFile {base}/pid\n\
              AuthorizedKeysFile {base}/authorized\nUsePAM no\nStrictModes no\n\
              PasswordAuthentication no\nKbdInteractiveAuthentication no\nMaxAuthTries 1\n\
-             Subsystem sftp internal-sftp\n",
+             Subsystem sftp internal-sftp {args}\n",
                 self.port,
             ),
         )

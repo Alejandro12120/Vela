@@ -49,6 +49,8 @@ pub enum ExecutorError {
     InvalidPath(String),
     #[error("ruta no encontrada: {0}")]
     NotFound(String),
+    #[error("no existe el directorio padre del destino")]
+    DestinationParentMissing,
     #[error("el archivo es binario: {0}")]
     BinaryFile(String),
     #[error("el archivo supera el límite de lectura para parcheo: {0}")]
@@ -261,6 +263,7 @@ impl<B: McpBackend> Executor<B> {
                 || approved.paths != preview.paths
                 || approved.command != preview.command
                 || approved.unified_diff != preview.unified_diff
+                || approved.scope_parameter != preview.scope_parameter
                 || approved.warnings != preview.warnings
         });
         if changed || (decision.outcome == Decision::Ask && mode == ApprovalMode::Normal) {
@@ -306,11 +309,10 @@ impl<B: McpBackend> Executor<B> {
     ) -> Result<String, ExecutorError> {
         let normalized = normalize_lexical(value)
             .map_err(|err| ExecutorError::InvalidPath(format!("{value}: {err}")))?;
-        if let Ok(path) = session.realpath(PathBuf::from(&normalized)).await {
-            return Ok(path.to_string_lossy().into_owned());
-        }
-        if must_exist {
-            return Err(ExecutorError::NotFound(normalized));
+        match session.realpath(PathBuf::from(&normalized)).await {
+            Ok(path) => return Ok(path.to_string_lossy().into_owned()),
+            Err(error) if !must_exist && error.io_kind() == Some(io::ErrorKind::NotFound) => {}
+            Err(error) => return Err(error.into()),
         }
         let requested = Path::new(&normalized);
         let parent = requested
@@ -319,10 +321,7 @@ impl<B: McpBackend> Executor<B> {
             .unwrap_or(Path::new("/"));
         let parent = normalize_lexical(&parent.to_string_lossy())
             .map_err(|err| ExecutorError::InvalidPath(format!("{err}")))?;
-        let parent = session
-            .realpath(PathBuf::from(&parent))
-            .await
-            .map_err(|_| ExecutorError::NotFound(parent.clone()))?;
+        let parent = session.realpath(PathBuf::from(&parent)).await?;
         let name = requested
             .file_name()
             .ok_or_else(|| ExecutorError::InvalidPath(normalized.clone()))?;
@@ -331,6 +330,30 @@ impl<B: McpBackend> Executor<B> {
             return Err(ExecutorError::InvalidPath(normalized));
         }
         Ok(parent.join(name.as_ref()).to_string_lossy().into_owned())
+    }
+
+    async fn move_destination(session: &Session, value: &str) -> Result<String, ExecutorError> {
+        let normalized = normalize_lexical(value)
+            .map_err(|err| ExecutorError::InvalidPath(format!("{value}: {err}")))?;
+        let requested = Path::new(&normalized);
+        let Some(parent) = requested.parent() else {
+            return Ok(normalized); // The root exists and will be rejected as occupied.
+        };
+        let parent = session
+            .realpath(parent.to_owned())
+            .await
+            .map_err(destination_parent)?;
+        let entry = session
+            .stat(parent.clone())
+            .await
+            .map_err(destination_parent)?;
+        if !entry.is_directory() {
+            return Err(io::Error::from(io::ErrorKind::NotADirectory).into());
+        }
+        // Resolve parent symlinks for policy checks, preserving the exact name
+        // the rename would create. An existing symlink also occupies that name.
+        let name = requested.file_name().expect("normalized non-root path");
+        Ok(parent.join(name).to_string_lossy().into_owned())
     }
 
     /// Ruta local canónica, con el mismo criterio para destinos nuevos.
@@ -878,7 +901,7 @@ impl<B: McpBackend> Executor<B> {
     ) -> Result<ToolOutcome<MoveOutput>, ExecutorError> {
         let session = self.session(&input.server_id)?;
         let from = self.canonical_remote(session, &input.from, true).await?;
-        let to = self.canonical_remote(session, &input.to, false).await?;
+        let to = Self::move_destination(session, &input.to).await?;
         let dirty = self.dirty_for(&input.server_id, &[from.clone(), to.clone()]);
         let action = McpAction::FsMove {
             server_id: input.server_id.clone(),
@@ -894,7 +917,7 @@ impl<B: McpBackend> Executor<B> {
             return Ok(outcome);
         }
         session
-            .rename(PathBuf::from(&from), PathBuf::from(&to))
+            .rename_exclusive(PathBuf::from(&from), PathBuf::from(&to))
             .await?;
         Ok(ToolOutcome::Executed(MoveOutput { from, to }))
     }
@@ -921,34 +944,46 @@ impl<B: McpBackend> Executor<B> {
             std::slice::from_ref(&canonical),
         );
         preview.agent_reason = input.reason.clone();
-        preview.scope_parameter = input.recursive.then(|| "recursivo".to_owned());
+        let path = PathBuf::from(&canonical);
+        let entry = if input.recursive {
+            preview.scope_parameter = Some("recursivo".into());
+            None
+        } else {
+            let entry = session.stat(path.clone()).await?;
+            if entry.kind == vela_core::EntryKind::Directory {
+                preview.scope_parameter = Some("Empty directory only".into());
+            }
+            Some(entry)
+        };
         if let Some(outcome) = self.gate(&action, &ctx, mode, preview)? {
             return Ok(outcome);
         }
-        let path = PathBuf::from(&canonical);
         let mut backup_id = None;
-        if !input.recursive {
-            if let Ok(entry) = session.stat(path.clone()).await
-                && entry.kind == vela_core::EntryKind::File
-            {
-                let limit = self.rollback.config().max_file_bytes;
-                let readable = session.read_bytes_limited(path.clone(), limit).await?;
-                if !readable.1 {
-                    backup_id = self
-                        .rollback
-                        .record_snapshot(
-                            input.server_id.clone(),
-                            canonical.clone(),
-                            readable.0,
-                            entry.mode,
-                            self.backend.now(),
-                        )?
-                        .map(|backup| backup.id);
-                }
+        match entry {
+            None => session.remove_tree(path).await?,
+            Some(entry) if entry.kind == vela_core::EntryKind::Directory => {
+                session.remove_dir(path).await?;
             }
-            session.remove_file(path).await?;
-        } else {
-            session.remove_tree(path).await?;
+            Some(entry) => {
+                if entry.kind == vela_core::EntryKind::File {
+                    let limit = self.rollback.config().max_file_bytes;
+                    let (bytes, truncated) =
+                        session.read_bytes_limited(path.clone(), limit).await?;
+                    if !truncated {
+                        backup_id = self
+                            .rollback
+                            .record_snapshot(
+                                input.server_id.clone(),
+                                canonical.clone(),
+                                bytes,
+                                entry.mode,
+                                self.backend.now(),
+                            )?
+                            .map(|backup| backup.id);
+                    }
+                }
+                session.remove_file(path).await?;
+            }
         }
         Ok(ToolOutcome::Executed(DeleteOutput {
             path: canonical,
@@ -1213,6 +1248,14 @@ async fn previous_mode(session: &Session, path: &str) -> Option<u32> {
         .await
         .ok()
         .and_then(|entry| entry.mode)
+}
+
+fn destination_parent(error: vela_core::Error) -> ExecutorError {
+    if error.io_kind() == Some(io::ErrorKind::NotFound) {
+        ExecutorError::DestinationParentMissing
+    } else {
+        error.into()
+    }
 }
 
 /// Fusiona dos listas de reglas conservando el orden y evitando duplicados.

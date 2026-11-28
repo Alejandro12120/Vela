@@ -175,11 +175,13 @@ impl Source {
                             .spawn(async move { tree::prepare(&path, entries) })
                             .await)
                     }
-                    Err(Error::Sftp(message)) => Err(match message.trim() {
-                        "Permission denied" => "Permission denied".into(),
-                        "No such file" => "Path not found".into(),
-                        _ => message,
-                    }),
+                    Err(error) if error.io_kind() == Some(std::io::ErrorKind::PermissionDenied) => {
+                        Err("Permission denied".into())
+                    }
+                    Err(error) if error.io_kind() == Some(std::io::ErrorKind::NotFound) => {
+                        Err("Path not found".into())
+                    }
+                    Err(Error::Sftp(message)) => Err(message),
                     Err(error) => Err(error.to_string()),
                 }
             }

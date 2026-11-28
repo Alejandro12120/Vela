@@ -2,7 +2,7 @@ use std::{
     ffi::OsString,
     io,
     path::Component,
-    path::Path,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, SystemTime},
@@ -12,14 +12,15 @@ use futures_lite::StreamExt;
 use openssh_sftp_client::{Sftp, SftpOptions, error::SftpErrorKind, metadata::MetaData};
 use tokio::{
     fs,
-    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
+    io::{self as tokio_io, AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt},
+    process::Command,
     task::JoinSet,
     time::timeout,
 };
 
 use crate::{
     Error,
-    ssh::{self, Master, Process},
+    ssh::{self, ConnectionSpec, Master, Process},
 };
 
 const CHUNK_SIZE: usize = 64 * 1024;
@@ -115,7 +116,9 @@ pub(crate) async fn close(sftp: Option<Sftp>, mut process: Process) -> io::Resul
 
 fn listing_error(error: openssh_sftp_client::Error) -> Error {
     match error {
-        openssh_sftp_client::Error::SftpError(_, message) if !message.get().0.is_empty() => {
+        openssh_sftp_client::Error::SftpError(SftpErrorKind::Failure, message)
+            if !message.get().0.is_empty() =>
+        {
             Error::Sftp(message.get().0.to_owned())
         }
         other => other.into(),
@@ -123,7 +126,21 @@ fn listing_error(error: openssh_sftp_client::Error) -> Error {
 }
 
 pub(crate) async fn read_dir(sftp: &Sftp, path: &Path) -> Result<Vec<Entry>, Error> {
-    let dir = sftp.fs().open_dir(path).await.map_err(listing_error)?;
+    let mut fs = sftp.fs();
+    let dir = match fs.open_dir(path).await {
+        Ok(dir) => dir,
+        Err(error) => {
+            if ambiguous_path_error(&error)
+                && fs
+                    .metadata(path)
+                    .await
+                    .is_ok_and(|info| info.file_type().is_some_and(|kind| !kind.is_dir()))
+            {
+                return Err(io::Error::from(io::ErrorKind::NotADirectory).into());
+            }
+            return Err(listing_error(error));
+        }
+    };
     let mut reader = std::pin::pin!(dir.read_dir());
     let mut entries = Vec::new();
     while let Some(item) = reader.next().await {
@@ -139,6 +156,133 @@ pub(crate) async fn read_dir(sftp: &Sftp, path: &Path) -> Result<Vec<Entry>, Err
         }
     }
     Ok(entries)
+}
+
+fn ambiguous_path_error(error: &openssh_sftp_client::Error) -> bool {
+    matches!(
+        error,
+        openssh_sftp_client::Error::SftpError(
+            SftpErrorKind::Failure | SftpErrorKind::NoSuchFile,
+            _,
+        )
+    )
+}
+
+pub(crate) async fn remove_dir(sftp: &Sftp, path: &Path) -> Result<(), Error> {
+    let mut fs = sftp.fs();
+    let Err(error) = fs.remove_dir(path).await else {
+        return Ok(());
+    };
+    // SFTP v3 has no DirectoryNotEmpty status. Check the failed RMDIR's
+    // target without sending any unlink requests.
+    if ambiguous_path_error(&error) {
+        if let Ok(dir) = fs.open_dir(path).await {
+            let mut entries = std::pin::pin!(dir.read_dir());
+            while let Some(Ok(entry)) = entries.next().await {
+                if !matches!(entry.filename().to_str(), Some("." | "..")) {
+                    return Err(io::Error::from(io::ErrorKind::DirectoryNotEmpty).into());
+                }
+            }
+        } else if fs
+            .symlink_metadata(path)
+            .await
+            .is_ok_and(|info| info.file_type().is_some_and(|kind| !kind.is_dir()))
+        {
+            return Err(io::Error::from(io::ErrorKind::NotADirectory).into());
+        }
+    }
+    Err(error.into())
+}
+
+pub(crate) async fn rename_exclusive(
+    sftp: &Sftp,
+    spec: &ConnectionSpec,
+    control_dir: &Path,
+    from: PathBuf,
+    to: PathBuf,
+) -> Result<(), Error> {
+    crate::transfer::ensure_remote_free(sftp, &to).await?;
+    // The library picks the overwriting POSIX extension whenever advertised.
+    // Open a channel that negotiates plain SFTP v3 for this operation only.
+    let result = if sftp.support_posix_rename() {
+        rename_v3(spec, control_dir, &from, &to).await
+    } else {
+        sftp.fs().rename(&from, &to).await.map_err(Error::from)
+    };
+    if matches!(result, Err(Error::Sftp(_)))
+        && matches!(
+            crate::transfer::remote_existing(sftp, &to).await,
+            Ok(Some(_))
+        )
+    {
+        // A competing writer can claim the destination between LSTAT and RENAME.
+        return Err(io::Error::from(io::ErrorKind::AlreadyExists).into());
+    }
+    result
+}
+
+async fn rename_v3(
+    spec: &ConnectionSpec,
+    control_dir: &Path,
+    from: &Path,
+    to: &Path,
+) -> Result<(), Error> {
+    let mut process = Process::spawn(
+        Command::new("/usr/bin/ssh")
+            .arg("-s")
+            .args(spec.exec_command(control_dir, "sftp"))
+            .kill_on_drop(true)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped()),
+    )?;
+    let stdin = process.child.stdin.take().expect("piped stdin");
+    let stdout = process.child.stdout.take().expect("piped stdout");
+    let (reader, mut writer) = tokio_io::simplex(4096);
+    let relay = async {
+        relay_without_extensions(stdout, &mut writer).await?;
+        writer.shutdown().await
+    };
+    let rename = async {
+        let client = Sftp::new(stdin, reader, SftpOptions::default()).await?;
+        let result = client.fs().rename(from, to).await;
+        drop(client);
+        result.map_err(Error::from)
+    };
+    timeout(ssh::CONNECT_TIMEOUT, async {
+        tokio::pin!(rename);
+        tokio::select! {
+            biased;
+            result = &mut rename => result,
+            result = relay => {
+                result?;
+                rename.await
+            }
+        }
+    })
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "SFTP rename timed out"))?
+}
+
+async fn relay_without_extensions(
+    mut server: impl AsyncRead + Unpin,
+    mut client: impl AsyncWrite + Unpin,
+) -> io::Result<()> {
+    const VERSION: u8 = 2;
+    let packet_len = server.read_u32().await? as usize;
+    if !(5..=4096).contains(&packet_len) {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+    let mut version = [0; 5];
+    server.read_exact(&mut version).await?;
+    if version[0] != VERSION {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+    let mut extensions = [0; 4091];
+    server.read_exact(&mut extensions[..packet_len - 5]).await?;
+    client.write_u32(5).await?;
+    client.write_all(&version).await?;
+    tokio_io::copy(&mut server, &mut client).await?;
+    Ok(())
 }
 
 pub(crate) async fn list_dir(sftp: &Sftp, path: &Path) -> Result<Vec<Entry>, Error> {
@@ -192,6 +336,17 @@ pub(crate) async fn stat(sftp: &Sftp, path: &Path) -> Result<Entry, Error> {
     Ok(entry)
 }
 
+pub(crate) async fn mkdir(sftp: &Sftp, path: &Path) -> Result<(), Error> {
+    let mut fs = sftp.fs();
+    let Err(error) = fs.create_dir(path).await else {
+        return Ok(());
+    };
+    if ambiguous_path_error(&error) && fs.symlink_metadata(path).await.is_ok() {
+        return Err(io::Error::from(io::ErrorKind::AlreadyExists).into());
+    }
+    Err(error.into())
+}
+
 pub(crate) async fn create_file(sftp: &Sftp, path: &Path) -> Result<(), Error> {
     match sftp.options().write(true).create_new(true).open(path).await {
         Ok(file) => Ok(file.close().await?),
@@ -221,11 +376,21 @@ pub(crate) async fn chmod(sftp: &Sftp, path: &Path, mode: u32) -> Result<(), Err
 
 /// Lee hasta `max_bytes`, sin cargar el archivo completo en memoria. El segundo
 /// valor indica que quedaban más bytes después del límite.
+async fn is_dir(sftp: &Sftp, path: &Path) -> bool {
+    sftp.fs()
+        .metadata(path)
+        .await
+        .is_ok_and(|info| info.file_type().is_some_and(|kind| kind.is_dir()))
+}
+
 pub(crate) async fn read_bytes_limited(
     sftp: &Sftp,
     path: &Path,
     max_bytes: u64,
 ) -> Result<(Vec<u8>, bool), Error> {
+    if is_dir(sftp, path).await {
+        return Err(io::Error::from(io::ErrorKind::IsADirectory).into());
+    }
     let source = sftp.open(path).await?;
     let mut source = source;
     let mut result = Vec::new();
@@ -252,13 +417,19 @@ pub(crate) async fn read_bytes_limited(
 
 /// Escribe todos los bytes y cierra el handle antes de devolver el control.
 pub(crate) async fn write_bytes(sftp: &Sftp, path: &Path, bytes: Vec<u8>) -> Result<(), Error> {
-    let mut destination = sftp
+    let opened = sftp
         .options()
         .write(true)
         .create(true)
         .truncate(true)
         .open(path)
-        .await?;
+        .await;
+    let mut destination = match opened {
+        Err(error) if ambiguous_path_error(&error) && is_dir(sftp, path).await => {
+            return Err(io::Error::from(io::ErrorKind::IsADirectory).into());
+        }
+        other => other?,
+    };
     let result = destination.write_all(&bytes).await;
     let closed = destination.close().await;
     result?;

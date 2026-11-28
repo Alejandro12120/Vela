@@ -15,9 +15,10 @@ use tempfile::TempDir;
 use tokio::time::timeout;
 use vela_core::Session;
 use vela_mcp::{
-    ApprovalMode, ApprovalPreview, BackupEntry, Executor, ExecutorError, FsListInput, FsReadInput,
-    McpBackend, McpConfig, PolicyWarning, RollbackStore, ServerAvailability, ServerIdentity,
-    ServerMcpPolicy, TextEdit, ToolOutcome, config::Decision, config::ExecMode, restore_snapshot,
+    ApprovalMode, ApprovalPreview, BackupEntry, Executor, ExecutorError, FsDeleteInput,
+    FsListInput, FsMoveInput, FsReadInput, McpBackend, McpConfig, PolicyWarning, RollbackStore,
+    ServerAvailability, ServerIdentity, ServerMcpPolicy, TextEdit, ToolOutcome, config::Decision,
+    config::ExecMode, protocol::ToolResponse, restore_snapshot,
 };
 
 mod common;
@@ -708,6 +709,239 @@ async fn mkdir_move_delete_with_backup_and_chmod_apply_over_sftp() {
     ))
     .await;
     assert!(!dir.exists());
+}
+
+fn assert_file_error(error: ExecutorError, expected: &str) {
+    let response = ToolResponse::from_outcome(Err(error));
+    assert!(response.is_error);
+    assert_eq!(response.content[0].text, expected);
+}
+
+#[tokio::test]
+async fn delete_distinguishes_files_empty_directories_and_trees() {
+    let fixture = Fixture::start();
+    let harness = Harness::new(&fixture, connect(&fixture).await, "development");
+    let executor = harness.executor();
+    let empty = fixture.path("sounds");
+    let full = fixture.path("full");
+    fs::create_dir(&empty).unwrap();
+    fs::create_dir(&full).unwrap();
+    fs::write(full.join(".keep"), b"keep").unwrap();
+    let input = |path: &Path, recursive| FsDeleteInput {
+        server_id: "srv".into(),
+        path: path.to_str().unwrap().into(),
+        recursive,
+        reason: None,
+    };
+
+    let file = fixture.path("file");
+    fs::write(&file, b"file").unwrap();
+    let ToolOutcome::NeedsApproval { preview, .. } =
+        within(executor.fs_delete(input(&file, false), ApprovalMode::Normal)).await
+    else {
+        panic!("file deletion should require approval");
+    };
+    let deleted = within(executor.fs_delete(input(&file, false), ApprovalMode::ApprovedOnce))
+        .await
+        .executed()
+        .unwrap();
+    assert!(deleted.backup_id.is_some());
+    assert!(!file.exists());
+
+    // If the approved file is replaced by a directory, request a fresh review.
+    fs::create_dir(&file).unwrap();
+    let approved = harness.executor().with_approved_preview(*preview);
+    let ToolOutcome::NeedsApproval { preview, .. } =
+        within(approved.fs_delete(input(&file, false), ApprovalMode::ApprovedOnce)).await
+    else {
+        panic!("changed deletion target kind should require a new approval");
+    };
+    assert_eq!(
+        preview.scope_parameter.as_deref(),
+        Some("Empty directory only")
+    );
+    assert!(file.is_dir());
+
+    let deleted = within(executor.fs_delete(input(&empty, false), ApprovalMode::ApprovedOnce))
+        .await
+        .executed()
+        .unwrap();
+    assert!(!empty.exists());
+    assert!(deleted.backup_id.is_none());
+
+    let error = executor
+        .fs_delete(input(&full, false), ApprovalMode::ApprovedOnce)
+        .await
+        .unwrap_err();
+    assert_file_error(error, "Directory is not empty; use recursive: true.");
+    assert_eq!(fs::read(full.join(".keep")).unwrap(), b"keep");
+
+    within(executor.fs_delete(input(&full, true), ApprovalMode::ApprovedOnce))
+        .await
+        .executed()
+        .unwrap();
+    assert!(!full.exists());
+}
+
+#[tokio::test]
+async fn move_uses_an_exact_unoccupied_destination_and_checks_both_paths() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let fixture = Fixture::start();
+    let root = fixture.root();
+    let from = root.join("from");
+    let renamed = root.join("renamed");
+    let dir = root.join("dir");
+    let blocked = root.join("blocked");
+    let alias = root.join("alias");
+    let mut config = config(&root, "development");
+    config.servers.get_mut("srv").unwrap().denied_remote_paths =
+        vec![format!("{}/**", blocked.display())];
+    let harness = Harness::with_config(&fixture, connect(&fixture).await, config);
+    let executor = harness.executor();
+    fs::create_dir(&dir).unwrap();
+    fs::create_dir(&blocked).unwrap();
+    symlink(&blocked, &alias).unwrap();
+    fs::write(&from, b"source").unwrap();
+    let input = |from: &Path, to: &Path| FsMoveInput {
+        server_id: "srv".into(),
+        from: from.to_str().unwrap().into(),
+        to: to.to_str().unwrap().into(),
+        reason: None,
+    };
+    let rename = |args| executor.fs_move(args, ApprovalMode::Normal);
+
+    within(rename(input(&from, &renamed)))
+        .await
+        .executed()
+        .unwrap();
+    assert!(!from.exists());
+    assert_eq!(fs::read(&renamed).unwrap(), b"source");
+
+    for to in [&blocked.join("new"), &alias.join("new")] {
+        assert_denied(within(rename(input(&renamed, to))).await);
+        assert!(!to.exists());
+    }
+    fs::write(blocked.join("source"), b"blocked").unwrap();
+    assert_denied(within(rename(input(&blocked.join("source"), &from))).await);
+    assert!(blocked.join("source").is_file());
+    assert!(!from.exists());
+
+    let occupied = dir.join("occupied");
+    fs::write(&occupied, b"destination").unwrap();
+    let dangling = dir.join("dangling");
+    symlink(root.join("nonexistent"), &dangling).unwrap();
+    for to in [&occupied, &dir, &dangling] {
+        assert_file_error(
+            rename(input(&renamed, to)).await.unwrap_err(),
+            "An item with that name already exists.",
+        );
+    }
+    assert_eq!(fs::read(&renamed).unwrap(), b"source");
+    assert_eq!(fs::read(&occupied).unwrap(), b"destination");
+    assert!(dangling.is_symlink());
+    assert!(!dir.join("renamed").exists());
+
+    assert_file_error(
+        rename(input(&from, &dir.join("new"))).await.unwrap_err(),
+        "The requested item was not found.",
+    );
+    assert_file_error(
+        rename(input(&renamed, &root.join("missing/new")))
+            .await
+            .unwrap_err(),
+        "Destination parent directory not found.",
+    );
+    assert_file_error(
+        rename(input(&renamed, &occupied.join("new")))
+            .await
+            .unwrap_err(),
+        "The path is not a directory.",
+    );
+    assert_file_error(
+        executor
+            .fs_list(
+                FsListInput {
+                    server_id: "srv".into(),
+                    path: occupied.to_str().unwrap().into(),
+                    depth: None,
+                    pattern: None,
+                },
+                ApprovalMode::Normal,
+            )
+            .await
+            .unwrap_err(),
+        "The path is not a directory.",
+    );
+    assert_file_error(
+        executor
+            .fs_read(
+                FsReadInput {
+                    server_id: "srv".into(),
+                    path: dir.to_str().unwrap().into(),
+                    start_line: None,
+                    max_lines: None,
+                },
+                ApprovalMode::Normal,
+            )
+            .await
+            .unwrap_err(),
+        "The path is a directory.",
+    );
+    for relative in ["relative", "~/new"] {
+        for args in [
+            input(&renamed, Path::new(relative)),
+            input(Path::new(relative), &from),
+        ] {
+            assert_file_error(rename(args).await.unwrap_err(), "Invalid path.");
+        }
+    }
+
+    let moved = dir.join("moved");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
+    let forbidden = rename(input(&renamed, &moved)).await;
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_file_error(forbidden.unwrap_err(), "Permission denied.");
+    within(rename(input(&renamed, &moved)))
+        .await
+        .executed()
+        .unwrap();
+    assert!(!renamed.exists());
+    assert_eq!(fs::read(&moved).unwrap(), b"source");
+
+    let relocated = root.join("relocated");
+    let mut args = input(&dir, &relocated);
+    args.from.push('/');
+    args.to.push('/');
+    within(rename(args)).await.executed().unwrap();
+    assert!(!dir.exists());
+    assert_eq!(fs::read(relocated.join("moved")).unwrap(), b"source");
+    assert!(harness.rollback.list(SystemTime::now()).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn move_uses_standard_rename_without_the_posix_extension() {
+    let fixture = Fixture::start_with_sftp_args("-P posix-rename");
+    let harness = Harness::new(&fixture, connect(&fixture).await, "development");
+    let executor = harness.executor();
+    let from = fixture.path("from");
+    let to = fixture.path("to");
+    fs::create_dir(&from).unwrap();
+    fs::write(from.join("file"), b"contents").unwrap();
+    within(executor.fs_move(
+        FsMoveInput {
+            server_id: "srv".into(),
+            from: from.to_str().unwrap().into(),
+            to: to.to_str().unwrap().into(),
+            reason: None,
+        },
+        ApprovalMode::Normal,
+    ))
+    .await
+    .executed()
+    .unwrap();
+    assert!(!from.exists());
+    assert_eq!(fs::read(to.join("file")).unwrap(), b"contents");
 }
 
 // transfer_upload / transfer_download ---------------------------------------

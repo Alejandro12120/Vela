@@ -148,12 +148,14 @@ impl ToolResponse {
             ExecutorError::UnknownServer(_) => "Unknown server.",
             ExecutorError::NoSession(_) => "The server has no active connection.",
             ExecutorError::InvalidPath(_) => "Invalid path.",
-            ExecutorError::NotFound(_) => "The requested item is unavailable.",
+            ExecutorError::NotFound(_) => file_operation_error(Some(io::ErrorKind::NotFound)),
+            ExecutorError::DestinationParentMissing => "Destination parent directory not found.",
             ExecutorError::BinaryFile(_) => "The file is not UTF-8 text.",
             ExecutorError::FileTooLarge(_) => "The file exceeds the size limit.",
             ExecutorError::Patch(_) => "Couldn’t apply the edit to the file.",
             ExecutorError::SnapshotNotFound(_) => "The backup no longer exists.",
-            ExecutorError::Io(_) | ExecutorError::Core(_) => "The file or SSH operation failed.",
+            ExecutorError::Io(error) => file_operation_error(Some(error.kind())),
+            ExecutorError::Core(error) => file_operation_error(error.io_kind()),
         };
         Self::error(message)
     }
@@ -166,6 +168,19 @@ impl ToolResponse {
             }],
             is_error,
         }
+    }
+}
+
+fn file_operation_error(kind: Option<io::ErrorKind>) -> &'static str {
+    match kind {
+        Some(io::ErrorKind::NotFound) => "The requested item was not found.",
+        Some(io::ErrorKind::AlreadyExists) => "An item with that name already exists.",
+        Some(io::ErrorKind::DirectoryNotEmpty) => "Directory is not empty; use recursive: true.",
+        Some(io::ErrorKind::PermissionDenied) => "Permission denied.",
+        Some(io::ErrorKind::NotADirectory) => "The path is not a directory.",
+        Some(io::ErrorKind::IsADirectory) => "The path is a directory.",
+        Some(io::ErrorKind::Unsupported) => "Operation not supported by the server.",
+        _ => "The file or SSH operation failed.",
     }
 }
 
@@ -867,5 +882,37 @@ mod tests {
         ))));
         assert!(result.is_error);
         assert_eq!(result.content[0].text, "The file or SSH operation failed.");
+    }
+
+    #[test]
+    fn execution_errors_report_safe_file_operation_messages() {
+        for (kind, expected) in [
+            (io::ErrorKind::NotFound, "The requested item was not found."),
+            (
+                io::ErrorKind::AlreadyExists,
+                "An item with that name already exists.",
+            ),
+            (
+                io::ErrorKind::DirectoryNotEmpty,
+                "Directory is not empty; use recursive: true.",
+            ),
+            (io::ErrorKind::PermissionDenied, "Permission denied."),
+            (io::ErrorKind::NotADirectory, "The path is not a directory."),
+            (io::ErrorKind::IsADirectory, "The path is a directory."),
+            (
+                io::ErrorKind::Unsupported,
+                "Operation not supported by the server.",
+            ),
+        ] {
+            let source = || io::Error::new(kind, "private server diagnostics");
+            for error in [
+                ExecutorError::Io(source()),
+                ExecutorError::Core(source().into()),
+            ] {
+                let result = ToolResponse::from_outcome(Err(error));
+                assert!(result.is_error);
+                assert_eq!(result.content[0].text, expected);
+            }
+        }
     }
 }

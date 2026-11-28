@@ -344,6 +344,41 @@ async fn stdio_ipc_approval_progress_rollback_rules_and_kill_switch() {
     broker.answer(write.id, Answer::Once);
     assert_eq!(stdio.receive().await["result"]["isError"], false);
 
+    broker.configure(config.clone());
+    let empty = fixture.path("empty");
+    let moved = fixture.path("moved");
+    fs::create_dir(&empty).unwrap();
+    stdio
+        .send(json!({
+            "jsonrpc": "2.0", "id": 14, "method": "tools/call", "params": {
+                "name": "fs_move", "arguments": {"server_id": "srv", "from": empty, "to": moved}
+            }
+        }))
+        .await;
+    let approval = queued(&broker).await;
+    assert_eq!(approval.preview.operation, "fs_move");
+    assert!(empty.is_dir());
+    broker.answer(approval.id, Answer::Once);
+    assert_eq!(stdio.receive().await["result"]["isError"], false);
+    assert!(!empty.exists());
+    assert!(moved.is_dir());
+
+    stdio
+        .send(json!({
+            "jsonrpc": "2.0", "id": 15, "method": "tools/call", "params": {
+                "name": "fs_delete", "arguments": {"server_id": "srv", "path": moved}
+            }
+        }))
+        .await;
+    let approval = queued(&broker).await;
+    assert_eq!(
+        approval.preview.scope_parameter.as_deref(),
+        Some("Empty directory only")
+    );
+    broker.answer(approval.id, Answer::Once);
+    assert_eq!(stdio.receive().await["result"]["isError"], false);
+    assert!(!moved.exists());
+
     broker.configure(config);
     stdio.write(11, &target, false).await;
     queued(&broker).await;

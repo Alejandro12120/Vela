@@ -48,13 +48,12 @@ pub fn approval_text<'a>(preview: &'a ApprovalPreview, server: &str) -> Approval
             .collect(),
         _ => paths.iter().map(ToString::to_string).collect(),
     };
-    let parameter = preview.scope_parameter.as_deref().map(|parameter| {
-        escape_approval_value(if parameter == "recursivo" {
-            "Recursive"
-        } else {
-            parameter
-        })
-    });
+    let parameter = match preview.scope_parameter.as_deref() {
+        Some("recursivo") => Some("Recursive"),
+        None if preview.operation == "fs_delete" => Some("File"),
+        parameter => parameter,
+    }
+    .map(escape_approval_value);
     if let Some(parameter) = &parameter {
         tooltip_lines.push(parameter.to_string());
     }

@@ -528,6 +528,49 @@ async fn headless_uses_isolated_ssh_fails_closed_and_cleans_up_at_eof() {
             .contains("contraseña")
     );
 
+    let empty = env.file("empty");
+    fs::create_dir(&empty).unwrap();
+    let moved = env.file("moved");
+    let policy = config.servers.get_mut("srv").unwrap();
+    policy.profile_id = "development".into();
+    policy.scoped_rules.push(
+        ApprovalPreview {
+            operation: "fs_delete".into(),
+            paths: vec![empty.to_str().unwrap().into()],
+            scope_parameter: Some("Empty directory only".into()),
+            ..Default::default()
+        }
+        .scoped_rule()
+        .unwrap(),
+    );
+    config::save(&env.config_dir, &config).unwrap();
+    let moved_response = stdio
+        .call(
+            8,
+            "fs_move",
+            json!({
+                "server_id": "srv", "from": empty, "to": moved,
+            }),
+        )
+        .await;
+    assert_eq!(moved_response["isError"], false, "{moved_response}");
+    let moved_response = stdio
+        .call(
+            9,
+            "fs_move",
+            json!({
+                "server_id": "srv", "from": moved, "to": empty,
+            }),
+        )
+        .await;
+    assert_eq!(moved_response["isError"], false, "{moved_response}");
+    let deleted = stdio
+        .call(10, "fs_delete", json!({"server_id": "srv", "path": empty}))
+        .await;
+    assert_eq!(deleted["isError"], false, "{deleted}");
+    assert!(!empty.exists());
+    assert!(!moved.exists());
+
     stdio.close().await;
     assert!(!root.exists());
     assert!(gui_session.stat(notes).await.is_ok());

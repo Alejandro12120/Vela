@@ -602,7 +602,7 @@ impl Session {
     }
 
     pub async fn mkdir(&self, path: PathBuf) -> Result<(), Error> {
-        self.run(move |sftp| async move { Ok(sftp.fs().create_dir(path).await?) })
+        self.run(move |sftp| async move { sftp::mkdir(&sftp, &path).await })
             .await
     }
 
@@ -620,8 +620,22 @@ impl Session {
         .await
     }
 
+    /// SFTP v3 RENAME rejects an occupied destination.
+    pub async fn rename_exclusive(&self, from: PathBuf, to: PathBuf) -> Result<(), Error> {
+        let connection = self.terminal.clone();
+        self.run(move |sftp| async move {
+            sftp::rename_exclusive(&sftp, &connection.0, &connection.1, from, to).await
+        })
+        .await
+    }
+
     pub async fn remove_file(&self, path: PathBuf) -> Result<(), Error> {
         self.run(move |sftp| async move { Ok(sftp.fs().remove_file(path).await?) })
+            .await
+    }
+
+    pub async fn remove_dir(&self, path: PathBuf) -> Result<(), Error> {
+        self.run(move |sftp| async move { sftp::remove_dir(&sftp, &path).await })
             .await
     }
 

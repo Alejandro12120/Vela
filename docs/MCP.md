@@ -69,6 +69,13 @@ El runtime solo abre sesiones propias para servidores `headless` que usan autent
 
 Si un servidor IPC responde al inicio, las llamadas se envían por el puente. Con `headless_ask = "open_vela"`, una aprobación pendiente o el acceso a un servidor `on_demand_ask` o `connected_only` pueden iniciar Vela. El runtime espera hasta cinco segundos a que aparezca el IPC. Una vez conectado, cierra sus sesiones SSH propias, reenvía la llamada para una nueva evaluación y mantiene el puente para las siguientes. Cuando MCP está habilitado, la ventana de Vela mantiene un broker IPC y usa sus sesiones SSH abiertas. Puede abrir una sesión bajo demanda tras una aprobación específica de conexión y volver a evaluar la operación con el servidor conectado.
 
+## Mover y eliminar archivos remotos
+
+- `fs_move` mueve o renombra un archivo o directorio. Usa rutas absolutas para `from` y `to`. Una barra final se normaliza. El destino indica el nombre final y su directorio padre debe existir. Para mover `/srv/a.txt` dentro de `/srv/archivo`, indica `/srv/archivo/a.txt`. Cualquier elemento que ya ocupe ese nombre produce un error, incluidos directorios y enlaces simbólicos. La política comprueba el origen y el destino, incluidas sus rutas canónicas. Vela usa el renombrado estándar de SFTP v3. Si el servidor anuncia `posix-rename@openssh.com`, Vela abre un segundo canal SFTP temporal en la misma conexión SSH para usar el renombrado estándar. El servidor debe permitir el movimiento entre ambas rutas. La operación carece de copia de rollback.
+- `fs_delete` con `recursive: false` (el valor predeterminado) elimina un archivo o un directorio vacío. Si el directorio tiene contenido, la llamada falla y conserva todas sus entradas. Usa `recursive: true` para eliminar todo el árbol. Las copias de rollback se aplican a archivos eliminados sin recursión, según los límites configurados. Una carpeta vacía se puede volver a crear con `fs_mkdir`. Su eliminación carece de copia de rollback.
+
+Las herramientas de archivos devuelven mensajes específicos para rutas ausentes, destinos ocupados, directorios con contenido, permisos insuficientes, tipos de ruta incorrectos y operaciones que el servidor no admite. Si el estado de SFTP v3 es ambiguo y Vela no puede distinguir la causa, devuelve un mensaje general. Las respuestas omiten los diagnósticos sin filtrar del servidor.
+
 ## Integración del anfitrión
 
 - `harness` expone `detect_all`, `install`, `uninstall` y `snippet` para integrar el registro en una interfaz. Las operaciones de disco son síncronas y reciben un `HarnessEnv` explícito y un `VelaCommand` canónico. El informe incluye la ruta seleccionada, la acción y, cuando corresponde, la copia o el diff de la simulación.
